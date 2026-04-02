@@ -1,0 +1,155 @@
+# Getting Started: Build a Connector
+
+## Why Build Here?
+
+You could write a one-off integration script. But OpenSync is different:
+
+- **You write once, sync to everything.** Your connector works with Salesforce, NetSuite, HubSpot, any system on the network. No point-to-point integrations.
+- **The engine handles the hard part.** Diffing, conflict resolution, undo, audit logs, retry logic — you don't touch any of it. You just map data.
+- **Webhooks for free.** Users can configure instant sync instead of polling. You just declare your webhook signature.
+- **Circuit breakers and safety.** Your API goes down? The engine gracefully pauses, doesn't spam retries, notifies the user. No manual babysitting.
+- **Field-level granularity.** Different systems can be masters for different fields. Sync email from your CRM but phone from your ERP? Handled.
+- **Full undo.** Any sync can be rolled back. Field, batch, or entire sync cycle. Users get their data back if something goes wrong.
+
+**Real impact**: If you build a Salesforce connector, someone can immediately use it to sync with their custom ERP, their accounting software, *and* their warehouse system — all at the same time, without you writing any bridge code.
+
+## The 15-Minute Version
+
+Here's everything required to build a working connector:
+
+```typescript
+import { OpenSyncConnector, NormalizedRecord, SyncContext } from '@opensync/sdk';
+
+export default {
+  metadata: {
+    name: 'my-system',
+    version: '1.0.0',
+    capabilities: { canDelete: true, canUpdate: true },
+    configSchema: {
+      apiUrl: { type: 'string', required: true, description: 'Your API base URL' },
+    },
+  },
+
+  getStreams() {
+    return [
+      {
+        entity: 'contact',
+        async *fetch(ctx: SyncContext) {
+          const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
+          const contacts = await res.json();
+          yield contacts.map((c: any) => ({
+            id: c.id,
+            data: { name: c.name, email: c.email },
+          }));
+        },
+      },
+    ];
+  },
+
+  async upsert(entity: string, record: NormalizedRecord, ctx: SyncContext) {
+    const isUpdate = Boolean(record.id);
+    const method = isUpdate ? 'PUT' : 'POST';
+    const url = isUpdate 
+      ? `${ctx.config.apiUrl}/${entity}/${record.id}` 
+      : `${ctx.config.apiUrl}/${entity}`;
+
+    const res = await ctx.http(url, {
+      method,
+      body: JSON.stringify(record.data),
+    });
+
+    const stored = await res.json();
+    return {
+      externalId: stored.id,
+      data: stored,
+      status: isUpdate ? 'updated' : 'created',
+    };
+  },
+} satisfies OpenSyncConnector;
+```
+
+That's a real connector. It reads/writes data, integrates with the engine, and can sync to any other system.
+
+## What This Gives You
+
+Out of the box:
+
+✅ **Authentication** — no manual token handling  
+✅ **Logging** — every request, response, error is journaled  
+✅ **Retry logic** — transient failures auto-retry with backoff  
+✅ **Pagination support** — use generators, yield as you go  
+✅ **Webhook support** — declare `handleWebhook()` and it works  
+✅ **State management** — persistent KV store for pagination cursors, webhook IDs, etc.  
+✅ **Error recovery** — circuit breakers, graceful degradation  
+✅ **Undo/rollback** — all syncs are reversible  
+✅ **Multi-system orchestration** — connected to any other system instantly  
+
+You don't implement any of this. It's all in the engine.
+
+## Your First Sync
+
+```bash
+# 1. Create a project
+mkdir my-system-connector
+cd my-system-connector
+npm init -y
+npm install @opensync/sdk
+
+# 2. Create index.ts with the connector code above
+
+# 3. Test it
+npm link
+cd /where/opensync/is/installed
+npm link ../my-system-connector
+
+# 4. Add the connector
+opensync add-connector my-system --config apiUrl=https://api.mysys.com
+
+# 5. Connect it to another system
+opensync create-channel contact \
+  --members my-system salesforce-prod
+
+# 6. Go
+opensync sync
+```
+
+Your data flows. Instantly. No scripts, no glue code, no ongoing maintenance.
+
+## The Real Wins
+
+**Use case 1: Your API changes**  
+You update the field mapping in your connector. Run. Done. No re-syncing required — the engine re-processes existing shadow state with your new logic.
+
+**Use case 2: A user wants to sync to a system you don't support**  
+They build a connector for it. Plug into the same channel. Now your system and theirs sync automatically.
+
+**Use case 3: Something went wrong**  
+`opensync rollback --transaction-id xyz`. All writes to all systems are reversed. Users get their data back. No disaster.
+
+**Use case 4: Scale to 10 systems**  
+Add them one at a time. Each connector is independent. No N² point-to-point integrations. Each new system just joins the channel.
+
+## The Journey
+
+**Day 1**: Write connector (1 hour)  
+**Day 2**: Add webhooks for real-time sync (30 min)  
+**Day 3**: Add more entities and relationships (30 min)  
+**Day 4**: User syncs it to 3 other systems (0 min on your part)
+
+Compare that to:
+
+- Building Zapier-like integrations? Months.
+- Custom sync scripts? Years of maintenance.
+- Point-to-point bridges? Exponential complexity.
+
+With OpenSync, you offload the infrastructure. You focus on mapping your API's schema. The engine handles the hard distributed systems problems.
+
+## Next Steps
+
+1. **[Building Your First Connector](./connectors/guide.md)** — detailed walkthrough with examples
+2. **[Connector Reference](./connectors/reference.md)** — full API documentation
+3. **[Advanced Patterns](./connectors/advanced.md)** — webhooks, error handling, semantic sources, idempotency
+
+---
+
+**Ready?** Start with a new npm project and `npm install @opensync/sdk`. You've got this. 🚀
