@@ -7,6 +7,7 @@ Complete specification for OpenSync — an open-source, developer-friendly, bi-d
 
 ## Components
 - [connector-sdk.md](connector-sdk.md) — Connector interfaces, capabilities, lifecycle, NormalizedRecord, SyncContext
+- [sdk-helpers.md](sdk-helpers.md) — Optional SDK helper APIs for common REST connector patterns (pagination, mapping, state, batching)
 - [sync-engine.md](sync-engine.md) — Pipeline, shadow state, field tracking, diffing, transforms, conflict resolution, dispatch
 - [identity.md](identity.md) — Hub-and-spoke identity map, global IDs, associations, flat vs relational
 - [safety.md](safety.md) — Circuit breakers, echo prevention, idempotency, soft deletes, retry, external change detection

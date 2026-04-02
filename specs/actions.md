@@ -34,6 +34,13 @@ A simplified connector type — push-only, no fetch. For systems that receive da
 ```typescript
 interface ActionConnector {
   metadata: { name: string; version: string; type: 'action' };
+  getActions(ctx: SyncContext): ActionDefinition[];
+}
+
+interface ActionDefinition {
+  name: string;                               // e.g. 'send-email', 'post-message'
+  description?: string;
+  payloadSchema?: Record<string, ConfigField>; // optional input schema for validation/UI prompts
   execute(payload: Record<string, unknown>, ctx: SyncContext): Promise<ActionResult>;
 }
 
@@ -42,6 +49,8 @@ interface ActionResult {
   data?: Record<string, unknown>;
 }
 ```
+
+This allows one connector to implement multiple actions (e.g. Slack: `post-message`, `open-dm`, `create-channel`) instead of creating a separate connector for each operation.
 
 Examples: email sender, SMS gateway, Slack poster, invoice generator.
 
@@ -58,7 +67,8 @@ interface TriggerRule {
   event: string;                              // e.g. 'record.updated'
   entityType: string;                         // e.g. 'deal'
   condition: TriggerCondition;
-  actionConnector: string;                    // action connector name
+  actionConnector: string;                    // action connector name (e.g. 'slack')
+  actionName: string;                         // named action exposed by that connector (e.g. 'post-message')
   actionPayloadTemplate: Record<string, unknown>;  // template with {{field}} references
 }
 
@@ -80,7 +90,8 @@ triggers:
       field: status
       operator: changed_to
       value: won
-    action: send-email
+    actionConnector: email
+    actionName: send-email
     payload:
       to: "{{email}}"
       subject: "Deal won: {{dealName}}"
@@ -93,7 +104,8 @@ triggers:
       field: source
       operator: eq
       value: website
-    action: slack-notify
+    actionConnector: slack
+    actionName: post-message
     payload:
       channel: "#new-leads"
       message: "New lead from website: {{firstName}} {{lastName}} ({{email}})"
@@ -111,7 +123,9 @@ class TriggerEngine {
 Listens on the event bus. When an event matches a rule's event type + entity type + condition, it:
 1. Resolves the payload template (replace `{{field}}` with actual values)
 2. Generates an idempotency key (prevents double-sends on retry)
-3. Calls the action connector's `execute()` method
+3. Resolves `actionName` to an `ActionDefinition` from `actionConnector.getActions(ctx)`
+4. Validates payload against the selected action's `payloadSchema` if provided
+5. Calls the selected action's `execute(payload, ctx)` method
 
 ## Idempotency for Actions
 

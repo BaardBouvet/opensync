@@ -12,7 +12,9 @@ Centralized authentication management. Connectors never handle tokens or secrets
 
 ### 1. OAuth2 (Centralized)
 
-The engine manages the full OAuth2 lifecycle: initial authorization, token storage, automatic refresh.
+Declared in the connector with `metadata.auth = { type: 'oauth2' }`. The engine manages the full OAuth2 lifecycle: initial authorization, token storage, automatic refresh. Required scopes are computed as the union of `auth.scopes`, the scopes of all enabled entities, and the scopes of all enabled actions — see the SDK spec for details.
+
+Auth endpoints are provided by the connector's `getOAuthConfig(ctx)` method, which receives `ctx.config` (including `baseUrl` resolved for the selected environment). This lets connectors derive auth URLs dynamically rather than hardcoding them — useful when the token endpoint is relative to the API base URL.
 
 ```typescript
 class OAuthTokenManager {
@@ -42,17 +44,17 @@ Simple: token stored in `connector_instances.config` (encrypted), injected into 
 For systems with non-standard auth: HMAC signing, session tokens, custom headers, certificate-based auth.
 
 ```typescript
-prepareRequest?(req: Request, ctx: SyncContext): Promise<Request>;
+prepareRequest?(req: Request, ctx: ConnectorContext): Promise<Request>;
 ```
 
-Called before every outbound HTTP request made via `ctx.http`. The connector can:
+Called before every outbound HTTP request made via `ctx.http`. `ctx.http` is available inside `prepareRequest` — requests made through it are logged normally but skip `prepareRequest` itself, so there is no recursion.
 
 **Session tokens**: Login once, store session in `ctx.state`, refresh when expired:
 ```typescript
 async prepareRequest(req, ctx) {
   let session = await ctx.state.get('session_id');
   if (!session) {
-    const loginRes = await fetch(`${ctx.config.baseUrl}/auth`, {
+    const loginRes = await ctx.http(`${ctx.config.baseUrl}/auth`, {
       method: 'POST',
       body: JSON.stringify({ user: ctx.config.user, pass: ctx.config.pass })
     });
@@ -80,16 +82,18 @@ async prepareRequest(req, ctx) {
 ## Auth Priority
 
 When `ctx.http` makes a request:
-1. If connector has `prepareRequest` → call it (bespoke auth)
-2. Else if OAuth is configured for this instance → inject bearer token
-3. Else if API key is in config → inject as header
-4. Else → send without auth
+1. If connector has `prepareRequest` → call it (bespoke auth, skips built-in injection)
+2. Else based on `metadata.auth.type`:
+   - `oauth2` → inject `Authorization: Bearer <access_token>` (refresh if expired)
+   - `api-key` → inject the stored key as `Authorization: Bearer <key>` (or `auth.header` if specified)
+   - `basic` → inject `Authorization: Basic <base64(user:pass)>`
+   - `none` → no auth header injected
 
 ## Environment-Specific Auth
 
-Different environments (test/prod) may have different auth configs. The `connector_instances` table stores per-instance config including auth credentials. The connector's `metadata.environments` maps names to base URLs.
+Different environments (test/prod) may have different base URLs and therefore different auth endpoints. The `connector_instances` table stores per-instance config including auth credentials. The connector's `metadata.environments` maps environment names to base URLs.
 
-When a user configures an instance, they choose the environment and provide the corresponding credentials. The engine resolves the base URL and injects it into `ctx.config.baseUrl`.
+When a user configures an instance, they choose the environment. The engine resolves `baseUrl` into `ctx.config.baseUrl` and passes it to `getOAuthConfig(ctx)`. The connector constructs environment-correct auth endpoints from it — no per-environment URL overrides needed in metadata.
 
 ## Security
 

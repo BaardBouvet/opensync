@@ -5,73 +5,74 @@ The SDK (`@opensync/sdk`) is the only package a connector author needs. It defin
 ## Core Interface
 
 ```typescript
-interface OpenSyncConnector {
+interface Connector {
   metadata: ConnectorMetadata;
-
-  // Reading data — connector defines its own streams (entities)
-  getStreams(ctx: SyncContext): StreamDefinition[];
-
-  // Writing data — must return the object as stored by the target (including generated IDs)
-  upsert(entity: string, record: NormalizedRecord, ctx: SyncContext): Promise<PushResult>;
-  delete?(entity: string, id: string, ctx: SyncContext): Promise<void>;
-
-  // Webhook support
+  getEntities?(ctx: ConnectorContext): EntityDefinition[];  // omit for pure action connectors
+  getActions?(ctx: ConnectorContext): ActionDefinition[]; // omit if no actions
+  getOAuthConfig?(config: Record<string, unknown>): OAuthConfig; // required when metadata.auth.type === 'oauth2'
   lifecycle?: {
-    onEnable(ctx: SyncContext): Promise<void>;   // register webhooks
-    onDisable(ctx: SyncContext): Promise<void>;  // tear down webhooks
+    onEnable(ctx: ConnectorContext): Promise<void>;
+    onDisable(ctx: ConnectorContext): Promise<void>;
   };
-  handleWebhook?(req: Request, ctx: SyncContext): Promise<NormalizedRecord[]>;
-
-  // Auth customization
-  prepareRequest?(req: Request, ctx: SyncContext): Promise<Request>;
+  prepareRequest?(req: Request, ctx: ConnectorContext): Promise<Request>;
+  handleWebhook?(req: Request, ctx: ConnectorContext): Promise<WebhookBatch[]>;
 }
 ```
 
-## Streams
+Every connector implements `Connector` and must provide at least `getEntities` or `getActions` — the engine rejects registration if neither is present. Implement only what applies: a pure action connector (email sender, Slack poster) omits `getEntities`; a read-only source omits `getActions`.
 
-The connector defines what data it can provide via `getStreams()`. Each stream represents one entity type with its own fetch logic, scheduling hints, and dependency ordering.
+Within `getEntities`, each `EntityDefinition` must implement at least one of `fetch`, `insert`, `update`, or `delete` — a bare empty entity is rejected at registration time.
+
+## Entities
+
+The connector defines what data it can provide via `getEntities()`. Each entity represents one object type with its own read/write logic, scheduling hints, and dependency ordering.
 
 ```typescript
-interface StreamDefinition {
-  entity: string;                              // e.g. 'contact', 'company'
-  fetch(ctx: SyncContext, since?: Date): AsyncIterable<NormalizedRecord[]>;
-  capabilities: ConnectorCapabilities;         // per-entity capabilities
-  fieldDescriptions?: Record<string, string>;  // plain-text descriptions of fields (e.g. { "fnavn": "First name", "kto_nr": "Bank account number" })
-  recommendedIntervalSeconds?: number;         // e.g. 300 for contacts, 3600 for invoices
-  dependsOn?: string[];                        // e.g. ['company'] — sync companies before contacts
+interface FetchBatch {
+  records: FetchRecord[];
+  since?: string;  // watermark for this batch; engine stores for next poll
+}
+
+interface EntityDefinition {
+  name: string;                                // e.g. 'contact', 'company'
+  fetch?(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch>;
+  lookup?(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]>;
+  insert?(records: AsyncIterable<InsertRecord>, ctx: ConnectorContext): AsyncIterable<InsertResult>;
+  update?(records: AsyncIterable<UpdateRecord>, ctx: ConnectorContext): AsyncIterable<UpdateResult>;
+  delete?(ids: AsyncIterable<string>, ctx: ConnectorContext): AsyncIterable<DeleteResult>;
+  schema?: Record<string, FieldDescriptor>;    // field metadata (e.g. { "fnavn": { description: "First name" }, "amount": { description: "Value in NOK", type: "number" } })
+  scopes?: { read?: string[]; write?: string[]; always?: string[] }; // OAuth scopes by role; 'always' is requested whenever the entity is enabled
+  dependsOn?: string[];                        // e.g. ['company'] — sync companies before contacts (entity names)
 }
 ```
 
-Field descriptions are declared per stream, not per record — they're the same for every record of a given entity type. They're plain-text, free-form descriptions. No taxonomy or naming convention to follow — just describe what the field contains in whatever language makes sense. This avoids redundant metadata on every record and gives agents a way to understand non-obvious field names.
+`schema` on an entity declares the shape of the records it *produces* — static metadata evaluated at channel setup time. Each entry is a `FieldDescriptor` with optional `description`, `type`, `required`, and `immutable`. Fields marked `required: true` are enforced: the engine produces a synthetic error result for any record missing a required field before it reaches `insert()` or `update()`. Fields marked `immutable: true` are frozen after creation: the engine strips them from `UpdateRecord.data` before calling `update()`, so the connector never sees an attempt to overwrite them. No naming convention to follow — just describe what the field contains in whatever language makes sense.
 
-### Why Connector-Driven Streams
+Uses: agents read `description` to understand non-obvious field names; the engine and tooling use `type` to warn at channel setup if a source field type is incompatible with what the target entity expects.
+
+On `ActionDefinition`, `schema` describes the *input payload* the action expects. `required: true` fields are enforced — the engine rejects `execute()` calls with missing required fields before they reach the connector.
+
+### Why Connector-Driven Entities
 
 The connector knows its own API best:
 
 - **Dependencies**: HubSpot contacts reference companies. The connector declares `dependsOn: ['company']` so the engine syncs companies first — otherwise contact creates fail because the referenced company doesn't exist in the target yet.
-- **Poll frequency**: Fiken invoices rarely change but contacts change often. The connector hints `recommendedIntervalSeconds: 3600` for invoices and `300` for contacts.
 - **Bundled APIs**: Some APIs return multiple entity types in one call. The connector can use a single HTTP request internally and yield records across multiple `fetch()` calls.
-- **Single source of truth**: The streams ARE the entity list — no separate `metadata.entities` that can drift out of sync with the actual implementation.
-
-### Scheduling
-
-The engine uses `recommendedIntervalSeconds` as a default but the user can override per-entity in channel config:
-
-```yaml
-channels:
-  - name: "Full Sync"
-    members:
-      - instance: hubspot-prod
-        scheduling:
-          contact: { interval_seconds: 60 }      # override: poll contacts every minute
-          invoice: { interval_seconds: 7200 }     # override: invoices every 2 hours
-```
+- **Single source of truth**: The entity definitions ARE the source of truth — no separate `metadata.entities` that can drift out of sync with the actual implementation.
 
 ### Watermark Tracking
 
-The engine tracks the `since` watermark per entity per connector instance in the `stream_state` table. After a successful fetch, the engine stores the latest timestamp so the next poll only gets new changes.
+The engine tracks a watermark per entity per connector instance. After a successful fetch run, the engine stores the latest watermark value so the next poll only gets new changes.
 
-The connector receives the watermark via the `since` parameter. If `since` is undefined, it's a full sync.
+The connector receives the watermark via the `since` parameter. The semantics of `since` are entirely up to the connector:
+- Timestamp (ISO 8601 or Unix epoch)
+- Cursor token (from API pagination)
+- Sequence number
+- Any opaque string
+
+If `since` is undefined, it's a full sync. The connector's first return value from `fetch()` will be stored as the watermark for the next poll.
+
+> **Naming note**: `since` was chosen over `cursor` (too database-flavored) and `checkpoint` (accurate but verbose). It reads naturally: "give me everything since this point."
 
 ### Dependency Resolution
 
@@ -83,70 +84,198 @@ The engine resolves `dependsOn` into a topological order before running a sync c
 
 Circular dependencies are detected at config validation time and rejected.
 
-### Example: HubSpot Connector Streams
+### Example: HubSpot Connector Entities
 
 ```typescript
-getStreams(ctx) {
+getEntities(): EntityDefinition[] {
   return [
     {
-      entity: 'company',
-      capabilities: { canDelete: true, canUpdate: true },
-      fieldDescriptions: { name: 'Company name', domain: 'Company website domain', industry: 'Industry category' },
-      recommendedIntervalSeconds: 600,
+      name: 'company',
+      schema: { name: { description: 'Company name' }, domain: { description: 'Company website domain' }, industry: { description: 'Industry category' } },
+      scopes: { read: ['crm.objects.companies.read'], write: ['crm.objects.companies.write'] },
       async *fetch(ctx, since) {
-        // paginated fetch from /crm/v3/objects/companies
+        for await (const page of paginate('/crm/v3/objects/companies', { after: since })) {
+          yield {
+            records: page.results.map(c => ({ id: c.id, data: c.properties })),
+            since: page.paging?.next?.after,
+          };
+        }
+      },
+      async lookup(ids, ctx) {
+        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/read', {
+          method: 'POST',
+          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
+        });
+        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
+        const result = await res.json();
+        return result.results.map(c => ({ id: c.id, data: c.properties }));
+      },
+      async *insert(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/create', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+        }
+      },
+      async *update(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/update', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Batch update failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+        }
+      },
+      async *delete(ids, ctx) {
+        for await (const batch of chunk(ids, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/archive', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
+          });
+          if (!res.ok) throw new Error(`Batch delete failed: ${res.status}`);
+          yield* batch.map(id => ({ id, status: 'deleted' }));
+        }
       }
     },
     {
-      entity: 'contact',
-      capabilities: { canDelete: true, canUpdate: true },
-      fieldDescriptions: { firstname: 'First name', lastname: 'Last name', email: 'Email address' },
-      recommendedIntervalSeconds: 300,
+      name: 'contact',
+      schema: { firstname: { description: 'First name' }, lastname: { description: 'Last name' }, email: { description: 'Email address' } },
+      scopes: { read: ['crm.objects.contacts.read'], write: ['crm.objects.contacts.write'] },
       dependsOn: ['company'],
       async *fetch(ctx, since) {
-        // paginated fetch from /crm/v3/objects/contacts
+        for await (const page of paginate('/crm/v3/objects/contacts', { after: since })) {
+          yield {
+            records: page.results.map(c => ({ id: c.id, data: c.properties })),
+            since: page.paging?.next?.after,
+          };
+        }
+      },
+      async lookup(ids, ctx) {
+        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/read', {
+          method: 'POST',
+          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
+        });
+        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
+        const result = await res.json();
+        return result.results.map(c => ({ id: c.id, data: c.properties }));
+      },
+      async *insert(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/create', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+        }
+      },
+      async *update(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/update', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+        }
+      },
+      async *delete(ids, ctx) {
+        for await (const batch of chunk(ids, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/archive', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
+          });
+          if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+          yield* batch.map(id => ({ id, status: 'deleted' }));
+        }
       }
     },
     {
-      entity: 'deal',
-      capabilities: { canDelete: false, canUpdate: true, immutableFields: ['dealId'] },
-      fieldDescriptions: { dealname: 'Deal name', amount: 'Deal value in NOK', dealstage: 'Current pipeline stage' },
-      recommendedIntervalSeconds: 300,
+      name: 'deal',
+      schema: { dealId: { description: 'Deal ID', immutable: true }, dealname: { description: 'Deal name' }, amount: { description: 'Deal value in NOK', type: 'number' }, dealstage: { description: 'Current pipeline stage' } },
+      scopes: { read: ['crm.objects.deals.read'], write: ['crm.objects.deals.write'] },
       dependsOn: ['contact', 'company'],
       async *fetch(ctx, since) {
-        // paginated fetch from /crm/v3/objects/deals
+        for await (const page of paginate('/crm/v3/objects/deals', { after: since })) {
+          yield {
+            records: page.results.map(d => ({ id: d.id, data: d.properties })),
+            since: page.paging?.next?.after,
+          };
+        }
+      },
+      async lookup(ids, ctx) {
+        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/read', {
+          method: 'POST',
+          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
+        });
+        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
+        const result = await res.json();
+        return result.results.map(d => ({ id: d.id, data: d.properties }));
+      },
+      async *insert(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/create', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+        }
+      },
+      async *update(records, ctx) {
+        for await (const batch of chunk(records, 100)) {
+          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/update', {
+            method: 'POST',
+            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
+          });
+          if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+          const result = await res.json();
+          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+        }
       }
+      // no delete() — deals cannot be archived via the HubSpot API
     }
   ];
 }
 ```
 
-### Design Alternative: Engine-Driven Entity Fetch
+### Design Alternative: Engine-Driven Entity Dispatch
 
 > **Note**: This is the alternative design we considered. Documented here for future reference.
 >
-> Instead of `getStreams()`, the connector would declare entities in metadata and the engine would call `fetch(entity, ctx, since)` for each:
+> Instead of `getEntities()`, the connector would declare entities in metadata and the engine would call `fetch/upsert/delete` by `entity` on top-level methods:
 >
 > ```typescript
 > interface OpenSyncConnector {
 >   metadata: { entities: string[]; /* ... */ };
->   fetch(entity: string, ctx: SyncContext, since?: Date): AsyncIterable<NormalizedRecord[]>;
+>   fetch(entity: string, ctx: SyncContext, since?: Date): AsyncIterable<FetchRecord[]>;
+>   upsert(entity: string, record: FetchRecord, ctx: SyncContext): Promise<PushResult>;
+>   delete?(entity: string, id: string, ctx: SyncContext): Promise<void>;
 > }
 > ```
 >
-> Simpler interface, less boilerplate for basic connectors. But the engine has to guess dependencies and poll intervals, and the connector can't express that two entities come from the same API call.
+> Simpler interface, less boilerplate for basic connectors. But the engine has to guess dependencies and poll intervals, and connector behavior for each entity gets split between metadata and top-level dispatch logic.
 >
-> Could be revisited if `getStreams()` proves too verbose for simple connectors.
+> Could be revisited if `getEntities()` proves too verbose for simple connectors.
 
 ## Metadata
 
 ```typescript
 interface ConnectorMetadata {
-  name: string;                              // e.g. 'hubspot', 'fiken'
-  version: string;                           // semver
-  capabilities: ConnectorCapabilities;       // default capabilities (can be overridden per stream)
-  configSchema: Record<string, ConfigField>; // declares what config the connector needs
-  environments?: Record<string, string>;     // e.g. { production: 'https://api.fiken.no/v2', test: 'https://api.fiken.no/sandbox' }
+  name: string;                               // e.g. 'hubspot', 'fiken'
+  version: string;                            // semver
+  auth: AuthConfig;                           // how this connector authenticates
+  configSchema?: Record<string, ConfigField>; // non-auth config only (e.g. portalId, baseUrl)
+  environments?: Record<string, string>;      // environment name → base URL (e.g. { production: 'https://api.fiken.no/v2', test: 'https://api.fiken.no/sandbox' })
 }
 
 interface ConfigField {
@@ -157,28 +286,52 @@ interface ConfigField {
   default?: unknown;
 }
 
-interface ConnectorCapabilities {
-  canDelete: boolean;         // can the engine request deletion?
-  canUpdate: boolean;         // can existing records be modified?
-  supportsBulk?: boolean;     // does the API support batch operations?
-  immutableFields?: string[]; // fields that can't be changed after creation (e.g. invoice_number)
+type AuthConfig =
+  | { type: 'oauth2'; scopes?: string[] }   // auth URLs provided dynamically by getOAuthConfig()
+  | { type: 'api-key'; header?: string }    // defaults to 'Authorization: Bearer <key>'
+  | { type: 'basic' }                       // username + password
+  | { type: 'none' };                       // public APIs; use prepareRequest for bespoke auth
+
+interface OAuthConfig {
+  authorizationUrl: string;
+  tokenUrl: string;
 }
+
+// Field metadata for entity fields and action payloads.
+// FieldType is a JSON Schema subset — scalars as string literals, object and array compose recursively:
+//   'string' | 'number' | 'boolean' | 'null'
+//   { type: 'object'; properties?: Record<string, FieldType> }
+//   { type: 'array'; items?: FieldType }
+//   { type: 'array', items: { type: 'object', properties: { sku: 'string', qty: 'number' } } }
+type FieldType =
+  | 'string' | 'number' | 'boolean' | 'null'
+  | { type: 'object'; properties?: Record<string, FieldType> }
+  | { type: 'array'; items?: FieldType };
+
+interface FieldDescriptor {
+  description?: string;
+  type?: FieldType;
+  required?: boolean;   // field must be present; engine enforces before insert()/update() and execute()
+  immutable?: boolean;  // field cannot be changed after creation; engine rejects updates that include it
+}
+
+// EntityCapabilities removed — insert/update/delete presence on EntityDefinition is the capability declaration.
 ```
 
 ### Config Schema
 
-The `configSchema` declares what configuration a connector instance needs. This serves three purposes:
+`configSchema` declares non-auth configuration a connector instance needs — things the user must supply beyond what the declared auth type handles (e.g. a `portalId`, a `baseUrl`, a database DSN). Auth credentials (`clientId`, `clientSecret`, API keys, passwords) are never declared here.
+
+This serves three purposes:
 
 1. **CLI prompting**: `opensync add-connector hubspot` reads the schema and prompts for each field interactively.
 2. **Validation**: The engine validates provided config against the schema before creating an instance. Missing required fields or wrong types fail fast.
-3. **Agent discovery**: An agent can read the schema to know what credentials/settings are needed without reading documentation.
+3. **Agent discovery**: An agent can read the schema to know what settings are needed without reading documentation.
 
-Example:
+Example (HubSpot — OAuth connector, only non-auth config):
 ```typescript
 configSchema: {
-  clientId:     { type: 'string', description: 'OAuth Client ID', required: true, secret: false },
-  clientSecret: { type: 'string', description: 'OAuth Client Secret', required: true, secret: true },
-  portalId:     { type: 'string', description: 'HubSpot Portal ID', required: true, secret: false },
+  portalId: { type: 'string', description: 'HubSpot Portal ID', required: true },
 }
 ```
 
@@ -187,66 +340,166 @@ Fields marked `secret: true` are:
 - Never shown in `opensync status` or `opensync inspect` output
 - Stored encrypted in `connector_instances.config` (at-rest encryption)
 
-Capabilities at metadata level are defaults. Each `StreamDefinition` can override with its own capabilities (e.g. contacts are deletable but invoices aren't).
+Write capabilities are expressed by which methods the entity implements: presence of `insert`, `update`, and `delete` is self-declaring. The engine checks at channel setup time which operations are available and shows pre-flight warnings (e.g. "this system has no `update` — changes will be insert-only"). Capability-aware rollback uses the same information.
 
-Capabilities drive pre-flight warnings ("this system can't delete — inserts are permanent") and capability-aware rollback.
+### Auth Declaration
 
-## NormalizedRecord
+`metadata.auth` tells the engine how to authenticate `ctx.http` requests. Auth credentials are never stored in `configSchema` — the engine manages them separately.
+
+For `oauth2`, the engine runs the full authorization code flow, stores tokens, and refreshes them automatically. The connector implements `getOAuthConfig(ctx)` to provide the authorization and token endpoints — the connector receives `ctx.config.baseUrl` already resolved for the selected environment, so auth URLs can be derived dynamically:
 
 ```typescript
-interface NormalizedRecord {
-  id: string;                                // external ID in the source system
-  data: Record<string, unknown>;             // raw JSON blob — the connector's truth
-  associations?: Association[];              // references to other objects
+// Fiken — auth URLs are relative to baseUrl, so all environments work automatically
+getOAuthConfig(config) {
+  return {
+    authorizationUrl: `${config.baseUrl}/oauth/authorize`,
+    tokenUrl: `${config.baseUrl}/oauth/token`,
+  };
+}
+
+// HubSpot — fixed auth endpoints regardless of environment
+getOAuthConfig(config) {
+  return {
+    authorizationUrl: 'https://app.hubspot.com/oauth/authorize',
+    tokenUrl: 'https://api.hubspot.com/oauth/v1/token',
+  };
+}
+```
+
+`scopes` in `AuthConfig` is the base set always requested for `oauth2`. Entity scopes are split by role — the engine unions only what the channel actually uses:
+
+```
+requiredScopes = auth.scopes
+  ∪ entity.scopes.always (for each enabled entity, regardless of role)
+  ∪ entity.scopes.read  (for each entity the channel reads from this connector)
+  ∪ entity.scopes.write (for each entity the channel writes to this connector)
+  ∪ action.scopes       (for each enabled action)
+```
+
+A user who only enables `contact` as a source isn't prompted for write permissions. A user who doesn't enable `deal` at all isn't prompted for deal scopes.
+
+For `api-key`, the engine prompts for the key value, stores it encrypted, and injects it as `Authorization: Bearer <key>` (or the `header` value if specified). For `basic`, it prompts for username and password. For `none`, use `configSchema` for connection parameters and implement `prepareRequest` for any custom signing.
+
+## FetchRecord
+
+Records returned by `fetch()` and `lookup()`. Also the record type inside `FetchBatch`.
+
+```typescript
+interface FetchRecord {
+  id: string;                                // this record's ID in the source system (uniqueness scope defined below)
+  data: Record<string, unknown | unknown[]>; // raw JSON blob — values may be single or multi-valued
+  deleted?: boolean;                         // connector's intent to remove this record from the target (see FetchRecord — Deletion below)
+  associations?: Association[];              // pre-extracted reference fields (see Associations)
 }
 
 interface Association {
-  entity: string;       // e.g. 'company'
-  externalId: string;   // ID in the source system
-  role: string;         // e.g. 'belongs_to', 'has_many', 'primary'
+  predicate: string;                         // the field key in data whose value is this reference (e.g. 'companyId', 'worksFor', 'https://schema.org/worksFor')
+  targetEntity: string;                      // target entity name (e.g. 'company') — forms composite key with targetId
+  targetId: string;                          // the referenced ID — usually the value of data[predicate]
+  metadata?: Record<string, unknown>;        // optional edge properties beyond the reference itself (e.g. { since: '2020-01-01' })
 }
 ```
+
+### Deletion
+
+`deleted: true` is the connector's normalized intent to remove a record from the target — not just a flag mirroring the source. It covers:
+
+- **Hard delete**: record disappeared from the source API (detected via a deleted-objects endpoint, diff, or a DELETED webhook event). Often only the ID is available; `data` may be empty.
+- **Soft delete interpreted as removal**: source has `archived: true` or `status: 'inactive'`, and the connector decides this means "remove from target." The connector sets `deleted: true` and may still include the full `data`.
+- **Webhooks**: source pushes a deletion event; connector sets `deleted: true` from the event payload.
+
+The connector decides whether to propagate source soft-deletes as deletions or as field updates. If archived contacts should be kept in the target but flagged, leave `deleted` unset and pass `archived: true` in `data` instead.
 
 ### No Common Data Model
 
 Connectors expose their source system's data as-is. There is no shared `Contact` or `Invoice` type to conform to. The mapping between systems happens in the engine via user-defined transforms.
 
-Field descriptions are optional plain-text labels declared on the `StreamDefinition`, not on individual records. They help agents and UIs understand what fields contain, especially for non-English or abbreviated field names. No structure is enforced — just write what makes sense.
+Field values in `data` can be either single values or arrays. Most relational connectors will keep emitting single values, while graph/semantic connectors can emit multi-valued properties when the source model requires it.
+
+Field metadata is declared via `schema` on the `EntityDefinition`, not on individual records. Each field can carry a `description`, a structured `type` (a JSON Schema subset), and a `required` flag. This helps agents and UIs understand what fields contain — especially for non-English or abbreviated field names — and lets the engine enforce shape constraints before records reach `insert()` or `update()`.
+
+### ID Namespace & Uniqueness
+
+The engine always resolves records as `(entity, id)` — the entity name is the namespace. An ID is only unique within the entity it came from. This means `123` from `contact` and `123` from `company` are distinct records.
 
 ### Associations
 
-Connectors report references between objects. A HubSpot contact might have `associations: [{ entity: 'company', externalId: 'hs_company_456', role: 'primary' }]`.
+Associations are an explicit index of which fields in `data` are references, and to what. For a HubSpot contact with `data: { companyId: 'hs_456', name: 'Alice' }`, the association is just that field made explicit:
 
-The engine's identity map resolves these across systems. If a contact references a company, and that company has been linked to a Fiken customer, the engine knows the relationship.
+```typescript
+associations: [{ predicate: 'companyId', targetEntity: 'company', targetId: 'hs_456' }]
+```
+
+`predicate` is typically the field key in `data` whose value is the reference. `targetId` is that value. `targetEntity` tells the engine which entity to look in — together they form the same `(entity, id)` composite key used everywhere else.
+
+The engine resolves associations using `(targetEntity, targetId)` and does not silently pick a candidate if the target is not found — the edge is left pending until the target record arrives.
+
+For JSON-LD connectors, `predicate` may be a URI (e.g. `https://schema.org/worksFor`), and associations are typically derived by extracting `@id` references from `data`. The two representations are two views of the same thing — `associations` is the pre-extracted, engine-readable form.
 
 For flat systems where contact and company live in one object — the connector just returns one record with all fields. No splitting required. The engine handles many-to-many mapping.
 
-## PushResult
+## Write Records
+
+The engine constructs typed records for each write operation. All fields are engine-owned and read-only from the connector's perspective.
 
 ```typescript
-interface PushResult {
-  externalId: string;                   // the ID in the target system (critical for first-time creates)
-  data: Record<string, unknown>;        // full object as returned by the target API
-  status: 'created' | 'updated';
+interface InsertRecord {
+  data: Record<string, unknown | unknown[]>;
+  associations?: Association[];
+}
+
+interface UpdateRecord {
+  id: string;                                  // ID previously returned by InsertResult.id
+  data: Record<string, unknown | unknown[]>;
+  associations?: Association[];
+}
+
+// delete() receives IDs directly — no record wrapper needed
+```
+
+All fields are engine-owned and read-only from the connector's perspective.
+
+The engine, not the connector, is responsible for maintaining `id`. Connectors must not mutate it.
+
+## Write Results
+
+Each write method yields one result per input record/ID, in the same order (positional correlation).
+
+```typescript
+interface InsertResult {
+  id: string;                    // ID assigned by this (target) system
+  data?: Record<string, unknown>; // full API response; stored for echo prevention — lets the engine suppress its own writes when they come back through fetch()
+  status: 'created' | 'error';
+  error?: string;
+}
+
+interface UpdateResult {
+  id: string;
+  data?: Record<string, unknown>;
+  status: 'updated' | 'not_found' | 'error';
+  error?: string;
+}
+
+interface DeleteResult {
+  id: string;
+  status: 'deleted' | 'not_found' | 'error';
+  error?: string;
 }
 ```
 
-Capturing the full response is essential:
-- Generated IDs are stored in the identity map
-- The response becomes the shadow state for the target system
-- This prevents the next poll from seeing the write as a "new" change (echo prevention)
+`InsertResult.id` is stored in the identity map and fed back as `UpdateRecord.id` and the delete ID on future writes. `InsertResult.data` / `UpdateResult.data` are stored for echo prevention — they let the engine recognise its own writes coming back through `fetch()` and suppress them as no-ops. `not_found` on delete or update is not an error — the record was already gone or never arrived.
 
-## SyncContext
+## ConnectorContext
 
-The engine provides a context object to every connector method. Connectors never handle auth, logging, or state management themselves.
+The engine provides a single context object to all connector methods.
 
 ```typescript
-interface SyncContext {
-  http: TrackedFetch;                    // auto-logged, auto-authed fetch
+interface ConnectorContext {
   config: Record<string, unknown>;       // instance config (baseUrl, foretakId, etc.)
   state: StateStore;                     // per-instance persistent key-value store
   logger: Logger;
-  webhookUrl?: string;                   // URL where the engine receives webhooks for this instance
+  http: TrackedFetch;                    // auto-logged, auto-authed fetch
+  webhookUrl: string;                    // base URL for this instance — append sub-paths or params freely
 }
 ```
 
@@ -263,6 +516,18 @@ Connector code looks like normal fetch:
 const res = await ctx.http('https://api.fiken.no/v2/contacts');
 ```
 
+Use `webhookUrl` as a base when registering webhook callbacks with external systems. The engine routes all inbound requests under this base to `handleWebhook` with the original request intact — path, query string, headers, and body are all preserved. The connector can construct any sub-URL it needs:
+
+```typescript
+// All of these route to handleWebhook:
+`${ctx.webhookUrl}/contacts`           // sub-path
+`${ctx.webhookUrl}/deals`              // different sub-path
+`${ctx.webhookUrl}?type=contact`       // query param
+`${ctx.webhookUrl}/events?stream=deal` // both
+```
+
+Inspect `new URL(req.url).pathname` or `.searchParams` inside `handleWebhook` to route to the right entity.
+
 ### ctx.state — Persistent Key-Value Store
 
 For storing per-instance data like session tokens, pagination cursors, or webhook registration IDs. Backed by the `instance_meta` table in SQLite.
@@ -272,10 +537,28 @@ interface StateStore {
   get<T = unknown>(key: string): Promise<T | undefined>;
   set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<void>;
+  update<T>(key: string, fn: (current: T | undefined) => T | Promise<T>, timeoutMs?: number): Promise<T>;
 }
 ```
 
+Values must be JSON-serializable (no `Date` objects, `undefined`, functions, or class instances). The engine stores state as JSON — anything that doesn't survive `JSON.parse(JSON.stringify(v))` will be corrupted on the next read.
+
 The connector receives its previous state on the next invocation. Example: storing a webhook subscription ID so `onDisable` can deregister it.
+
+`update` is an atomic read-modify-write: concurrent calls for the same key are serialized — each caller waits for the previous `fn` to finish before starting. The lock is held for the entire duration of `fn`, including any async work inside it. Use this for any state that multiple streams might race to modify:
+
+```typescript
+// Two parallel fetch() runs both see an expired token — only one refreshes it.
+const token = await ctx.state.update('sessionToken', async (current) => {
+  if (current && !isExpired(current)) return current;  // already refreshed by the other run
+  const fresh = await fetchNewToken(ctx.config.clientId, ctx.config.clientSecret);
+  return fresh;
+}, 10_000);  // fail after 10 s rather than blocking indefinitely
+```
+
+- If `fn` throws, the state is not updated and the error propagates.
+- If `fn` exceeds `timeoutMs` (default: 30 000 ms), `update` rejects with a `ConnectorError` and the state is not updated.
+- Plain `get` + `set` has a TOCTOU race: both runs read the expired token, both call the auth endpoint, and one write clobbers the other. `update` eliminates that gap.
 
 ### ctx.config — Instance Configuration
 
@@ -294,73 +577,170 @@ interface Logger {
 
 ## Fetch — Reading Data
 
-Each stream's `fetch()` function:
+`fetch` is optional. Omitting it makes the entity a write-only sink — the engine tracks identity and routes inserts, updates, and deletes, but never polls. Useful for targets like data warehouses or event sinks that can receive data but have no meaningful "read current state" operation.
+
+When implemented, `fetch()` yields `FetchBatch` objects:
 
 ```typescript
-fetch(ctx: SyncContext, since?: Date): AsyncIterable<NormalizedRecord[]>;
+fetch?(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch>;
+
+interface FetchBatch {
+  records: FetchRecord[];
+  since?: string;  // watermark for this batch; engine stores for next poll
+}
 ```
 
-- Returns an async iterable of batches (pages). The connector handles pagination internally.
-- If `since` is provided, return only records modified after that time (delta sync).
+**Watermark behavior:**
+- Each yielded batch can include a `since` value — the engine stores the latest one it sees.
+- On the next poll, the engine passes that stored value as the `since` parameter to `fetch()`.
+- If `since` is provided, return only records modified after that watermark.
 - If `since` is undefined, return everything (full sync — used for onboarding and soft delete detection).
-- The engine tracks watermarks (last successful `since` value) per entity per instance in `stream_state`.
+- If interrupted, resumption uses the last stored watermark (no data loss or duplication).
 
-Pagination state (cursors, page tokens) can be stored in `ctx.state` if the connector needs to resume interrupted fetches. Use a key namespaced by entity (e.g. `cursor:contact`) to avoid collisions between streams.
+Do not store pagination cursors in `ctx.state` — cursors are only valid for a single in-progress fetch run. If interrupted, resumption should use the last-committed `since` watermark from `FetchBatch`, not a stale cursor. `ctx.state` is for durable per-instance data that outlives a single fetch run (webhook subscription IDs, session tokens, etc.).
 
-## Upsert — Writing Data
-
-```typescript
-upsert(entity: string, record: NormalizedRecord, ctx: SyncContext): Promise<PushResult>;
-```
-
-- If `record.id` exists in the target system (known via identity map), update it.
-- If `record.id` is unknown, create a new record.
-- Must return `PushResult` with the target system's ID and full stored data.
-- The engine determines create vs update — the connector receives a `NormalizedRecord` and figures out the right API call.
-
-## Delete
+## Lookup — On-Demand Batch Lookup
 
 ```typescript
-delete?(entity: string, id: string, ctx: SyncContext): Promise<void>;
+lookup?(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]>;
 ```
 
-Optional. Only callable if `capabilities.canDelete === true`. The engine checks this before calling.
+Optional method for fetching a set of records by ID on-demand (not streaming). The engine always calls it with a batch — accumulating all IDs it needs before dispatching, so connectors with batch read APIs can serve them in one round trip.
 
-## Auth — prepareRequest Hook
+**Use cases:**
+- **Delete verification**: Confirm records are actually gone before returning undo success
+- **Rollback recovery**: Check if records still exist before attempting to restore them
+- **Reconciliation**: Spot-check a set of records without a full sync
+- **Conflict detection**: Before dispatching writes, the engine calls `lookup` to compare live target state against the source snapshots that drove the writes — field-scoped, so unrelated fields changed by other writers are not treated as conflicts
 
-For bespoke auth (HMAC signing, session tokens, custom headers):
+**Contract:**
+- Return a `FetchRecord[]` for the records that were found; omit records that don't exist
+- Throw an error on API failure (handled by engine retry logic)
+- Must use IDs exactly as stored in the identity map (external IDs in this system)
+
+Connectors whose API only supports single-record lookups implement `lookup` with a loop. Connectors with a batch read endpoint use it directly — they get the efficiency gain automatically.
+
+If not implemented, the engine safely skips verification but logs that capability is missing.
+
+## Writing Data
 
 ```typescript
-prepareRequest?(req: Request, ctx: SyncContext): Promise<Request>;
+insert?(records: AsyncIterable<InsertRecord>, ctx: ConnectorContext): AsyncIterable<InsertResult>;
+update?(records: AsyncIterable<UpdateRecord>, ctx: ConnectorContext): AsyncIterable<UpdateResult>;
+delete?(ids: AsyncIterable<string>, ctx: ConnectorContext): AsyncIterable<DeleteResult>;
 ```
 
-Called before every outbound HTTP request. The connector can:
+All three write methods are optional. The engine only calls a method if the entity implements it — presence is the capability declaration. The engine validates at channel setup that the target entity implements at least the operations the channel requires.
+
+- The engine streams records in; the connector pulls and chunks however it wants.
+- Each method yields one result per input, in the same order — the engine correlates positionally.
+- Records missing fields marked `required: true` in the entity's `schema` are rejected by the engine before reaching `insert()` or `update()` — a synthetic result with `status: 'error'` is yielded on the connector's behalf.
+- The engine dispatches inserts, updates, and deletes in separate calls — no branching needed inside the connector.
+- Idempotent: `not_found` on delete or update is a valid terminal state, not an error.
+
+## HTTP Customization
+
+Connectors can implement optional methods on `Connector` for custom HTTP behavior:
+
+```typescript
+interface WebhookBatch {
+  entity: string;            // matches an EntityDefinition name
+  records: FetchRecord[];
+}
+
+prepareRequest?(req: Request, ctx: PrepareRequestContext): Promise<Request>;
+handleWebhook?(req: Request, ctx: ConnectorContext): Promise<WebhookBatch[]>;
+```
+
+`prepareRequest` is called before every outbound HTTP request. The connector can:
 - Read the request body (via `req.clone()`) for HMAC signing
 - Add custom headers (session tokens, API keys)
 - Modify the URL (append query params)
 
+`ctx.http` is available and will log requests normally — but calls made via `ctx.http` inside `prepareRequest` skip `prepareRequest` itself (no recursion). Use it for any auth-related HTTP such as fetching or refreshing a session token.
+
 Standard OAuth2 is handled by the engine automatically — connectors don't need `prepareRequest` for that.
+
+`handleWebhook` parses incoming webhook payloads and returns records grouped by entity. Returning an array of `WebhookBatch` objects allows one webhook payload to carry multiple entity types. The engine routes each batch to the correct entity by `entity` name.
+
+```typescript
+async handleWebhook(req, ctx) {
+  const body = await req.json();
+
+  // group events by entity type, map to FetchRecord
+  const byEntity = new Map<string, FetchRecord[]>();
+  for (const event of body.events) {
+    const entity = event.objectType;  // e.g. 'contact', 'company'
+    const record = {
+      id: event.objectId,
+      data: event.properties ?? {},
+      deleted: event.changeType === 'DELETED',
+    };
+    byEntity.set(entity, [...(byEntity.get(entity) ?? []), record]);
+  }
+
+  return [...byEntity.entries()].map(([entity, records]) => ({ entity, records }));
+}
+```
+
+Return an empty array to silently acknowledge a webhook without yielding any records (e.g. ping/validation requests).
+
+Connectors that don't need custom auth or webhooks simply omit these methods.
+
+## Actions
+
+Connectors that trigger side effects expose named actions via `getActions()`.
+
+```typescript
+interface ActionDefinition {
+  name: string;                                        // e.g. 'send-email', 'post-message'
+  description?: string;
+  schema?: Record<string, FieldDescriptor>; // optional — required fields validated before execute() is called
+  scopes?: string[];                                   // OAuth scopes required to execute this action
+  execute(payload: Record<string, unknown>, ctx: ConnectorContext): Promise<ActionResult>;
+}
+
+interface ActionResult {
+  status: 'success' | 'failed';
+  data?: Record<string, unknown>;              // response from the external system, if any
+}
+```
+
+Actions get the same `ConnectorContext` as streams — `ctx.http`, `ctx.state`, `ctx.config`, and `ctx.logger` all work identically.
+
+`schema` uses the same `FieldDescriptor` type as entity fields. If provided, the engine validates that all `required: true` fields are present in the payload before calling `execute()`. CLI/UI tooling can also use it to prompt for action inputs without reading documentation.
+
+A connector that only sends data (an email gateway, a Slack poster) implements just `getActions` and omits `getEntities`. A connector that can both read and write (Slack reading messages and posting them) implements both.
 
 ## Database Connectors
 
-For connectors that talk to databases instead of HTTP APIs, the same principles apply. The connector uses `ctx.http` for HTTP or manages its own DB connection (configured via `ctx.config`). All queries should still be logged — either through a `ctx.sql` helper (future) or manual journal entries.
+Database connectors implement `Connector` but don't use `ctx.http`. Instead, they manage their own DB connections configured via `ctx.config`. All queries should still be logged — either through a future SDK helper or manual journal entries.
 
-## Optimistic Locking (ETag Support)
+## Conflict Detection
 
-Some APIs support optimistic locking via `ETag` or `_version` fields. When the engine fetches a record, it stores the version. When it writes back, it sends the version — and the API rejects the write if someone else modified the record in between.
+In a multi-writer environment, the engine is not the only process that can modify records in a target system. A user might edit a contact in HubSpot directly while the engine is about to write a field change to the same record.
 
-This is optional and connector-driven. If the source API returns version metadata, the connector stores it in `NormalizedRecord.data` (e.g. `_etag` or `_version`). The connector's `upsert()` uses it to send conditional writes (`If-Match` header or version field).
+Conflict detection is handled entirely by the engine — connectors do not need to implement any of it. When conflict detection is enabled for a channel, the engine:
 
-The engine doesn't enforce this — it's up to the connector to implement if the API supports it. But it's the strongest defense against race conditions when the API doesn't tell you who made a change.
+1. Calls `lookup` on the target connector with all the IDs involved in the current write batch to get their current live state
+2. Compares the source snapshot (the field values that drove the write decision) against the live target values, for the fields being written
+3. If those fields match — the target still reflects what the source had when the delta was computed; proceeds with the write
+4. If any differ — the target was independently modified; skips the write and reconciles on the next cycle
+
+The check is field-scoped: if the engine manages `email` and `phone`, and another system changed `lifecyclestage` on the same contact, that is not a conflict — only the fields being overwritten matter.
+
+Because `lookup` is called for the whole write batch at once, the engine gets all live state in one (or a few) round trips rather than one API call per record.
+
+This requires `lookup` to be implemented on the target entity. If it is absent, the engine skips conflict detection and writes unconditionally, which is acceptable for append-only or low-conflict environments.
 
 ## Health Checks
 
 Connectors can optionally implement a health check for monitoring:
 
 ```typescript
-interface OpenSyncConnector {
+interface Connector {
   // ... existing methods
-  healthCheck?(ctx: SyncContext): Promise<HealthStatus>;
+  healthCheck?(ctx: ConnectorContext): Promise<HealthStatus>;
 }
 
 interface HealthStatus {
@@ -375,37 +755,50 @@ Called periodically by the engine to verify the connection is alive (valid crede
 ## Error Hierarchy
 
 ```typescript
-class OpenSyncError extends Error { code: string; retryable: boolean }
-class RateLimitError extends OpenSyncError { retryAfterMs?: number }  // 429
-class AuthError extends OpenSyncError { }                              // 401/403
-class ValidationError extends OpenSyncError { }                        // bad data
-class ConnectorError extends OpenSyncError { }                         // generic failure
+class ConnectorError extends Error { code: string; retryable: boolean }  // base
+class RateLimitError extends ConnectorError { retryAfterMs?: number }     // 429
+class AuthError extends ConnectorError { }                                 // 401/403
+class ValidationError extends ConnectorError { }                           // bad data
 ```
 
-Connectors should throw these typed errors. The engine uses them to decide: retry (RateLimitError), pause and refresh token (AuthError), skip record (ValidationError), or trip circuit breaker (too many ConnectorErrors).
+The engine uses error type to decide the response:
 
-## Declarative Connectors (Future)
+| Error | Engine action |
+|---|---|
+| `RateLimitError` | Pause and retry after `retryAfterMs` (or exponential backoff if unset) |
+| `AuthError` | Pause run, attempt token refresh, retry once — then mark instance unhealthy |
+| `ValidationError` | Skip the offending record, log, continue |
+| `ConnectorError` | Retry with backoff; repeated failures mark the instance unhealthy |
 
-> For simple REST APIs, writing a full TypeScript connector may be overkill. A future extension could support YAML-only connector definitions:
->
-> ```yaml
-> name: simple-api
-> auth: bearer
-> resources:
->   contacts:
->     read:
->       path: /v1/contacts
->       params: { updated_since: "{{ since | iso8601 }}" }
->       pagination: { strategy: cursor, cursor_path: "$.meta.next" }
->       normalization:
->         id: "$.id"
->         email: "$.email_address"
->     write:
->       path: "/v1/contacts/{{ id }}"
->       method: PATCH
-> ```
->
-> The engine would interpret this YAML and execute the HTTP calls — no TypeScript needed. However, this is intentionally deferred. TypeScript connectors are more flexible, easier for agents to generate, and cover 100% of use cases. Declarative connectors optimize for the 80% case at the cost of a rigid format that's harder to extend.
+### Where errors apply
+
+**`fetch()`** — throw to abort the entire fetch run for this entity. The engine will retry on the next poll cycle using the last stored watermark for this entity.
+- `RateLimitError` — API responded 429; engine backs off before retrying
+- `AuthError` — credentials invalid or expired
+- `ConnectorError` — unexpected API error, network failure, bad response shape
+
+**`insert()` / `update()` / `delete()`** — throw to abort the write run. Per-record failures should be expressed via the result's `status: 'error'` instead.
+- `RateLimitError` — mid-stream 429; engine backs off and retries the whole operation
+- `AuthError` — credentials invalid or expired
+- `ConnectorError` — unexpected failure
+
+**`lookup()`** — throw on API failure; omit not-found IDs from the returned array.
+- `ConnectorError` — any API error
+
+**`onEnable()` / `onDisable()`** — throw to fail the lifecycle step.
+- `AuthError` — can't authenticate to register/deregister webhooks
+- `ConnectorError` — API call failed
+
+**`handleWebhook()`** — throw to return a 500 to the upstream (which may trigger a retry from the webhook sender). Return an empty array to silently acknowledge without yielding records.
+- `ValidationError` — payload didn't match expected shape; engine returns 400
+- `ConnectorError` — processing failure; engine returns 500
+
+**`execute()`** — throw to fail the action. The engine logs the failure and marks the trigger attempt as failed.
+- `RateLimitError` — external service responded 429; engine backs off and retries
+- `AuthError` — credentials invalid or expired
+- `ConnectorError` — unexpected failure
+
+
 
 ## Example Connectors
 
@@ -414,21 +807,20 @@ Three connectors ship with the project for development and testing:
 ### mock-crm (relational)
 - Entities: `contact` (firstName, lastName, email, phone, companyId), `company` (name, domain, industry)
 - In-memory Map storage with `updatedAt` tracking
-- Capabilities: `canDelete: true, canUpdate: true`
+- Implements: `insert`, `update`, `delete`
 
 ### mock-erp (flat)
 - Entity: `customer` (fullName, emailAddress, phoneNumber, organizationName)
 - Deliberately different field names to exercise transforms
-- Capabilities: `canDelete: false, canUpdate: true`
+- Implements: `insert` only (append-only log)
 
 ### mock-file (hello world)
 The simplest possible connector — reads and writes a JSON array file. Intended as the starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
 - Storage: a `.json` file on disk (path from `ctx.config.filePath`)
 - `fetch()` reads the file, returns all objects (or filters by a `updatedAt` field if `since` is provided)
-- `upsert()` reads the file, inserts or replaces by ID, writes back
-- `delete()` removes the entry and writes back
-- Capabilities: `canDelete: true, canUpdate: true`
+- `insert()` appends, `update()` replaces by ID, `delete()` removes by ID — all write back to the file
+- Implements: `insert`, `update`, `delete`
 
 Example data file:
 ```json
