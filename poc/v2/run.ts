@@ -1,7 +1,7 @@
 /**
- * JSON-Files Sync POC v3 — configurable channels & canonical field mapping
+ * JSON-Files Sync POC v2 — configurable channels & canonical field mapping
  *
- *   bun run poc/v3/run.ts
+ *   bun run poc/v2/run.ts
  *
  * Three connector instances (A, B, C) with different local field names for customers:
  *   A stores { name }          B stores { customerName }      C stores { fullName }
@@ -187,12 +187,12 @@ if (isFreshStart) {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 console.log("=".repeat(60));
-console.log("  OpenSync JSON-Files POC v3 — configurable channels");
+console.log("  OpenSync JSON-Files POC v2 — configurable channels");
 console.log(`  Poll interval: ${POLL_MS}ms  |  Stop with Ctrl+C`);
 console.log("  Connectors:");
-console.log(`    A  poc/v3/data/connector-a/  (field: name)`);
-console.log(`    B  poc/v3/data/connector-b/  (field: customerName — canonical)`);
-console.log(`    C  poc/v3/data/connector-c/  (field: fullName)`);
+console.log(`    A  poc/v2/data/connector-a/  (field: name)`);
+console.log(`    B  poc/v2/data/connector-b/  (field: customerName — canonical)`);
+console.log(`    C  poc/v2/data/connector-c/  (field: fullName)`);
 console.log("=".repeat(60));
 console.log();
 

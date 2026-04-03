@@ -15,6 +15,6 @@ this directory.
 | Plan | Status |
 |------|--------|
 | [idempotency-and-batch-actions](idempotency-and-batch-actions.md) | `backlog` |
-| [poc-v3](poc-v3.md) | `done` |
+| [poc-v2](poc-v2.md) | `done` |
 
 

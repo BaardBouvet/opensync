@@ -238,7 +238,7 @@ poc/
 
 | # | Task |
 |---|------|
-| 1 | Define `RenameMap`, `ChannelMember`, `ChannelConfig`, `EngineConfig` types in `poc/v3/engine.ts`; rename `ConnectedSystem` → `ConnectorInstance` |
+| 1 | Define `RenameMap`, `ChannelMember`, `ChannelConfig`, `EngineConfig` types in `poc/v2/engine.ts`; rename `ConnectedSystem` → `ConnectorInstance` |
 | 2 | Implement `applyRename(data, map)` — pure function, applies a `RenameMap` to a record |
 | 3 | Port `SyncEngine` from v1 to accept `EngineConfig`; derive directed pairs from channel members at startup |
 | 4 | On read: apply source member's `inbound` map → canonical record |
