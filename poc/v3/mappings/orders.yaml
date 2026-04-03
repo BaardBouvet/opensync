@@ -1,0 +1,16 @@
+# Order sync mappings
+#
+# All connectors use the same field names for orders — no renames needed.
+
+mappings:
+  - connector: A
+    channel: orders
+    entity: orders
+
+  - connector: B
+    channel: orders
+    entity: orders
+
+  - connector: C
+    channel: orders
+    entity: orders

@@ -1,0 +1,31 @@
+{
+  "connectors": {
+    "A": {
+      "plugin": "./connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "./poc/v3/data/connector-a/customers.json",
+          "./poc/v3/data/connector-a/orders.json"
+        ]
+      }
+    },
+    "B": {
+      "plugin": "./connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "./poc/v3/data/connector-b/customers.json",
+          "./poc/v3/data/connector-b/orders.json"
+        ]
+      }
+    },
+    "C": {
+      "plugin": "./connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "./poc/v3/data/connector-c/customers.json",
+          "./poc/v3/data/connector-c/orders.json"
+        ]
+      }
+    }
+  }
+}
