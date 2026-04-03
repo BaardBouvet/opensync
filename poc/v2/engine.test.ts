@@ -63,14 +63,16 @@ describe("applyRename", () => {
       .toEqual({ customerName: "Alice" });
   });
 
-  it("leaves unlisted fields under their original name", () => {
+  it("drops unlisted fields (whitelist) when a map is provided", () => {
+    // When a rename map is provided, only mapped fields are included.
+    // Unlisted fields are connector-local and must not leak into canonical form.
     expect(applyRename({ name: "Alice", amount: 99 }, { name: "customerName" }))
-      .toEqual({ customerName: "Alice", amount: 99 });
+      .toEqual({ customerName: "Alice" });
   });
 
-  it("renames multiple fields", () => {
+  it("renames multiple fields and drops unlisted fields", () => {
     expect(applyRename({ a: 1, b: 2, c: 3 }, { a: "x", b: "y" }))
-      .toEqual({ x: 1, y: 2, c: 3 });
+      .toEqual({ x: 1, y: 2 });
   });
 
   it("does not mutate the input", () => {

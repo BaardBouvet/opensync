@@ -87,9 +87,14 @@ export function applyRename(
   map: RenameMap | undefined,
 ): Record<string, unknown> {
   if (!map || Object.keys(map).length === 0) return { ...data };
+  // When a map is provided it acts as a whitelist: only listed fields are
+  // included, renamed to their mapped names. Unmapped fields are connector-local
+  // and must not leak into canonical form or into other connectors.
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(data)) {
-    result[map[key] ?? key] = value;
+  for (const [srcKey, dstKey] of Object.entries(map)) {
+    if (Object.prototype.hasOwnProperty.call(data, srcKey)) {
+      result[dstKey] = data[srcKey];
+    }
   }
   return result;
 }
