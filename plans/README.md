@@ -16,4 +16,4 @@ this directory.
 
 | Plan | Status |
 |------|--------|
-| [Connector Isolation: Scalability and Security](connector-sandbox.md) | backlog |
+| [jsonfiles-sync-poc](jsonfiles-sync-poc.md) | `backlog` |
