@@ -21,24 +21,45 @@ An open-source, developer-friendly, hub-and-spoke bi-directional SaaS sync engin
 |-----------|--------|-----------|
 | Language | TypeScript (strict) | Type safety for connector SDK, agent-friendly |
 | Runtime | Bun (Node.js compatible) | Instant TS execution, fast installs, fast tests |
-| Database | better-sqlite3 + Drizzle ORM | Single file, JSONB support, zero setup |
+| Database | SQLite via adapter (see below) | Single file, zero setup, WAL mode for concurrent reads |
+| ORM | Drizzle ORM | Type-safe queries, works with both SQLite drivers |
 | Validation | Zod | Runtime validation of connector outputs and config |
-| Testing | Vitest | Fast, ESM-native |
+| Testing | bun:test | Fast, built-in, no extra deps |
 | Monorepo | npm workspaces | Simple, supported by both Bun and Node |
 | Logging | pino (structured JSON) | Production-grade, low overhead |
 
+### SQLite Driver Strategy
+
+The engine never imports a SQLite driver directly. It uses a thin adapter interface so the same
+engine code runs in two deployment modes:
+
+| Mode | Driver | How |
+|------|--------|-----|
+| npm package / Node.js | `better-sqlite3` | Standard native binding, works on Node 18+ and Bun |
+| Compiled binary (`bun build --compile`) | `bun:sqlite` | Built into the Bun runtime — zero native files on disk |
+
+At startup, `openDb(path)` detects the environment and returns a Drizzle instance backed by
+whichever driver is available. All engine code types against Drizzle's `BaseSQLiteDatabase` — the
+driver is never visible beyond that one boot function. See `database.md` for the full interface.
+
 ### Runtime: Bun-First, Node-Compatible
 
-We develop with **Bun** for speed — native TypeScript execution (no tsx/tsc needed), ~1s dependency installs, and fast test runs. But all code must also run on **Node.js 18+** without modification.
+We develop with **Bun** for speed — native TypeScript execution (no tsx/tsc needed), ~1s
+dependency installs, and fast test runs. All engine and SDK code must also run on **Node.js 18+**
+without modification, *except* the compiled binary target which is Bun-only by definition.
 
 **Rules to stay compatible:**
-- Use `better-sqlite3`, not `bun:sqlite`
+- No `bun:*` imports in engine or SDK source (the adapter abstracts `bun:sqlite`)
 - Use standard `node:http` or Hono for HTTP servers, not `Bun.serve`
 - Use global `fetch()` (available in both since Node 18)
 - Use `npm` workspaces (Bun supports these natively)
-- No Bun-specific imports (`bun:*` modules)
 
-This means users can choose: `bun install && bun run dev` for speed, or `npm install && npx tsx src/index.ts` if they prefer Node.
+### Distribution Targets
+
+| Target | Install | SQLite driver |
+|--------|---------|---------------|
+| `npm install @opensync/engine` | `npm` / `bun` | `better-sqlite3` |
+| Pre-built binary | download + chmod +x | `bun:sqlite` (embedded) |
 
 ## Monorepo Structure
 

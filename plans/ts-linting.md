@@ -86,7 +86,7 @@ One `eslint.config.js` at the root. Two rule tiers:
 
 ### TypeDoc
 
-Generate an API reference site from the SDK's existing prose comments. No TSDoc tag migration required — TypeDoc renders `/** ... */` descriptions as-is.
+Generate an API reference site from the SDK source comments. TypeDoc renders prose descriptions as-is, but TSDoc tags (`@param`, `@returns`, `@example`) produce richer output — parameter tables, return-value docs, and runnable examples. Since this plan already touches every SDK comment for the fixes below, add the tags in the same pass.
 
 Config at `typedoc.json` in the repo root:
 
@@ -130,21 +130,26 @@ auto-fix pass a developer runs locally.
 
 ### SDK doc fixes (prerequisite)
 
-Fix before enabling `jsdoc/require-description` so the first lint run is clean:
+Do this pass before enabling `jsdoc/require-description` so the first lint run is clean.
+Since every comment is being touched anyway, add TSDoc tags in the same pass to get
+richer TypeDoc output.
 
 1. Rewrite `ValidationError` class comment — drop the stale `status: 'error'` reference;
    replace with the actual `error?: string` field name.
 2. Rewrite `InsertRecord.data` comment — remove the circular parenthetical and replace
    with *"Immutable fields (schema.immutable: true) are stripped before this reaches the connector."*
-3. Normalise comment style in `types.ts` — pick block JSDoc on its own line(s) and apply
-   it consistently; eliminate trailing same-line `/** ... */` on interface fields.
+3. Normalise comment style throughout `types.ts` and `errors.ts` — block JSDoc on its own
+   line(s) everywhere; eliminate trailing same-line `/** ... */` on interface fields.
+4. Add TSDoc tags to all exported symbols in `packages/sdk/src/`:
+   - `@param` + `@returns` on functions and constructor signatures
+   - `@example` on types and interfaces where a short usage snippet aids understanding
+     (priority: `FieldType`, `ReadBatch`, `ActionPayload`)
+   - `@remarks` for implementation notes that don't belong in the main description
 
 ---
 
 ## Out of Scope
 
-- TSDoc tag migration (`@param`, `@returns`) — TypeDoc renders prose descriptions fine;
-  tags can be added incrementally as the SDK stabilises
 - Enforcing JSDoc on connector internals — connectors are ecosystem implementations,
   not public API; `jsdoc/require-description` applies to `packages/sdk` only
 - CSS / markdown linting

@@ -10,11 +10,5 @@ this directory.
 |--------|---------|
 | `backlog` | Identified, not yet started |
 | `in-progress` | Actively being implemented |
-## Index
-
-| Plan | Status |
-|------|--------|
-| [idempotency-and-batch-actions](idempotency-and-batch-actions.md) | `backlog` |
-| [poc-v2](poc-v2.md) | `done` |
 
 

@@ -31,3 +31,4 @@ Complete specification for OpenSync — an open-source, developer-friendly, bi-d
 
 ## Implementation
 - [plan.md](plan.md) — Phased implementation order with dependency graph
+- [../plans/osi-mapping-primitives.md](../plans/osi-mapping-primitives.md) — Full catalog of OSI-mapping primitives with foundation assessment (50 primitives across 11 categories)

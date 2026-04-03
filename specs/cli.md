@@ -2,145 +2,169 @@
 
 The primary interface for developers. No UI — everything is a command.
 
+## One binary, two modes
+
+There is a single `opensync` binary. It does not require a running daemon for most operations.
+SQLite is the shared state layer — commands like `status` and `inspect` open the database
+directly, the same way `git log` reads `.git/` without needing a git server.
+
+`opensync run` starts the polling loop. Everything else can run independently of it.
+
+---
+
 ## Commands
 
 ### opensync init
 
-Create config directory and initialize the SQLite database.
+Scaffold a new project in the current directory.
 
 ```
 $ opensync init
-Created opensync.yaml
-Created opensync.db
-Ready. Add connectors with: opensync add-connector <name>
+Created openlink.json
+Created mappings/channels.yaml
+Ready. Edit openlink.json to add your connectors.
 ```
 
 ### opensync create-connector \<name\>
 
-Scaffold a new connector project. Generates a working template that compiles and can be loaded by the engine immediately. Designed for both humans and AI agents.
+Scaffold a new connector plugin. Generates a complete, compilable TypeScript project that can be
+loaded by the engine immediately. Designed for both humans and AI agents.
 
 ```
 $ opensync create-connector my-saas
 Created connectors/my-saas/package.json
-Created connectors/my-saas/src/index.ts          # template with all methods stubbed
-Created connectors/my-saas/src/__tests__/index.test.ts
+Created connectors/my-saas/src/index.ts
+Created connectors/my-saas/src/index.test.ts
 Done. Edit connectors/my-saas/src/index.ts to implement your connector.
 ```
 
-The generated `index.ts` includes:
-- `metadata` with placeholder values
-- `getStreams()` returning one example stream
-- `upsert()` with a TODO comment
-- Typed imports from `@opensync/sdk`
+The generated `index.ts` includes `metadata`, stubbed `getEntities()`, and typed imports from
+`@opensync/sdk`. An agent can fill in the real API logic from this template in one shot.
 
-An agent can take this template and fill in the real API logic in one shot.
+Registering the connector is just adding an entry to `openlink.json` — no separate command needed.
 
-### opensync add-connector \<name\>
+### opensync run
 
-Register a connector instance. Prompts for config interactively or accepts `--config <path>`.
+Start the polling loop. Reads `openlink.json` + `mappings/` from the project root, loads plugins,
+and polls all channels in a continuous loop.
 
 ```
-$ opensync add-connector mock-crm --instance crm-prod --config ./crm-config.json
-Connector 'mock-crm' registered as 'crm-prod'.
+$ opensync run
+Root: /my-project
+Loading 2 connector plugin(s)…
+============================================================
+  OpenSync — polling every 2000ms  |  Stop with Ctrl+C
+  Channels: contacts [hubspot, fiken]  |  orders [hubspot, fiken]
+  Pairs: 4 directed
+============================================================
+
+  [10:00:01] hubspot→fiken [contacts]  INSERT  contacts  a1b2c3d4… → ?…
+  [10:00:01] hubspot→fiken [contacts]  INSERT  contacts  e5f6a7b8… → ?…
 ```
+
+```
+# Explicit project root
+$ opensync run --root /path/to/my-project
+
+# One-shot: run one full cycle then exit
+$ opensync run --once
+```
+
+The engine writes to `data/state.json` (or SQLite in the real engine) on every cycle. This is the
+shared state read by all other commands.
 
 ### opensync sync
 
-Run a sync cycle. Processes all pending jobs or triggers a new poll.
+Trigger one sync cycle without starting the poll loop. Useful in CI or cron jobs.
 
 ```
 $ opensync sync
-Syncing channel "Contact Sync"...
-  Fetched 15 records from crm-prod (3 new, 12 unchanged)
-  Pushed 3 records to erp-prod (2 created, 1 updated)
-Done. 3 processed, 0 conflicts, 0 errors.
-
-$ opensync sync --channel "Contact Sync" --full
-Running full sync (all records)...
-  Fetched 1200 records from crm-prod
-  Detected 3 deletions (soft-deleted in shadow state)
-  Pushed 45 changes to erp-prod
+Syncing all channels…
+  contacts  hubspot→fiken  INSERT 3  UPDATE 1
+  orders    hubspot→fiken  (no changes)
 Done.
+
+$ opensync sync --channel contacts
+$ opensync sync --channel contacts --full    # ignore watermarks, re-sync everything
 ```
 
 ### opensync status
 
-Show current state of all channels, circuit breakers, and job queue.
+Show the current state of all channels and connectors. Reads state directly from the database —
+the daemon does not need to be running.
 
 ```
 $ opensync status
 Channels:
-  Contact Sync    OPERATIONAL    last sync: 2 min ago    queue: 0 pending
-  Deal Sync       TRIPPED        reason: volume threshold exceeded (532 > 100)
+  contacts    OPERATIONAL    last sync: 2 min ago    queue: 0 pending
+  orders      TRIPPED        reason: volume threshold exceeded (532 > 100)
 
 Connectors:
-  crm-prod        active    last sync: 2 min ago
-  erp-prod        active    last sync: 2 min ago
-
-Webhooks:
-  crm-prod        last received: 30s ago    health: OK
-  erp-prod        no webhooks configured
+  hubspot     active    last sync: 2 min ago
+  fiken       active    last sync: 2 min ago
 ```
 
 ### opensync inspect \<entity-id\>
 
 Show everything about a specific entity: identity links, shadow state, transaction history.
+Reads directly from the database.
 
 ```
 $ opensync inspect uuid-123
-Entity: uuid-123 (contact)
+Entity: uuid-123 (contacts)
 
 Links:
-  crm-prod    hs_contact_99
-  erp-prod    fiken_customer_44
+  hubspot    hs_contact_99
+  fiken      fiken_customer_44
 
-Shadow State (crm-prod):
-  email    ola@test.no    (prev: old@test.no)    src: crm-prod    ts: 2026-04-01T10:00:00Z
-  phone    99887766       (prev: null)            src: erp-prod    ts: 2026-04-01T10:05:00Z
+Shadow State:
+  customerName    Ola Nordmann    src: hubspot    ts: 2026-04-01T10:00:00Z
+  email           ola@test.no     src: fiken      ts: 2026-04-01T10:05:00Z
 
 Transaction History:
-  2026-04-01 10:00  UPDATE  erp-prod  email: old@test.no → ola@test.no
-  2026-04-01 09:30  CREATE  erp-prod  {fullName: "Ola Nordmann", ...}
+  2026-04-01 10:05  UPDATE  fiken    email: old@test.no → ola@test.no
+  2026-04-01 09:30  INSERT  hubspot  {customerName: "Ola Nordmann", …}
 ```
 
 ### opensync match \<source\> \<target\> --entity \<type\>
 
-Run the match engine for onboarding/discovery.
+Run the match engine for onboarding — find records that exist in both systems but haven't been
+linked yet.
 
 ```
-$ opensync match crm-prod erp-prod --entity contact
-Fetching all contacts from crm-prod... 1000 records
-Fetching all customers from erp-prod... 800 records
+$ opensync match hubspot fiken --entity contacts
+Fetching contacts from hubspot… 1000 records
+Fetching customers from fiken… 800 records
 
-Match Results:
   600 exact matches (email)
-  12 partial matches (name similarity > 85%) — review recommended
-  200 unique in crm-prod
-  50 unique in erp-prod
+   12 partial matches (name similarity > 85%) — review recommended
+  200 unique in hubspot
+   50 unique in fiken
 
-Run `opensync link crm-prod erp-prod --entity contact` to create identity links.
+Run `opensync link hubspot fiken --entity contacts` to create identity links.
 ```
 
 ### opensync link \<source\> \<target\> --entity \<type\>
 
-Create identity links from match results. Populates shadow state to prevent echo storm.
+Create identity links from match results. Populates shadow state to prevent an echo storm on the
+next sync.
 
 ```
-$ opensync link crm-prod erp-prod --entity contact
-Linking 600 matched records...
-Populating shadow state...
+$ opensync link hubspot fiken --entity contacts
+Linking 600 matched records…
+Populating shadow state…
 Done. 600 linked, 12 partial matches skipped (use --include-partial to link those too).
 ```
 
 ### opensync rollback \<batch-id\>
 
-Undo all changes from a specific sync cycle.
+Undo all writes from a specific sync cycle.
 
 ```
 $ opensync rollback batch-abc123
-Rolling back 45 operations...
+Rolling back 45 operations…
   42 reverted
-  3 skipped (erp-prod cannot delete records)
+   3 skipped (fiken cannot delete records)
 Done.
 ```
 
@@ -149,26 +173,23 @@ Done.
 Full rollback — remove all traces of the engine's involvement in a channel.
 
 ```
-$ opensync rollback --full "Contact Sync"
+$ opensync rollback --full contacts
 WARNING: This will revert ALL changes ever made by this channel.
 Continue? [y/N] y
-Processing 1,240 operations...
+Processing 1,240 operations…
   1,180 reverted
-  60 skipped (target cannot delete)
-Cleaning up identity links and shadow state...
+     60 skipped (target cannot delete)
+Cleaning up identity links and shadow state…
 Done.
 ```
 
+---
+
 ## Packaging
 
-### npm packages
+- `@opensync/sdk` — published to npm, used by connector authors. Zero runtime dependencies.
+- `@opensync/engine` — published to npm, includes the `opensync` CLI binary.
 
-- `@opensync/sdk` — published to npm, used by connector authors. Zero dependencies beyond zod.
-- `@opensync/engine` — published to npm, includes CLI binary.
-
-### CLI binary
-
-The engine package has a `bin` field in `package.json`:
 ```json
 {
   "bin": {
@@ -177,20 +198,9 @@ The engine package has a `bin` field in `package.json`:
 }
 ```
 
-After `npm install @opensync/engine`, the `opensync` command is available.
+Install globally or use via `npx`:
 
-### Running connectors
-
-Connectors are loaded dynamically from a `connectors/` directory or from npm packages. The engine resolves them by name from the YAML config.
-
-```yaml
-# In opensync.yaml:
-connectors:
-  - name: hubspot          # looks for @opensync/connector-hubspot or ./connectors/hubspot/
-    instance: hubspot-prod
 ```
-
-Resolution order:
-1. `./connectors/<name>/` (local directory)
-2. `@opensync/connector-<name>` (npm package)
-3. `<name>` (bare npm package name)
+npm install -g @opensync/engine
+opensync init
+```

@@ -1,6 +1,42 @@
 # Database Schema
 
-All state lives in a single SQLite file. Drizzle ORM for type-safe access. JSONB for flexible field storage.
+All state lives in a single SQLite file. Drizzle ORM for type-safe access. JSONB for flexible
+field storage.
+
+## SQLite Adapter
+
+The engine never imports a SQLite driver directly. A single `openDb()` function at boot detects
+the environment and returns a Drizzle instance:
+
+```typescript
+// packages/engine/src/db/open.ts
+
+import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
+
+export type SqliteDb = BaseSQLiteDatabase<"sync", Record<string, never>>;
+
+export async function openDb(path: string): Promise<SqliteDb> {
+  if (typeof globalThis.Bun !== "undefined") {
+    // bun:sqlite — built into the runtime, works in compiled binaries.
+    const { Database } = await import("bun:sqlite");
+    const { drizzle } = await import("drizzle-orm/bun-sqlite");
+    return drizzle(new Database(path)) as SqliteDb;
+  }
+  // better-sqlite3 — native binding, works on Node.js 18+ and Bun.
+  const { default: Database } = await import("better-sqlite3");
+  const { drizzle } = await import("drizzle-orm/better-sqlite3");
+  return drizzle(new Database(path)) as SqliteDb;
+}
+```
+
+All engine code uses `SqliteDb` (Drizzle's `BaseSQLiteDatabase`). Both drivers satisfy this type.
+The rest of the engine is completely unaware of which driver is running.
+
+**Why not a hand-written adapter interface?** Drizzle already abstracts both drivers behind an
+identical query API. Adding another layer would be redundant. The only variation point is
+initialization — `openDb()` is that layer.
+
+---
 
 ## Configuration
 
