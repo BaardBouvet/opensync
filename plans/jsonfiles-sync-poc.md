@@ -54,13 +54,16 @@ associationsField: "_associations"
 ## File Layout
 
 ```
-poc/
-  sync-poc.ts          # Main runnable script (bun run poc/sync-poc.ts)
+poc1/
+  sync-poc.ts          # Main runnable script (bun run poc1/run.ts)
   data/
     system-a/
       customers.json   # created at runtime, gitignored
       orders.json
     system-b/
+      customers.json
+      orders.json
+    system-c/
       customers.json
       orders.json
 ```
