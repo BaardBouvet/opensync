@@ -13,14 +13,18 @@ import type {
 } from "@opensync/sdk";
 
 // ─── File format ─────────────────────────────────────────────────────────────
-// The JSON file is a flat array of objects. Each object must have an "id" field
-// (string). Any other fields are passed through as-is. The connector also
-// maintains an "updatedAt" field (ISO 8601) so incremental syncs work.
+// The JSON file is a flat array of objects. Each object must have an id field
+// (configurable via `idField`, default "id"). Any other fields are passed
+// through as-is. The connector also maintains a watermark field (configurable
+// via `watermarkField`, default "updatedAt") for incremental syncs.
 
 interface FileRecord {
-  id: string;
-  updatedAt?: string;
   [key: string]: unknown;
+}
+
+interface FieldConfig {
+  idField: string;
+  watermarkField: string;
 }
 
 function readFile(filePath: string): FileRecord[] {
@@ -41,49 +45,60 @@ function filePath(ctx: ConnectorContext): string {
   return p;
 }
 
+function fieldConfig(ctx: ConnectorContext): FieldConfig {
+  return {
+    idField: (ctx.config["idField"] as string | undefined) ?? "id",
+    watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? "updatedAt",
+  };
+}
+
 // ─── Entity ───────────────────────────────────────────────────────────────────
 
-const recordEntity: EntityDefinition = {
-  name: "record",
+function makeRecordEntity({ idField, watermarkField }: FieldConfig): EntityDefinition {
+  return {
+    name: "record",
 
-  schema: {
-    id: {
-      description: "Record identifier. Must be unique within the file.",
-      type: "string",
-      required: true,
-      immutable: true,
+    schema: {
+      [idField]: {
+        description: "Record identifier. Must be unique within the file.",
+        type: "string",
+        required: true,
+        immutable: true,
+      },
+      [watermarkField]: {
+        description: "ISO 8601 timestamp of the last modification. Used as the sync watermark.",
+        type: "string",
+      },
     },
-    updatedAt: {
-      description:
-        "ISO 8601 timestamp of the last modification. Used as the sync watermark.",
-      type: "string",
-    },
-  },
 
   async *fetch(
     ctx: ConnectorContext,
     since?: string
   ): AsyncIterable<FetchBatch> {
     const records = readFile(filePath(ctx));
+    const { idField, watermarkField } = fieldConfig(ctx);
 
     const filtered = since
       ? records.filter(
-          (r) => r.updatedAt !== undefined && r.updatedAt > since
+          (r) => typeof r[watermarkField] === "string" && (r[watermarkField] as string) > since
         )
       : records;
 
-    // Yield in one batch. Real connectors would page through large datasets.
-    const maxUpdatedAt = filtered.reduce<string | undefined>(
-      (max, r) => (r.updatedAt && (!max || r.updatedAt > max) ? r.updatedAt : max),
+    const maxWatermark = filtered.reduce<string | undefined>(
+      (max, r) => {
+        const w = r[watermarkField];
+        return typeof w === "string" && (!max || w > max) ? w : max;
+      },
       undefined
     );
 
     yield {
-      records: filtered.map(({ id, ...data }) => ({
-        id,
-        data: data as Record<string, unknown>,
-      })) satisfies FetchRecord[],
-      since: maxUpdatedAt ?? since,
+      records: filtered.map((r) => {
+        const id = String(r[idField]);
+        const { [idField]: _id, ...data } = r;
+        return { id, data: data as Record<string, unknown> };
+      }) satisfies FetchRecord[],
+      since: maxWatermark ?? since,
     };
   },
 
@@ -91,13 +106,15 @@ const recordEntity: EntityDefinition = {
     ids: string[],
     ctx: ConnectorContext
   ): Promise<FetchRecord[]> {
+    const { idField } = fieldConfig(ctx);
     const idSet = new Set(ids);
     return readFile(filePath(ctx))
-      .filter((r) => idSet.has(r.id))
-      .map(({ id, ...data }) => ({
-        id,
-        data: data as Record<string, unknown>,
-      }));
+      .filter((r) => idSet.has(String(r[idField])))
+      .map((r) => {
+        const id = String(r[idField]);
+        const { [idField]: _id, ...data } = r;
+        return { id, data: data as Record<string, unknown> };
+      });
   },
 
   async *insert(
@@ -105,11 +122,12 @@ const recordEntity: EntityDefinition = {
     ctx: ConnectorContext
   ): AsyncIterable<InsertResult> {
     const fp = filePath(ctx);
+    const { idField, watermarkField } = fieldConfig(ctx);
     for await (const record of records) {
       const existing = readFile(fp);
-      const id = (record.data["id"] as string | undefined) ?? crypto.randomUUID();
+      const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
       const now = new Date().toISOString();
-      const newRecord: FileRecord = { id, updatedAt: now, ...record.data };
+      const newRecord: FileRecord = { ...record.data, [idField]: id, [watermarkField]: now };
       writeFile(fp, [...existing, newRecord]);
       yield { id, data: newRecord as Record<string, unknown> };
     }
@@ -120,9 +138,10 @@ const recordEntity: EntityDefinition = {
     ctx: ConnectorContext
   ): AsyncIterable<UpdateResult> {
     const fp = filePath(ctx);
+    const { idField, watermarkField } = fieldConfig(ctx);
     for await (const record of records) {
       const existing = readFile(fp);
-      const idx = existing.findIndex((r) => r.id === record.id);
+      const idx = existing.findIndex((r) => String(r[idField]) === record.id);
       if (idx === -1) {
         yield { id: record.id, notFound: true as const };
         continue;
@@ -131,8 +150,8 @@ const recordEntity: EntityDefinition = {
       const updated: FileRecord = {
         ...existing[idx],
         ...record.data,
-        id: record.id,
-        updatedAt: now,
+        [idField]: record.id,
+        [watermarkField]: now,
       };
       existing[idx] = updated;
       writeFile(fp, existing);
@@ -145,9 +164,10 @@ const recordEntity: EntityDefinition = {
     ctx: ConnectorContext
   ): AsyncIterable<DeleteResult> {
     const fp = filePath(ctx);
+    const { idField } = fieldConfig(ctx);
     for await (const id of ids) {
       const existing = readFile(fp);
-      const idx = existing.findIndex((r) => r.id === id);
+      const idx = existing.findIndex((r) => String(r[idField]) === id);
       if (idx === -1) {
         yield { id, notFound: true as const };
         continue;
@@ -157,7 +177,8 @@ const recordEntity: EntityDefinition = {
       yield { id };
     }
   },
-};
+  };
+}
 
 // ─── Connector ────────────────────────────────────────────────────────────────
 
@@ -172,11 +193,21 @@ const connector: Connector = {
         description: "Absolute path to the JSON file used for storage.",
         required: true,
       },
+      idField: {
+        type: "string",
+        description: "Field name used as the record identifier. Defaults to \"id\".",
+        required: false,
+      },
+      watermarkField: {
+        type: "string",
+        description: "Field name used as the incremental sync watermark (ISO 8601 timestamp). Defaults to \"updatedAt\".",
+        required: false,
+      },
     },
   },
 
-  getEntities(): EntityDefinition[] {
-    return [recordEntity];
+  getEntities(ctx: ConnectorContext): EntityDefinition[] {
+    return [makeRecordEntity(fieldConfig(ctx))];
   },
 };
 
