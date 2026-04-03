@@ -6,6 +6,8 @@
     { "path": "connectors/hubspot" },
     { "path": "connectors/tripletex" },
     { "path": "connectors/postgres" },
-    { "path": "connectors/kafka" }
+    { "path": "connectors/kafka" },
+    { "path": "connectors/waveapps" },
+    { "path": "connectors/sparql" }
   ]
 }

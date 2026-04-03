@@ -1,0 +1,17 @@
+{
+  "name": "@opensync/connector-waveapps",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc --build",
+    "bundle": "esbuild src/index.ts --bundle --platform=browser --format=esm --outfile=dist/bundle.js --external:@opensync/sdk"
+  },
+  "dependencies": {
+    "@opensync/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}
