@@ -18,54 +18,59 @@ You could write a one-off integration script. But OpenSync is different:
 Here's everything required to build a working connector:
 
 ```typescript
-import { OpenSyncConnector, NormalizedRecord, SyncContext } from '@opensync/sdk';
+import type { Connector, ConnectorContext } from '@opensync/sdk';
 
 export default {
   metadata: {
     name: 'my-system',
     version: '1.0.0',
-    capabilities: { canDelete: true, canUpdate: true },
+    auth: { type: 'none' },
     configSchema: {
       apiUrl: { type: 'string', required: true, description: 'Your API base URL' },
     },
   },
 
-  getStreams() {
+  getEntities(ctx: ConnectorContext) {
     return [
       {
-        entity: 'contact',
-        async *fetch(ctx: SyncContext) {
+        name: 'contact',
+
+        async *fetch(ctx: ConnectorContext, since?: string) {
           const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
           const contacts = await res.json();
-          yield contacts.map((c: any) => ({
-            id: c.id,
-            data: { name: c.name, email: c.email },
-          }));
+          yield {
+            records: contacts.map((c: any) => ({
+              id: c.id,
+              data: { name: c.name, email: c.email },
+            })),
+          };
+        },
+
+        async *insert(records, ctx: ConnectorContext) {
+          for await (const record of records) {
+            const res = await ctx.http(`${ctx.config.apiUrl}/contact`, {
+              method: 'POST',
+              body: JSON.stringify(record.data),
+            });
+            const stored = await res.json();
+            yield { id: stored.id, data: stored };
+          }
+        },
+
+        async *update(records, ctx: ConnectorContext) {
+          for await (const record of records) {
+            const res = await ctx.http(`${ctx.config.apiUrl}/contact/${record.id}`, {
+              method: 'PUT',
+              body: JSON.stringify(record.data),
+            });
+            const stored = await res.json();
+            yield { id: record.id, data: stored };
+          }
         },
       },
     ];
   },
-
-  async upsert(entity: string, record: NormalizedRecord, ctx: SyncContext) {
-    const isUpdate = Boolean(record.id);
-    const method = isUpdate ? 'PUT' : 'POST';
-    const url = isUpdate 
-      ? `${ctx.config.apiUrl}/${entity}/${record.id}` 
-      : `${ctx.config.apiUrl}/${entity}`;
-
-    const res = await ctx.http(url, {
-      method,
-      body: JSON.stringify(record.data),
-    });
-
-    const stored = await res.json();
-    return {
-      externalId: stored.id,
-      data: stored,
-      status: isUpdate ? 'updated' : 'created',
-    };
-  },
-} satisfies OpenSyncConnector;
+} satisfies Connector;
 ```
 
 That's a real connector. It reads/writes data, integrates with the engine, and can sync to any other system.

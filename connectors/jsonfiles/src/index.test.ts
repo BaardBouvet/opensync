@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import connector from "./index.js";
-import type { ConnectorContext, InsertRecord, UpdateRecord } from "@opensync/sdk";
+import type { ConnectorContext, EntityDefinition, InsertRecord, UpdateRecord } from "@opensync/sdk";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeCtx(filePath: string, extra: Record<string, unknown> = {}): ConnectorContext {
+function makeCtx(filePaths: string[], extra: Record<string, unknown> = {}): ConnectorContext {
   return {
-    config: { filePath, ...extra },
+    config: { filePaths, ...extra },
     state: {} as ConnectorContext["state"],
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     http: null as unknown as ConnectorContext["http"],
@@ -29,18 +29,15 @@ async function* from<T>(items: T[]): AsyncIterable<T> {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-// Default entity — used as a convenience for tests that don't need custom field names.
-// Tests that verify schema or custom fields call connector.getEntities!(ctx) directly.
-const defaultCtxStub = { config: {}, state: {} as ConnectorContext["state"], logger: { info() {}, warn() {}, error() {}, debug() {} }, http: null as unknown as ConnectorContext["http"], webhookUrl: "" };
-const entity = connector.getEntities!(defaultCtxStub as ConnectorContext)[0];
-
-describe("jsonfile connector", () => {
+describe("jsonfiles connector", () => {
   let fp: string;
   let ctx: ConnectorContext;
+  let entity: EntityDefinition;
 
   beforeEach(() => {
-    fp = join(tmpdir(), `jsonfile-test-${crypto.randomUUID()}.json`);
-    ctx = makeCtx(fp);
+    fp = join(tmpdir(), `jsonfiles-test-${crypto.randomUUID()}.json`);
+    ctx = makeCtx([fp]);
+    entity = connector.getEntities!(ctx)[0];
   });
 
   afterEach(() => {
@@ -50,25 +47,31 @@ describe("jsonfile connector", () => {
 
   describe("schema", () => {
     it("uses default field names by default", () => {
-      const e = connector.getEntities!(makeCtx(fp))[0];
-      expect(e.schema).toHaveProperty("id");
-      expect(e.schema).toHaveProperty("updatedAt");
-      expect(e.schema).not.toHaveProperty("uuid");
-      expect(e.schema).not.toHaveProperty("modifiedAt");
+      expect(entity.schema).toHaveProperty("_id");
+      expect(entity.schema).toHaveProperty("_updatedAt");
+      expect(entity.schema).not.toHaveProperty("id");
     });
 
     it("reflects custom idField and watermarkField in schema", () => {
-      const e = connector.getEntities!(makeCtx(fp, { idField: "uuid", watermarkField: "modifiedAt" }))[0];
+      const e = connector.getEntities!(makeCtx([fp], { idField: "uuid", watermarkField: "modifiedAt" }))[0];
       expect(e.schema).toHaveProperty("uuid");
       expect(e.schema).toHaveProperty("modifiedAt");
-      expect(e.schema).not.toHaveProperty("id");
-      expect(e.schema).not.toHaveProperty("updatedAt");
+      expect(e.schema).not.toHaveProperty("_id");
+      expect(e.schema).not.toHaveProperty("_updatedAt");
     });
 
     it("marks the id field as required and immutable", () => {
-      const e = connector.getEntities!(makeCtx(fp, { idField: "uuid" }))[0];
-      expect(e.schema!["uuid"].required).toBe(true);
-      expect(e.schema!["uuid"].immutable).toBe(true);
+      expect(entity.schema!["_id"].required).toBe(true);
+      expect(entity.schema!["_id"].immutable).toBe(true);
+    });
+
+    it("includes associationsField in schema when configured", () => {
+      const e = connector.getEntities!(makeCtx([fp], { associationsField: "links" }))[0];
+      expect(e.schema).toHaveProperty("links");
+    });
+
+    it("includes default associations field in schema when not configured", () => {
+      expect(Object.keys(entity.schema!)).toEqual(["_id", "_updatedAt", "_associations"]);
     });
   });
   // ── fetch ──────────────────────────────────────────────────────────────────
@@ -81,8 +84,8 @@ describe("jsonfile connector", () => {
 
     it("returns all records on full sync", async () => {
       writeFileSync(fp, JSON.stringify([
-        { id: "1", name: "Alice", updatedAt: "2026-01-01T00:00:00.000Z" },
-        { id: "2", name: "Bob",   updatedAt: "2026-01-02T00:00:00.000Z" },
+        { _id: "1", name: "Alice", _updatedAt: "2026-01-01T00:00:00.000Z" },
+        { _id: "2", name: "Bob",   _updatedAt: "2026-01-02T00:00:00.000Z" },
       ]));
 
       const [batch] = await collect(entity.fetch!(ctx));
@@ -91,8 +94,8 @@ describe("jsonfile connector", () => {
 
     it("filters records older than since watermark", async () => {
       writeFileSync(fp, JSON.stringify([
-        { id: "1", name: "Alice", updatedAt: "2026-01-01T00:00:00.000Z" },
-        { id: "2", name: "Bob",   updatedAt: "2026-02-01T00:00:00.000Z" },
+        { _id: "1", name: "Alice", _updatedAt: "2026-01-01T00:00:00.000Z" },
+        { _id: "2", name: "Bob",   _updatedAt: "2026-02-01T00:00:00.000Z" },
       ]));
 
       const [batch] = await collect(entity.fetch!(ctx, "2026-01-15T00:00:00.000Z"));
@@ -101,8 +104,8 @@ describe("jsonfile connector", () => {
 
     it("returns the max updatedAt as the since watermark", async () => {
       writeFileSync(fp, JSON.stringify([
-        { id: "1", updatedAt: "2026-01-01T00:00:00.000Z" },
-        { id: "2", updatedAt: "2026-03-01T00:00:00.000Z" },
+        { _id: "1", _updatedAt: "2026-01-01T00:00:00.000Z" },
+        { _id: "2", _updatedAt: "2026-03-01T00:00:00.000Z" },
       ]));
 
       const [batch] = await collect(entity.fetch!(ctx));
@@ -115,8 +118,8 @@ describe("jsonfile connector", () => {
   describe("lookup", () => {
     it("returns records for requested ids", async () => {
       writeFileSync(fp, JSON.stringify([
-        { id: "1", name: "Alice" },
-        { id: "2", name: "Bob" },
+        { _id: "1", name: "Alice" },
+        { _id: "2", name: "Bob" },
       ]));
 
       const results = await entity.lookup!(["1"], ctx);
@@ -126,7 +129,7 @@ describe("jsonfile connector", () => {
     });
 
     it("omits ids that are not found", async () => {
-      writeFileSync(fp, JSON.stringify([{ id: "1", name: "Alice" }]));
+      writeFileSync(fp, JSON.stringify([{ _id: "1", name: "Alice" }]));
 
       const results = await entity.lookup!(["1", "missing"], ctx);
       expect(results.map((r) => r.id)).toEqual(["1"]);
@@ -138,7 +141,7 @@ describe("jsonfile connector", () => {
   describe("insert", () => {
     it("appends a record and returns the assigned id", async () => {
       const [result] = await collect(
-        entity.insert!(from([{ data: { id: "abc", name: "Alice" } }] satisfies InsertRecord[]), ctx)
+        entity.insert!(from([{ data: { _id: "abc", name: "Alice" } }] satisfies InsertRecord[]), ctx)
       );
 
       expect(result.id).toBe("abc");
@@ -161,8 +164,8 @@ describe("jsonfile connector", () => {
       await collect(
         entity.insert!(
           from([
-            { data: { id: "1", name: "A" } },
-            { data: { id: "2", name: "B" } },
+            { data: { _id: "1", name: "A" } },
+            { data: { _id: "2", name: "B" } },
           ] satisfies InsertRecord[]),
           ctx
         )
@@ -177,7 +180,7 @@ describe("jsonfile connector", () => {
 
   describe("update", () => {
     it("updates an existing record", async () => {
-      await collect(entity.insert!(from([{ data: { id: "1", name: "Alice" } }] satisfies InsertRecord[]), ctx));
+      await collect(entity.insert!(from([{ data: { _id: "1", name: "Alice" } }] satisfies InsertRecord[]), ctx));
 
       const [result] = await collect(
         entity.update!(from([{ id: "1", data: { name: "Alicia" } }] satisfies UpdateRecord[]), ctx)
@@ -203,7 +206,7 @@ describe("jsonfile connector", () => {
 
   describe("delete", () => {
     it("removes an existing record", async () => {
-      await collect(entity.insert!(from([{ data: { id: "1", name: "Alice" } }] satisfies InsertRecord[]), ctx));
+      await collect(entity.insert!(from([{ data: { _id: "1", name: "Alice" } }] satisfies InsertRecord[]), ctx));
 
       const [result] = await collect(entity.delete!(from(["1"]), ctx));
       expect(result).toEqual({ id: "1" });
@@ -222,18 +225,20 @@ describe("jsonfile connector", () => {
 
   describe("custom idField and watermarkField", () => {
     let customCtx: ConnectorContext;
+    let customEntity: EntityDefinition;
 
     beforeEach(() => {
-      customCtx = makeCtx(fp, { idField: "uuid", watermarkField: "modifiedAt" });
+      customCtx = makeCtx([fp], { idField: "uuid", watermarkField: "modifiedAt" });
+      customEntity = connector.getEntities!(customCtx)[0];
     });
 
     it("inserts using the custom id field", async () => {
       const [result] = await collect(
-        entity.insert!(from([{ data: { uuid: "abc-123", name: "Alice" } }] satisfies InsertRecord[]), customCtx)
+        customEntity.insert!(from([{ data: { uuid: "abc-123", name: "Alice" } }] satisfies InsertRecord[]))
       );
       expect(result.id).toBe("abc-123");
 
-      const stored = await entity.lookup!(["abc-123"], customCtx);
+      const stored = await customEntity.lookup!(["abc-123"]);
       expect(stored[0].data["name"]).toBe("Alice");
     });
 
@@ -243,31 +248,140 @@ describe("jsonfile connector", () => {
         { uuid: "2", name: "New",  modifiedAt: "2026-03-01T00:00:00.000Z" },
       ]));
 
-      const [batch] = await collect(entity.fetch!(customCtx, "2026-02-01T00:00:00.000Z"));
+      const [batch] = await collect(customEntity.fetch!(customCtx, "2026-02-01T00:00:00.000Z"));
       expect(batch.records.map((r) => r.id)).toEqual(["2"]);
       expect(batch.since).toBe("2026-03-01T00:00:00.000Z");
     });
 
     it("updates using the custom id field", async () => {
-      await collect(entity.insert!(from([{ data: { uuid: "1", name: "Alice" } }] satisfies InsertRecord[]), customCtx));
+      await collect(customEntity.insert!(from([{ data: { uuid: "1", name: "Alice" } }] satisfies InsertRecord[])));
 
       const [result] = await collect(
-        entity.update!(from([{ id: "1", data: { name: "Alicia" } }] satisfies UpdateRecord[]), customCtx)
+        customEntity.update!(from([{ id: "1", data: { name: "Alicia" } }] satisfies UpdateRecord[]))
       );
       expect(result.id).toBe("1");
 
-      const [stored] = await entity.lookup!(["1"], customCtx);
+      const [stored] = await customEntity.lookup!(["1"]);
       expect(stored.data["name"]).toBe("Alicia");
     });
 
     it("deletes using the custom id field", async () => {
-      await collect(entity.insert!(from([{ data: { uuid: "1", name: "Alice" } }] satisfies InsertRecord[]), customCtx));
+      await collect(customEntity.insert!(from([{ data: { uuid: "1", name: "Alice" } }] satisfies InsertRecord[])));
 
-      const [result] = await collect(entity.delete!(from(["1"]), customCtx));
+      const [result] = await collect(customEntity.delete!(from(["1"])));
       expect(result).toEqual({ id: "1" });
 
-      const [batch] = await collect(entity.fetch!(customCtx));
+      const [batch] = await collect(customEntity.fetch!(customCtx));
       expect(batch.records).toHaveLength(0);
+    });
+  });
+
+  // ── associations ───────────────────────────────────────────────────────────
+
+  describe("associations", () => {
+    it("extracts associations from the configured field", async () => {
+      writeFileSync(fp, JSON.stringify([
+        {
+          _id: "1",
+          name: "Alice",
+          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
+        },
+      ]));
+
+      const assocCtx = makeCtx([fp], { associationsField: "links" });
+      const assocEntity = connector.getEntities!(assocCtx)[0];
+      const [batch] = await collect(assocEntity.fetch!(assocCtx));
+
+      expect(batch.records[0].associations).toEqual([
+        { predicate: "company", targetEntity: "company", targetId: "c1" },
+      ]);
+    });
+
+    it("strips the associations field from data", async () => {
+      writeFileSync(fp, JSON.stringify([
+        {
+          _id: "1",
+          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
+        },
+      ]));
+
+      const assocCtx = makeCtx([fp], { associationsField: "links" });
+      const assocEntity = connector.getEntities!(assocCtx)[0];
+      const [batch] = await collect(assocEntity.fetch!(assocCtx));
+
+      expect(batch.records[0].data).not.toHaveProperty("links");
+    });
+
+    it("also exposes associations via lookup", async () => {
+      writeFileSync(fp, JSON.stringify([
+        {
+          _id: "1",
+          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
+        },
+      ]));
+
+      const assocCtx = makeCtx([fp], { associationsField: "links" });
+      const assocEntity = connector.getEntities!(assocCtx)[0];
+      const [record] = await assocEntity.lookup!(["1"]);
+
+      expect(record.associations).toEqual([
+        { predicate: "company", targetEntity: "company", targetId: "c1" },
+      ]);
+    });
+
+    it("does not set associations when field is not configured", async () => {
+      writeFileSync(fp, JSON.stringify([{ _id: "1", links: [] }]));
+
+      const [batch] = await collect(entity.fetch!(ctx));
+      expect(batch.records[0].associations).toBeUndefined();
+    });
+  });
+
+  // ── multiple files ─────────────────────────────────────────────────────────
+
+  describe("multiple files", () => {
+    let dir: string;
+    let customersFile: string;
+    let invoicesFile: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "jsonfiles-multi-"));
+      customersFile = join(dir, "customers.json");
+      invoicesFile = join(dir, "invoices.json");
+    });
+
+    afterEach(() => {
+      rmSync(dir, { recursive: true });
+    });
+
+    it("creates one entity per file with the filename as entity name", () => {
+      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const entities = connector.getEntities!(multiCtx);
+      expect(entities.map((e) => e.name)).toEqual(["customers", "invoices"]);
+    });
+
+    it("each entity reads and writes to its own file independently", async () => {
+      writeFileSync(customersFile, JSON.stringify([{ _id: "c1", name: "ACME" }]));
+      writeFileSync(invoicesFile, JSON.stringify([{ _id: "i1", amount: 100 }]));
+
+      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const [customersEntity, invoicesEntity] = connector.getEntities!(multiCtx);
+
+      const [customerBatch] = await collect(customersEntity.fetch!(multiCtx));
+      const [invoiceBatch] = await collect(invoicesEntity.fetch!(multiCtx));
+
+      expect(customerBatch.records.map((r) => r.id)).toEqual(["c1"]);
+      expect(invoiceBatch.records.map((r) => r.id)).toEqual(["i1"]);
+    });
+
+    it("inserting into one entity does not affect the other file", async () => {
+      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const [customersEntity, invoicesEntity] = connector.getEntities!(multiCtx);
+
+      await collect(customersEntity.insert!(from([{ data: { _id: "c1" } }] satisfies InsertRecord[])));
+
+      const [invoiceBatch] = await collect(invoicesEntity.fetch!(multiCtx));
+      expect(invoiceBatch.records).toHaveLength(0);
     });
   });
 });

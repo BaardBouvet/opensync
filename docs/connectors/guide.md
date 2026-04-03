@@ -20,53 +20,59 @@ touch index.ts
 Here's a working connector again (this time we'll build on it):
 
 ```typescript
-import { OpenSyncConnector, NormalizedRecord, SyncContext } from '@opensync/sdk';
+import type { Connector, ConnectorContext } from '@opensync/sdk';
 
 export default {
   metadata: {
     name: 'my-system',
     version: '1.0.0',
-    capabilities: { canDelete: true, canUpdate: true },
+    auth: { type: 'none' },
     configSchema: {
       apiUrl: { type: 'string', required: true, description: 'API base URL' },
     },
   },
 
-  getStreams() {
+  getEntities(ctx: ConnectorContext) {
     return [
       {
-        entity: 'contact',
-        async *fetch(ctx: SyncContext) {
+        name: 'contact',
+
+        async *fetch(ctx: ConnectorContext, since?: string) {
           const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
           const contacts = await res.json();
-          yield contacts.map((c: any) => ({
-            id: c.id,
-            data: { name: c.name, email: c.email },
-          }));
+          yield {
+            records: contacts.map((c: any) => ({
+              id: c.id,
+              data: { name: c.name, email: c.email },
+            })),
+          };
+        },
+
+        async *insert(records, ctx: ConnectorContext) {
+          for await (const record of records) {
+            const res = await ctx.http(`${ctx.config.apiUrl}/contact`, {
+              method: 'POST',
+              body: JSON.stringify(record.data),
+            });
+            const stored = await res.json();
+            yield { id: stored.id, data: stored };
+          }
+        },
+
+        async *update(records, ctx: ConnectorContext) {
+          for await (const record of records) {
+            const res = await ctx.http(`${ctx.config.apiUrl}/contact/${record.id}`, {
+              method: 'PUT',
+              body: JSON.stringify(record.data),
+            });
+            const stored = await res.json();
+            yield { id: record.id, data: stored };
+          }
         },
       },
     ];
   },
-
-  async upsert(entity: string, record: NormalizedRecord, ctx: SyncContext) {
-    const isUpdate = Boolean(record.id);
-    const url = isUpdate
-      ? `${ctx.config.apiUrl}/${entity}/${record.id}`
-      : `${ctx.config.apiUrl}/${entity}`;
-
-    const res = await ctx.http(url, {
-      method: isUpdate ? 'PUT' : 'POST',
-      body: JSON.stringify(record.data),
-    });
-
-    const stored = await res.json();
-    return {
-      externalId: stored.id,
-      data: stored,
-      status: isUpdate ? 'updated' : 'created',
-    };
-  },
-} satisfies OpenSyncConnector;
+} satisfies Connector;
 ```
 
 ## Add a Second Entity
@@ -74,29 +80,31 @@ export default {
 Your first sync works for contacts. Now add companies:
 
 ```typescript
-getStreams() {
+getEntities(ctx: ConnectorContext) {
   return [
     {
-      entity: 'contact',
-      async *fetch(ctx: SyncContext) {
+      name: 'contact',
+      async *fetch(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
         const contacts = await res.json();
-        yield contacts.map((c: any) => ({
-          id: c.id,
-          data: { name: c.name, email: c.email },
-          associations: [
-            {
-              entity: 'company',
-              externalId: c.companyId,
-              role: 'works_for',
-            },
-          ],
-        }));
+        yield {
+          records: contacts.map((c: any) => ({
+            id: c.id,
+            data: { name: c.name, email: c.email },
+            associations: [
+              {
+                predicate: 'worksFor',
+                targetEntity: 'company',
+                targetId: c.companyId,
+              },
+            ],
+          })),
+        };
       },
     },
     {
-      entity: 'company',
-      async *fetch(ctx: SyncContext) {
+      name: 'company',
+      async *fetch(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.apiUrl}/companies`);
         const companies = await res.json();
         yield companies.map((c: any) => ({
@@ -113,9 +121,9 @@ Now declare the dependency:
 
 ```typescript
 {
-  entity: 'contact',
+  name: 'contact',
   dependsOn: ['company'],  // Sync companies first
-  async *fetch(ctx: SyncContext) {
+  async *fetch(ctx: ConnectorContext, since?: string) {
     // ...
   },
 }
@@ -128,9 +136,12 @@ The engine ensures contacts are synced *after* their companies exist in the targ
 So far you're polling. Real-time is better. Most APIs support webhooks:
 
 ```typescript
-lifecycle: {
-  async onEnable(ctx: SyncContext) {
-    // Register webhook when the connector is enabled
+// Inside your entity definition:
+{
+  name: 'contact',
+
+  async onEnable(ctx: ConnectorContext) {
+    // Register webhook when this entity becomes active in a channel
     const res = await ctx.http(`${ctx.config.apiUrl}/webhooks`, {
       method: 'POST',
       body: JSON.stringify({
@@ -139,30 +150,37 @@ lifecycle: {
       }),
     });
     const webhook = await res.json();
-    
+
     // Store the ID so we can deregister later
     await ctx.state.set('webhookId', webhook.id);
   },
 
-  async onDisable(ctx: SyncContext) {
-    // Clean up when the connector is removed
+  async onDisable(ctx: ConnectorContext) {
+    // Clean up when the entity is deactivated
     const webhookId = await ctx.state.get('webhookId');
     await ctx.http(`${ctx.config.apiUrl}/webhooks/${webhookId}`, {
       method: 'DELETE',
     });
   },
-},
+}
+```
 
-handleWebhook: async (req: Request, ctx: SyncContext) => {
+And on the connector itself handle the incoming payload:
+
+```typescript
+handleWebhook: async (req: Request, ctx: ConnectorContext) => {
   const event: any = await req.json();
-  
-  // Transform webhook payload into NormalizedRecord
+
+  // Return records grouped by entity
   return [{
-    id: event.contact.id,
-    data: {
-      name: event.contact.name,
-      email: event.contact.email,
-    },
+    entity: 'contact',
+    records: [{
+      id: event.contact.id,
+      data: {
+        name: event.contact.name,
+        email: event.contact.email,
+      },
+    }],
   }];
 },
 ```

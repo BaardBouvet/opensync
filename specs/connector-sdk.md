@@ -336,10 +336,43 @@ configSchema: {
 }
 ```
 
+Array fields are declared with `type: 'array'` and an `items` descriptor. The engine presents them as a multi-value input and delivers the value as a native array in `ctx.config`:
+```typescript
+configSchema: {
+  filePaths: {
+    type: 'array',
+    items: { type: 'string' },
+    description: 'JSON file paths. Each file becomes one entity.',
+    required: true,
+  },
+}
+```
+
+Fields with a fixed set of valid values use `enum`. The engine presents them as a dropdown rather than a free-text input, and validates that the submitted value is one of the declared choices:
+```typescript
+configSchema: {
+  region: {
+    type: 'string',
+    enum: ['us-east-1', 'eu-west-1', 'ap-southeast-1'] as const,
+    description: 'AWS region to connect to.',
+    required: true,
+  },
+}
+```
+
 Fields marked `secret: true` are:
 - Masked in structured logs and request journal
 - Never shown in `opensync status` or `opensync inspect` output
 - Stored encrypted in `connector_instances.config` (at-rest encryption)
+
+#### Relationship to JSON Schema
+
+`ConfigField` borrows JSON Schema vocabulary (`type`, `description`, `default`, `enum`, `items`) but is **not a strict JSON Schema subset**. Two intentional deviations:
+
+1. **`required` is a field-level boolean**, not a parent-object array. JSON Schema puts `required: ["portalId"]` on the enclosing object schema; `ConfigField` places `required: true` on the field itself. This is more ergonomic for connector authors.
+2. **`secret` is a custom extension** with no JSON Schema equivalent. It carries operational semantics (encrypt at rest, mask in output) that JSON Schema does not model.
+
+The engine can mechanically translate a `configSchema` into a JSON Schema object for external tooling (validators, form generators, OpenAPI) — `required: true` fields move into the parent `required` array and `secret` is dropped or mapped to a vendor extension like `x-secret`. Connectors do not need to do this themselves.
 
 Write capabilities are expressed by which methods the entity implements: presence of `insert`, `update`, and `delete` is self-declaring. The engine checks at channel setup time which operations are available and shows pre-flight warnings (e.g. "this system has no `update` — changes will be insert-only"). Capability-aware rollback uses the same information.
 
@@ -799,7 +832,7 @@ Three connectors ship with the project for development and testing:
 - Deliberately different field names to exercise transforms
 - Implements: `insert` only (append-only log)
 
-### jsonfile (hello world)
+### jsonfiles (hello world)
 The simplest possible connector — reads and writes a JSON array file. Intended as the starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
 - Storage: a `.json` file on disk (path from `ctx.config.filePath`)

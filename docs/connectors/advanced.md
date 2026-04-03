@@ -7,21 +7,24 @@ Once you have a basic connector working, these patterns help with production sce
 Use a generator to yield batches incrementally:
 
 ```typescript
-async *fetch(ctx: SyncContext) {
-  let cursor = null;
+async *fetch(ctx: ConnectorContext, since?: string) {
+  let cursor: string | undefined;
   
   while (true) {
     const res = await ctx.http(
-      `${ctx.config.apiUrl}/contacts?cursor=${cursor}&limit=100`
+      `${ctx.config.apiUrl}/contacts?cursor=${cursor ?? ''}&limit=100`
     );
     const page = await res.json();
     
     if (page.items.length === 0) break;
     
-    yield page.items.map(item => ({
-      id: item.id,
-      data: { name: item.name, email: item.email },
-    }));
+    yield {
+      records: page.items.map((item: any) => ({
+        id: item.id,
+        data: { name: item.name, email: item.email },
+      })),
+      since: page.nextCursor,
+    };
     
     if (!page.nextCursor) break;
     cursor = page.nextCursor;
@@ -33,24 +36,29 @@ This way you don't load 1 million records into memory. The engine processes batc
 
 ## Storing Cursors Between Fetches
 
-If a fetch is interrupted, you can resume from where you left off:
+If a fetch is interrupted, you can resume from where you left off. The engine
+passes the last `since` value it received back as the `since` parameter on the
+next call — so for most APIs you just return `since` on each batch and the engine
+handles persistence automatically. Use `ctx.state` when you need to store
+additional state that the `since` field alone can't carry:
 
 ```typescript
-async *fetch(ctx: SyncContext, since?: Date) {
-  let cursor = await ctx.state.get(`cursor:contact`);
+async *fetch(ctx: ConnectorContext, since?: string) {
+  let cursor = await ctx.state.get<string>('cursor:contact') ?? since;
   
   while (true) {
     const res = await ctx.http(
-      `${ctx.config.apiUrl}/contacts?cursor=${cursor}`
+      `${ctx.config.apiUrl}/contacts?cursor=${cursor ?? ''}`
     );
     const page = await res.json();
     
     if (page.items.length === 0) break;
-    yield page.items;
-    
-    // After each yield, save where we are
+
     cursor = page.nextCursor;
-    await ctx.state.set(`cursor:contact`, cursor);
+    // Save per-batch so an interruption resumes from the last committed page
+    await ctx.state.set('cursor:contact', cursor);
+
+    yield { records: page.items, since: cursor };
     
     if (!cursor) break;
   }
@@ -62,17 +70,18 @@ async *fetch(ctx: SyncContext, since?: Date) {
 Throw typed errors. The engine uses them to decide retry strategy:
 
 ```typescript
-import { RateLimitError, AuthError, ValidationError } from '@opensync/sdk';
+import { ConnectorError, RateLimitError, AuthError } from '@opensync/sdk';
 
-async *fetch(ctx: SyncContext) {
+async *fetch(ctx: ConnectorContext, since?: string) {
   const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
   
   if (res.status === 429) {
     // Too many requests — retry with backoff
     const retryAfter = res.headers.get('retry-after');
-    throw new RateLimitError('Rate limited', {
-      retryAfterMs: retryAfter ? parseInt(retryAfter) * 1000 : 60000,
-    });
+    throw new RateLimitError(
+      'Rate limited',
+      retryAfter ? parseInt(retryAfter) * 1000 : undefined,
+    );
   }
   
   if (res.status === 401 || res.status === 403) {
@@ -82,14 +91,20 @@ async *fetch(ctx: SyncContext) {
   
   if (!res.ok) {
     // Unknown error
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new ConnectorError(
+      `API error: ${res.status} ${res.statusText}`,
+      'API_ERROR',
+      res.status >= 500,
+    );
   }
   
   const contacts = await res.json();
-  yield contacts.map(c => ({
-    id: c.id,
-    data: { name: c.name },
-  }));
+  yield {
+    records: contacts.map((c: any) => ({
+      id: c.id,
+      data: { name: c.name },
+    })),
+  };
 }
 ```
 
@@ -100,7 +115,7 @@ Validate webhook signatures to ensure requests come from your API:
 ```typescript
 import crypto from 'crypto';
 
-handleWebhook: async (req: Request, ctx: SyncContext) => {
+handleWebhook: async (req: Request, ctx: ConnectorContext) => {
   const signature = req.headers.get('x-webhook-signature');
   const secret = ctx.config.webhookSecret as string;
   
@@ -117,9 +132,10 @@ handleWebhook: async (req: Request, ctx: SyncContext) => {
   }
   
   const event = JSON.parse(body);
+  // Return records grouped by entity type
   return [{
-    id: event.contact.id,
-    data: { name: event.contact.name },
+    entity: 'contact',
+    records: [{ id: event.contact.id, data: { name: event.contact.name } }],
   }];
 },
 ```
@@ -129,7 +145,7 @@ handleWebhook: async (req: Request, ctx: SyncContext) => {
 Implement monitoring so OpenSync knows if your API is accessible:
 
 ```typescript
-healthCheck: async (ctx: SyncContext) => {
+healthCheck: async (ctx: ConnectorContext) => {
   try {
     const res = await ctx.http(`${ctx.config.apiUrl}/status`);
     if (!res.ok) {
@@ -162,17 +178,19 @@ Shows up in `opensync status` and triggers alerts if your API goes down.
 If your API doesn't physically delete records but marks them deleted:
 
 ```typescript
-async *fetch(ctx: SyncContext) {
+async *fetch(ctx: ConnectorContext, since?: string) {
   const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
   const contacts = await res.json();
   
   // Only return active contacts
   const active = contacts.filter((c: any) => !c.deletedAt);
   
-  yield active.map(c => ({
-    id: c.id,
-    data: { name: c.name, email: c.email },
-  }));
+  yield {
+    records: active.map((c: any) => ({
+      id: c.id,
+      data: { name: c.name, email: c.email },
+    })),
+  };
 }
 ```
 
@@ -184,13 +202,11 @@ Some fields can't be changed after creation (like invoice numbers). Declare them
 
 ```typescript
 {
-  entity: 'invoice',
-  capabilities: {
-    canDelete: true,
-    canUpdate: true,
-    immutableFields: ['invoiceNumber'],  // Can't update after creation
+  name: 'invoice',
+  schema: {
+    invoiceNumber: { immutable: true },  // Can't update after creation
   },
-  async *fetch(ctx: SyncContext) {
+  async *fetch(ctx: ConnectorContext, since?: string) {
     // ...
   },
 }
@@ -203,19 +219,20 @@ Now the engine prevents updates to `invoiceNumber` and warns users if they try.
 For APIs that need custom headers, HMAC signing, or session tokens:
 
 ```typescript
-prepareRequest: async (req: Request, ctx: SyncContext) => {
+prepareRequest: async (req: Request, ctx: ConnectorContext) => {
   // Add custom header
-  req.headers.set('X-API-Key', ctx.config.apiKey);
+  const headers = new Headers(req.headers);
+  headers.set('X-API-Key', ctx.config.apiKey as string);
   
   // Or HMAC sign the request
   const body = await req.clone().text();
   const signature = crypto
-    .createHmac('sha256', ctx.config.secret)
+    .createHmac('sha256', ctx.config.secret as string)
     .update(body)
     .digest('hex');
-  req.headers.set('X-Signature', signature);
+  headers.set('X-Signature', signature);
   
-  return req;
+  return new Request(req, { headers });
 },
 ```
 
@@ -224,7 +241,7 @@ Called before every request. This is in addition to standard OAuth handling.
 ## GraphQL APIs
 
 ```typescript
-async *fetch(ctx: SyncContext) {
+async *fetch(ctx: ConnectorContext, since?: string) {
   const query = `
     query GetContacts {
       contacts {
@@ -241,10 +258,12 @@ async *fetch(ctx: SyncContext) {
   });
   
   const { data } = await res.json();
-  yield data.contacts.map((c: any) => ({
-    id: c.id,
-    data: { name: c.name, email: c.email },
-  }));
+  yield {
+    records: data.contacts.map((c: any) => ({
+      id: c.id,
+      data: { name: c.name, email: c.email },
+    })),
+  };
 }
 ```
 
@@ -258,77 +277,82 @@ For graph data, knowledge bases, or semantic web sources:
 export default {
   metadata: {
     name: 'my-rdf-source',
-    graphAware: true,  // Tell engine: we emit semantic data
+    auth: { type: 'none' },
     // ...
   },
   
-  getStreams() {
+  getEntities(ctx: ConnectorContext) {
     return [{
-      entity: 'person',
-      graphAware: true,
-      async *fetch(ctx: SyncContext) {
-        const graph = await ctx.http(`${ctx.config.rdfUrl}`);
-        const jsonld = await graph.json(); // JSON-LD
+      name: 'person',
+      async *fetch(ctx: ConnectorContext, since?: string) {
+        const res = await ctx.http(`${ctx.config.rdfUrl}`);
+        const jsonld = await res.json(); // JSON-LD
         
-        yield jsonld['@graph'].map((node: any) => ({
-          id: node['@id'],
-          data: node,  // Entire JSON-LD node
-          associations: (node['knows'] || [])
-            .map((ref: any) => ({
-              entity: 'person',
-              externalId: ref['@id'],
-              role: 'knows',
-              metadata: {
-                // Relationship properties
-                since: ref.since,
-                strength: ref.trustLevel,
-              },
-            })),
-        }));
+        yield {
+          records: jsonld['@graph'].map((node: any) => ({
+            id: node['@id'],
+            data: node,  // Entire JSON-LD node
+            associations: (node['knows'] || [])
+              .map((ref: any) => ({
+                predicate: 'knows',
+                targetEntity: 'person',
+                targetId: ref['@id'],
+                metadata: {
+                  since: ref.since,
+                  strength: ref.trustLevel,
+                },
+              })),
+          })),
+        };
       },
     }];
   },
-};
+} satisfies Connector;
 ```
 
 OpenSync natively handles multi-valued properties and rich relationships.
 
-## Performance: Batch Updates
+## Performance: Batch Writes
 
-If your API supports batch operations, use them:
+If your API supports batch operations, collect records and send them together:
 
 ```typescript
-async upsert(entity: string, records: NormalizedRecord[], ctx: SyncContext) {
-  // Your API might support PATCH /contacts with an array
-  const res = await ctx.http(`${ctx.config.apiUrl}/${entity}/batch`, {
-    method: 'PATCH',
-    body: JSON.stringify(records.map(r => ({
-      id: r.id,
-      ...r.data,
-    }))),
-  });
-  
-  const stored = await res.json();
-  return stored.map((item: any) => ({
-    externalId: item.id,
-    data: item,
-    status: 'updated',
-  }));
+async *insert(records: AsyncIterable<InsertRecord>, ctx: ConnectorContext) {
+  // Accumulate up to 100 records and send one batch request
+  let batch: InsertRecord[] = [];
+
+  async function* flush() {
+    if (batch.length === 0) return;
+    const res = await ctx.http(`${ctx.config.apiUrl}/contacts/batch`, {
+      method: 'POST',
+      body: JSON.stringify({ inputs: batch.map(r => r.data) }),
+    });
+    const stored = await res.json();
+    for (const item of stored) {
+      yield { id: item.id, data: item };
+    }
+    batch = [];
+  }
+
+  for await (const record of records) {
+    batch.push(record);
+    if (batch.length >= 100) yield* flush();
+  }
+  yield* flush();
 }
 ```
 
-The engine will batch multiple upserts into single requests when possible.
-
 ## Database Connectors
 
-Your connector doesn't have to use HTTP. It can talk to databases:
+Your connector doesn't have to use HTTP. It can talk to databases directly:
 
 ```typescript
-import { Database } from 'sqlite3';
+import { Pool } from 'pg';
 
 export default {
   metadata: {
     name: 'my-database',
+    auth: { type: 'none' },
     configSchema: {
       connectionString: {
         type: 'string',
@@ -337,48 +361,28 @@ export default {
         description: 'PostgreSQL connection string',
       },
     },
-    // ...
   },
 
-  async *fetch(ctx: SyncContext) {
-    // Use ctx.state to store the connection
-    let db = await ctx.state.get('db') as Database;
-    if (!db) {
-      db = new Database(ctx.config.connectionString);
-      await ctx.state.set('db', db);
-    }
-    
-    const contacts = await db.all('SELECT * FROM contacts');
-    yield contacts.map(c => ({
-      id: c.id,
-      data: { name: c.name, email: c.email },
-    }));
-  },
+  getEntities(ctx: ConnectorContext) {
+    // Create the pool once per connector instance.
+    // ctx is the same object across all entity method calls so this is safe.
+    const pool = new Pool({ connectionString: ctx.config.connectionString as string });
 
-  async upsert(entity: string, record: NormalizedRecord, ctx: SyncContext) {
-    const db = await ctx.state.get('db') as Database;
-    const isUpdate = Boolean(record.id);
-    
-    if (isUpdate) {
-      await db.run(
-        `UPDATE ${entity} SET ? WHERE id = ?`,
-        [record.data, record.id]
-      );
-    } else {
-      const result = await db.run(
-        `INSERT INTO ${entity} (?) VALUES (?)`,
-        [Object.keys(record.data), Object.values(record.data)]
-      );
-      record.id = result.lastID;
-    }
-    
-    return {
-      externalId: record.id,
-      data: record.data,
-      status: isUpdate ? 'updated' : 'created',
-    };
+    return [{
+      name: 'row',
+
+      async *fetch(ctx: ConnectorContext, since?: string) {
+        const result = await pool.query('SELECT * FROM my_table ORDER BY id');
+        yield { records: result.rows.map(r => ({ id: String(r.id), data: r })) };
+      },
+
+      async onDisable(ctx: ConnectorContext) {
+        // Return the pool to the OS when the connector is disabled.
+        await pool.end();
+      },
+    }];
   },
-} satisfies OpenSyncConnector;
+} satisfies Connector;
 ```
 
-Same pattern, different sink.
+Same pattern works for any database driver — SQLite, MySQL, Redis, etc.

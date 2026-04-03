@@ -355,18 +355,27 @@ export interface ActionDefinition {
 // ─── Metadata ─────────────────────────────────────────────────────────────────
 
 /** A user-configurable field declared in configSchema. */
-export interface ConfigField {
-  type: "string" | "number" | "boolean";
-  description: string;
-  required: boolean;
-
-  /** If true: masked in logs, never shown in opensync status/inspect output,
-   *  stored encrypted at rest. Use for tokens, passwords, and API keys that
-   *  aren't handled by the auth system (i.e. declared under auth: none). */
-  secret?: boolean;
-
-  default?: unknown;
-}
+export type ConfigField =
+  | {
+      type: "string" | "number" | "boolean";
+      description: string;
+      required: boolean;
+      /** If true: masked in logs, never shown in opensync status/inspect output,
+       *  stored encrypted at rest. Use for tokens, passwords, and API keys that
+       *  aren't handled by the auth system (i.e. declared under auth: none). */
+      secret?: boolean;
+      /** Restricts the value to a fixed set of choices. The engine presents this
+       *  as a dropdown/select rather than a free-text input. */
+      enum?: readonly (string | number)[];
+      default?: unknown;
+    }
+  | {
+      type: "array";
+      items: { type: "string" | "number" | "boolean" };
+      description: string;
+      required: boolean;
+      default?: unknown[];
+    };
 
 /** Returned by getOAuthConfig() — the URLs the engine needs to run the OAuth2 flow. */
 export interface OAuthConfig {

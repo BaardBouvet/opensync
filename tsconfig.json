@@ -2,7 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/sdk" },
-    { "path": "connectors/jsonfile" },
+    { "path": "connectors/jsonfiles" },
     { "path": "connectors/hubspot" },
     { "path": "connectors/tripletex" },
     { "path": "connectors/postgres" },
