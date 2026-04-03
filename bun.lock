@@ -15,22 +15,22 @@
         "@types/node": "^25.5.0",
       },
     },
+    "connectors/jsonfiles": {
+      "name": "@opensync/connector-jsonfiles",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
+      },
+    },
     "connectors/kafka": {
       "name": "@opensync/connector-kafka",
       "version": "0.1.0",
       "dependencies": {
         "@opensync/sdk": "workspace:*",
         "kafkajs": "^2.2.4",
-      },
-      "devDependencies": {
-        "@types/node": "^25.5.0",
-      },
-    },
-    "connectors/mock-file": {
-      "name": "@opensync/connector-mock-file",
-      "version": "0.1.0",
-      "dependencies": {
-        "@opensync/sdk": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -47,8 +47,28 @@
         "@types/pg": "^8.11.0",
       },
     },
+    "connectors/sparql": {
+      "name": "@opensync/connector-sparql",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
+      },
+    },
     "connectors/tripletex": {
       "name": "@opensync/connector-tripletex",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
+      },
+    },
+    "connectors/waveapps": {
+      "name": "@opensync/connector-waveapps",
       "version": "0.1.0",
       "dependencies": {
         "@opensync/sdk": "workspace:*",
@@ -68,13 +88,17 @@
   "packages": {
     "@opensync/connector-hubspot": ["@opensync/connector-hubspot@workspace:connectors/hubspot"],
 
-    "@opensync/connector-kafka": ["@opensync/connector-kafka@workspace:connectors/kafka"],
+    "@opensync/connector-jsonfiles": ["@opensync/connector-jsonfiles@workspace:connectors/jsonfiles"],
 
-    "@opensync/connector-mock-file": ["@opensync/connector-mock-file@workspace:connectors/mock-file"],
+    "@opensync/connector-kafka": ["@opensync/connector-kafka@workspace:connectors/kafka"],
 
     "@opensync/connector-postgres": ["@opensync/connector-postgres@workspace:connectors/postgres"],
 
+    "@opensync/connector-sparql": ["@opensync/connector-sparql@workspace:connectors/sparql"],
+
     "@opensync/connector-tripletex": ["@opensync/connector-tripletex@workspace:connectors/tripletex"],
+
+    "@opensync/connector-waveapps": ["@opensync/connector-waveapps@workspace:connectors/waveapps"],
 
     "@opensync/sdk": ["@opensync/sdk@workspace:packages/sdk"],
 
