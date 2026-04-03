@@ -1,26 +1,26 @@
 /**
  * JSON-Files Sync POC — polling daemon
  *
- *   bun run poc/run.ts
+ *   bun run poc/v1/run.ts
  *
  * On first run, seeds System A with one customer (Alice) and one order ($99)
  * referencing her, then syncs everything to System B so both sides are populated.
  *
  * After that it polls every POLL_MS milliseconds, syncing A→B then B→A, and
  * prints a line for every insert/update/defer it sees. Edit any of the four JSON
- * files under poc/data/ while the daemon is running and the change will be picked
+ * files under poc/v1/data/ while the daemon is running and the change will be picked
  * up on the next poll and written to the matching file in the other system.
  *
  * Stop with Ctrl+C.
  *
  * NOTE: The identity map is held in memory. Restarting the daemon resets it,
  * which will cause existing records to be re-inserted (doubles). Delete
- * poc/data/ before restarting for a clean slate.
+ * poc/v1/data/ before restarting for a clean slate.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import connector from "../connectors/jsonfiles/src/index.js";
+import connector from "../../connectors/jsonfiles/src/index.js";
 import { SyncEngine } from "./engine.js";
 import type { ConnectedSystem, ConnectorContext, EngineState, InsertRecord } from "./engine.js";
 
@@ -31,10 +31,12 @@ const POLL_MS = Number(process.env["POLL_MS"] ?? 2000);
 const rootDir = join(fileURLToPath(import.meta.url), "..", "data");
 const aDIR = join(rootDir, "system-a");
 const bDIR = join(rootDir, "system-b");
+const cDIR = join(rootDir, "system-c");
 const STATE_FILE = join(rootDir, "state.json");
 
 mkdirSync(aDIR, { recursive: true });
 mkdirSync(bDIR, { recursive: true });
+mkdirSync(cDIR, { recursive: true });
 
 function makeCtx(filePaths: string[]): ConnectorContext {
   return {
@@ -48,9 +50,11 @@ function makeCtx(filePaths: string[]): ConnectorContext {
 
 const aCtx = makeCtx([join(aDIR, "customers.json"), join(aDIR, "orders.json")]);
 const bCtx = makeCtx([join(bDIR, "customers.json"), join(bDIR, "orders.json")]);
+const cCtx = makeCtx([join(cDIR, "customers.json"), join(cDIR, "orders.json")]);
 
 const systemA: ConnectedSystem = { id: "A", ctx: aCtx, entities: connector.getEntities!(aCtx) };
 const systemB: ConnectedSystem = { id: "B", ctx: bCtx, entities: connector.getEntities!(bCtx) };
+const systemC: ConnectedSystem = { id: "C", ctx: cCtx, entities: connector.getEntities!(cCtx) };
 
 const engine = new SyncEngine();
 
@@ -81,7 +85,7 @@ function ts(): string {
 }
 
 function printResults(
-  dir: "A→B" | "B→A",
+  dir: string,
   results: Awaited<ReturnType<SyncEngine["sync"]>>,
 ): void {
   const meaningful = results.filter((r) => r.action !== "skip");
@@ -131,20 +135,31 @@ console.log("=".repeat(60));
 console.log("  OpenSync JSON-Files POC — polling daemon");
 console.log(`  Poll interval: ${POLL_MS}ms  |  Stop with Ctrl+C`);
 console.log("  Files:");
-console.log(`    poc0/data/system-a/customers.json`);
-console.log(`    poc0/data/system-a/orders.json`);
-console.log(`    poc0/data/system-b/customers.json`);
-console.log(`    poc0/data/system-b/orders.json`);
+console.log(`    poc/v1/data/system-a/customers.json`);
+console.log(`    poc/v1/data/system-a/orders.json`);
+console.log(`    poc/v1/data/system-b/customers.json`);
+console.log(`    poc/v1/data/system-b/orders.json`);
+console.log(`    poc/v1/data/system-c/customers.json`);
+console.log(`    poc/v1/data/system-c/orders.json`);
 console.log("=".repeat(60));
 console.log();
 
 // ─── Poll loop ────────────────────────────────────────────────────────────────
 
+// Sync order is cascade-friendly: A→B then B→C means A’s changes reach C in one cycle.
 async function poll(): Promise<void> {
-  const ab = await engine.sync(systemA, systemB);
-  const ba = await engine.sync(systemB, systemA);
-  printResults("A→B", ab);
-  printResults("B→A", ba);
+  const pairs: [ConnectedSystem, ConnectedSystem][] = [
+    [systemA, systemB],
+    [systemB, systemC],
+    [systemA, systemC],
+    [systemC, systemB],
+    [systemB, systemA],
+    [systemC, systemA],
+  ];
+  for (const [from, to] of pairs) {
+    const results = await engine.sync(from, to);
+    printResults(`${from.id}→${to.id}`, results);
+  }
   saveState();
 }
 

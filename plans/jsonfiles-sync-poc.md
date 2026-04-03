@@ -54,21 +54,29 @@ associationsField: "_associations"
 ## File Layout
 
 ```
-poc1/
-  sync-poc.ts          # Main runnable script (bun run poc1/run.ts)
-  data/
-    system-a/
-      customers.json   # created at runtime, gitignored
-      orders.json
-    system-b/
-      customers.json
-      orders.json
-    system-c/
-      customers.json
-      orders.json
+poc/
+  v0/
+    engine.ts
+    engine.test.ts
+    run.ts            # bun run poc/v0/run.ts
+    data/             # gitignored
+      system-a/
+        customers.json
+        orders.json
+      system-b/
+        customers.json
+        orders.json
+  v1/
+    engine.ts
+    engine.test.ts
+    run.ts            # bun run poc/v1/run.ts
+    data/             # gitignored
+      system-a/
+      system-b/
+      system-c/
 ```
 
-The `data/` directory must be added to `.gitignore`.
+The `data/` directories are covered by the `poc/*/data/` gitignore glob.
 
 ## Engine Design
 

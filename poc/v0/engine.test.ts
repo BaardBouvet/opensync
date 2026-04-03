@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import connector from "../connectors/jsonfiles/src/index.js";
+import connector from "../../connectors/jsonfiles/src/index.js";
 import { SyncEngine } from "./engine.js";
 import type { ConnectedSystem, ConnectorContext, InsertRecord, UpdateRecord } from "./engine.js";
 
@@ -123,8 +123,8 @@ describe("SyncEngine — 4-step demo", () => {
     expect(bCustomers[0].data.name).toBe("Alice");
 
     // Identity map is bidirectional.
-    expect(engine.lookupTargetId("customers", "A", aliceAId, "B")).toBe(aliceBId);
-    expect(engine.lookupTargetId("customers", "B", aliceBId, "A")).toBe(aliceAId);
+    expect(engine.lookupTargetId("customers", "A", aliceAId)).toBe(aliceBId);
+    expect(engine.lookupTargetId("customers", "B", aliceBId)).toBe(aliceAId);
 
     // System A still has exactly 1 customer — no echo bounced back.
     const aCustomers = await readAll(customersA, systemA.ctx);
@@ -256,147 +256,6 @@ describe("SyncEngine — 4-step demo", () => {
     const bOrders = await readAll(ordersB, systemB.ctx);
     expect(bOrders).toHaveLength(1);
     expect(bOrders[0].data.amount).toBe(149);
-  });
-});
-
-// ─── 3-System Cascade ─────────────────────────────────────────────────────────────
-//
-// Three systems A, B, C all connected. Tests verify:
-//  • Inserts in A cascade to both B and C in a single poll cycle.
-//  • Edits in B flow to A and C without bouncing back to B.
-//  • Edits in C flow to A and B without bouncing back to C.
-//
-// Poll order: A→B, B→C, A→C, C→B, B→A, C→A
-// A→B then B→C ensures A’s changes cascade to C in one cycle via B.
-
-describe("SyncEngine — 3-system cascade", () => {
-  let tmpDir: string;
-  let sA: ConnectedSystem;
-  let sB: ConnectedSystem;
-  let sC: ConnectedSystem;
-  let engine: SyncEngine;
-
-  let aliceAId: string;
-  let aliceBId: string;
-  let aliceCId: string;
-  let orderAId: string;
-  let orderCId: string;
-
-  /** Run one full bidirectional poll across all three systems. */
-  async function poll(): Promise<ReturnType<SyncEngine["sync"]>> {
-    return [
-      ...await engine.sync(sA, sB),
-      ...await engine.sync(sB, sC),
-      ...await engine.sync(sA, sC),
-      ...await engine.sync(sC, sB),
-      ...await engine.sync(sB, sA),
-      ...await engine.sync(sC, sA),
-    ];
-  }
-
-  beforeAll(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "sync-poc-3sys-"));
-    mkdirSync(join(tmpDir, "a"), { recursive: true });
-    mkdirSync(join(tmpDir, "b"), { recursive: true });
-    mkdirSync(join(tmpDir, "c"), { recursive: true });
-
-    const aCtx = makeCtx([join(tmpDir, "a", "customers.json"), join(tmpDir, "a", "orders.json")]);
-    const bCtx = makeCtx([join(tmpDir, "b", "customers.json"), join(tmpDir, "b", "orders.json")]);
-    const cCtx = makeCtx([join(tmpDir, "c", "customers.json"), join(tmpDir, "c", "orders.json")]);
-
-    sA = { id: "A", ctx: aCtx, entities: connector.getEntities!(aCtx) };
-    sB = { id: "B", ctx: bCtx, entities: connector.getEntities!(bCtx) };
-    sC = { id: "C", ctx: cCtx, entities: connector.getEntities!(cCtx) };
-    engine = new SyncEngine();
-  });
-
-  afterAll(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("insert Alice in A → cascades to B and C in a single poll cycle", async () => {
-    const customersA = sA.entities.find((e) => e.name === "customers")!;
-    const ordersA = sA.entities.find((e) => e.name === "orders")!;
-
-    // Insert customer and order in A.
-    const [alice] = await collect(customersA.insert!(one<InsertRecord>({ data: { name: "Alice" } })));
-    aliceAId = alice.id;
-    const [order] = await collect(ordersA.insert!(one<InsertRecord>({
-      data: { amount: 99 },
-      associations: [{ predicate: "customerId", targetEntity: "customers", targetId: aliceAId }],
-    })));
-    orderAId = order.id;
-
-    const results = await poll();
-
-    // Customer inserted into both B and C.
-    const custInserts = results.filter((r) => r.entity === "customers" && r.action === "insert");
-    expect(custInserts).toHaveLength(2);
-
-    aliceBId = engine.lookupTargetId("customers", "A", aliceAId, "B")!;
-    aliceCId = engine.lookupTargetId("customers", "A", aliceAId, "C")!;
-    expect(aliceBId).toBeDefined();
-    expect(aliceCId).toBeDefined();
-    expect(aliceBId).not.toBe(aliceCId);
-
-    // Order inserted into both B and C with remapped associations.
-    const orderInserts = results.filter((r) => r.entity === "orders" && r.action === "insert");
-    expect(orderInserts).toHaveLength(2);
-
-    orderCId = engine.lookupTargetId("orders", "A", orderAId, "C")!;
-    const cOrders = await readAll(sC.entities.find((e) => e.name === "orders")!, sC.ctx);
-    expect(cOrders[0].associations).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ predicate: "customerId", targetEntity: "customers", targetId: aliceCId }),
-      ]),
-    );
-
-    // Each system has exactly 1 customer and 1 order — no duplicates.
-    expect(await readAll(customersA, sA.ctx)).toHaveLength(1);
-    expect(await readAll(sB.entities.find((e) => e.name === "customers")!, sB.ctx)).toHaveLength(1);
-    expect(await readAll(sC.entities.find((e) => e.name === "customers")!, sC.ctx)).toHaveLength(1);
-  });
-
-  it("edit name in B → flows to A and C; does not bounce back to B", async () => {
-    const customersB = sB.entities.find((e) => e.name === "customers")!;
-
-    await collect(customersB.update!(one<UpdateRecord>({ id: aliceBId, data: { name: "Alice Smith" } })));
-
-    const results = await poll();
-
-    // B→C and B→A both update directly (2 writes). C→A also fires because C was just
-    // updated by B→C and C→A runs in the same cycle before a new watermark suppresses it.
-    // That third write is a redundant cascade but writes the correct value.
-    expect(results.filter((r) => r.entity === "customers" && r.action === "update")).toHaveLength(3);
-    expect(results.filter((r) => r.entity === "customers" && r.action === "insert")).toHaveLength(0);
-
-    // All three systems reflect the new name.
-    const aName = (await readAll(sA.entities.find((e) => e.name === "customers")!, sA.ctx))[0].data.name;
-    const bName = (await readAll(customersB, sB.ctx))[0].data.name;
-    const cName = (await readAll(sC.entities.find((e) => e.name === "customers")!, sC.ctx))[0].data.name;
-    expect(aName).toBe("Alice Smith");
-    expect(bName).toBe("Alice Smith");
-    expect(cName).toBe("Alice Smith");
-  });
-
-  it("edit order amount in C → flows to A and B; does not bounce back to C", async () => {
-    const ordersC = sC.entities.find((e) => e.name === "orders")!;
-
-    await collect(ordersC.update!(one<UpdateRecord>({ id: orderCId, data: { amount: 149 } })));
-
-    const results = await poll();
-
-    // C→B and C→A both update directly (2 writes). B→A also fires because B was just
-    // updated by C→B and B→A runs in the same cycle. Same correct-value redundant cascade.
-    expect(results.filter((r) => r.entity === "orders" && r.action === "update")).toHaveLength(3);
-    expect(results.filter((r) => r.entity === "orders" && r.action === "insert")).toHaveLength(0);
-
-    const aAmount = (await readAll(sA.entities.find((e) => e.name === "orders")!, sA.ctx))[0].data.amount;
-    const bAmount = (await readAll(sB.entities.find((e) => e.name === "orders")!, sB.ctx))[0].data.amount;
-    const cAmount = (await readAll(ordersC, sC.ctx))[0].data.amount;
-    expect(aAmount).toBe(149);
-    expect(bAmount).toBe(149);
-    expect(cAmount).toBe(149);
   });
 });
 

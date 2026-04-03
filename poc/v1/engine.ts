@@ -4,14 +4,19 @@ import type {
   EntityDefinition,
   InsertRecord,
   UpdateRecord,
-} from "../packages/sdk/src/index.js";
+} from "../../packages/sdk/src/index.js";
 
 // ─── Persistent State ────────────────────────────────────────────────────────
 
-/** Plain-object snapshot of engine state that can be JSON-serialised. */
+/**
+ * Plain-object snapshot of engine state that can be JSON-serialised.
+ *
+ * identityMap[entityName][canonicalId][instanceId] = recordId
+ * A canonical ID (a UUID) represents the same logical record across all connected
+ * systems. Each instanceId entry maps to the record's native ID in that system.
+ */
 export interface EngineState {
-  /** identityMap[entityName]["instanceId:recordId"] = otherRecordId */
-  identityMap: Record<string, Record<string, string>>;
+  identityMap: Record<string, Record<string, Record<string, string>>>;
   /** watermarks["instanceId:entityName"] = since value */
   watermarks: Record<string, string>;
 }
@@ -53,36 +58,50 @@ export interface RecordSyncResult {
  *  - No conflict resolution — last write wins per field.
  *  - Deferred records (unresolved FK associations) are not retried automatically; they rely
  *    on the caller ordering entities parent-first so deferral never occurs in the happy path.
- *  - Identity map is pairwise: does not scale correctly beyond 2 systems (use poc1/ for N systems).
  */
 export class SyncEngine {
-  // identityMap[entityName][`${instanceId}:${recordId}`] = otherSystem's recordId
-  private readonly identityMap = new Map<string, Map<string, string>>();
+  // canonical[entityName][canonicalId][instanceId] = recordId
+  // One canonical UUID per logical record, shared across all connected systems.
+  private readonly canonical = new Map<string, Map<string, Map<string, string>>>();
+
+  // externalToCanonical[entityName][`${instanceId}:${recordId}`] = canonicalId
+  private readonly externalToCanonical = new Map<string, Map<string, string>>();
 
   // watermarks[`${instanceId}:${entityName}`] = since value for next incremental read
   private readonly watermarks = new Map<string, string>();
 
-  // echoes[instanceId] = IDs we wrote to that instance; skip them on the next read from it
-  private readonly echoes = new Map<string, Set<string>>();
+  // echoes[targetInstanceId][sourceInstanceId] = Set<targetRecordId>
+  // Records written to targetInstance while syncing FROM sourceInstance.
+  // Suppressed when reading FROM targetInstance back TO sourceInstance (prevents bounce).
+  // Does NOT suppress reads from targetInstance to other systems (allows N-system cascade).
+  private readonly echoes = new Map<string, Map<string, Set<string>>>();
 
   // ─── State serialisation ───────────────────────────────────────────────────
 
   /** Serialise current identity map + watermarks to a plain object. */
   toJSON(): EngineState {
-    const identityMap: Record<string, Record<string, string>> = {};
-    for (const [entity, map] of this.identityMap) {
-      identityMap[entity] = Object.fromEntries(map);
+    const identityMap: EngineState["identityMap"] = {};
+    for (const [entity, canonMap] of this.canonical) {
+      identityMap[entity] = {};
+      for (const [canonId, instances] of canonMap) {
+        identityMap[entity][canonId] = Object.fromEntries(instances);
+      }
     }
     return { identityMap, watermarks: Object.fromEntries(this.watermarks) };
   }
 
   /** Restore state previously returned by toJSON(). Replaces current state. */
   fromJSON(state: EngineState): void {
-    this.identityMap.clear();
-    for (const [entity, entries] of Object.entries(state.identityMap)) {
-      this.identityMap.set(entity, new Map(Object.entries(entries)));
-    }
+    this.canonical.clear();
+    this.externalToCanonical.clear();
     this.watermarks.clear();
+    for (const [entity, canonMap] of Object.entries(state.identityMap)) {
+      for (const [canonId, instances] of Object.entries(canonMap)) {
+        for (const [instanceId, recordId] of Object.entries(instances)) {
+          this._linkCanonical(entity, canonId, instanceId, recordId);
+        }
+      }
+    }
     for (const [k, v] of Object.entries(state.watermarks)) {
       this.watermarks.set(k, v);
     }
@@ -91,30 +110,59 @@ export class SyncEngine {
   // ─── Public helpers ──────────────────────────────────────────────────────────
 
   /**
-   * Look up what ID a source record has been assigned in the other system.
-   * Returns undefined if the record has never been synced.
+   * Look up what ID a source record has been assigned in a specific target system.
+   * Returns undefined if the record has never been synced to that target.
    */
   lookupTargetId(
     entityName: string,
     sourceInstanceId: string,
     sourceRecordId: string,
+    targetInstanceId: string,
   ): string | undefined {
-    return this.identityMap
+    const canonId = this.externalToCanonical
       .get(entityName)
       ?.get(`${sourceInstanceId}:${sourceRecordId}`);
+    if (!canonId) return undefined;
+    return this.canonical.get(entityName)?.get(canonId)?.get(targetInstanceId);
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────────
 
-  private idMap(entityName: string): Map<string, string> {
-    let m = this.identityMap.get(entityName);
-    if (!m) { m = new Map(); this.identityMap.set(entityName, m); }
-    return m;
+  private _linkCanonical(
+    entityName: string,
+    canonId: string,
+    instanceId: string,
+    recordId: string,
+  ): void {
+    let ext = this.externalToCanonical.get(entityName);
+    if (!ext) { ext = new Map(); this.externalToCanonical.set(entityName, ext); }
+    ext.set(`${instanceId}:${recordId}`, canonId);
+    let can = this.canonical.get(entityName);
+    if (!can) { can = new Map(); this.canonical.set(entityName, can); }
+    let inst = can.get(canonId);
+    if (!inst) { inst = new Map(); can.set(canonId, inst); }
+    inst.set(instanceId, recordId);
   }
 
-  private echoSet(instanceId: string): Set<string> {
-    let s = this.echoes.get(instanceId);
-    if (!s) { s = new Set(); this.echoes.set(instanceId, s); }
+  private _getOrCreateCanonical(
+    entityName: string,
+    instanceId: string,
+    recordId: string,
+  ): string {
+    const existing = this.externalToCanonical
+      .get(entityName)
+      ?.get(`${instanceId}:${recordId}`);
+    if (existing) return existing;
+    const canonId = crypto.randomUUID();
+    this._linkCanonical(entityName, canonId, instanceId, recordId);
+    return canonId;
+  }
+
+  private _echoSet(targetInstanceId: string, sourceInstanceId: string): Set<string> {
+    let m = this.echoes.get(targetInstanceId);
+    if (!m) { m = new Map(); this.echoes.set(targetInstanceId, m); }
+    let s = m.get(sourceInstanceId);
+    if (!s) { s = new Set(); m.set(sourceInstanceId, s); }
     return s;
   }
 
@@ -122,7 +170,7 @@ export class SyncEngine {
    * Rewrite each association's targetId from the source-system ID to the target-system ID.
    * Returns null if any dependency is not yet in the identity map → caller should defer.
    */
-  private remapAssociations(
+  private _remapAssociations(
     associations: Association[] | undefined,
     fromInstanceId: string,
     toInstanceId: string,
@@ -130,7 +178,12 @@ export class SyncEngine {
     if (!associations || associations.length === 0) return [];
     const remapped: Association[] = [];
     for (const assoc of associations) {
-      const mapped = this.lookupTargetId(assoc.targetEntity, fromInstanceId, assoc.targetId);
+      const mapped = this.lookupTargetId(
+        assoc.targetEntity,
+        fromInstanceId,
+        assoc.targetId,
+        toInstanceId,
+      );
       if (mapped === undefined) return null; // unresolved dependency — defer
       remapped.push({ ...assoc, targetId: mapped });
     }
@@ -154,11 +207,15 @@ export class SyncEngine {
       const toEntity = to.entities.find((e) => e.name === fromEntity.name);
       if (!toEntity?.insert || !toEntity?.update) continue;
 
-      const watermarkKey = `${from.id}:${fromEntity.name}`;
+      // Per-pair watermark: `${from.id}→${to.id}:${entityName}` so that syncing
+      // from the same source to multiple targets advances each target's cursor
+      // independently (avoids the strict > watermark filter cutting off sibling passes).
+      const watermarkKey = `${from.id}→${to.id}:${fromEntity.name}`;
       const since = this.watermarks.get(watermarkKey);
-      const fromEchoes = this.echoSet(from.id);
-      const toEchoes = this.echoSet(to.id);
-      const idMap = this.idMap(fromEntity.name);
+      // fromEchoes: records in `from` written there from `to` — skip to prevent bounce back.
+      const fromEchoes = this._echoSet(from.id, to.id);
+      // toEchoes: records we write to `to` — recorded to suppress the reverse pass.
+      const toEchoes = this._echoSet(to.id, from.id);
 
       // Collect all records first; watermark advances uniformly after the full read.
       const pending: Array<{
@@ -191,7 +248,7 @@ export class SyncEngine {
       }
 
       for (const record of pending) {
-        const remapped = this.remapAssociations(
+        const remapped = this._remapAssociations(
           record.associations,
           from.id,
           to.id,
@@ -208,8 +265,7 @@ export class SyncEngine {
           continue;
         }
 
-        const mapKey = `${from.id}:${record.id}`;
-        const existingTargetId = idMap.get(mapKey);
+        const existingTargetId = this.lookupTargetId(fromEntity.name, from.id, record.id, to.id);
 
         if (existingTargetId !== undefined) {
           // Record already exists in the target — update it.
@@ -239,8 +295,8 @@ export class SyncEngine {
             }),
           )) {
             if (!r.error && r.id) {
-              idMap.set(mapKey, r.id);
-              idMap.set(`${to.id}:${r.id}`, record.id);
+              const canonId = this._getOrCreateCanonical(fromEntity.name, from.id, record.id);
+              this._linkCanonical(fromEntity.name, canonId, to.id, r.id);
               toEchoes.add(r.id);
               results.push({
                 entity: fromEntity.name,
