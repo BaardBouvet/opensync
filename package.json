@@ -1,0 +1,12 @@
+{
+  "name": "opensync",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "connectors/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --dry"
+  }
+}

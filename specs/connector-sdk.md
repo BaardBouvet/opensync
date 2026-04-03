@@ -10,12 +10,11 @@ interface Connector {
   getEntities?(ctx: ConnectorContext): EntityDefinition[];  // omit for pure action connectors
   getActions?(ctx: ConnectorContext): ActionDefinition[]; // omit if no actions
   getOAuthConfig?(config: Record<string, unknown>): OAuthConfig; // required when metadata.auth.type === 'oauth2'
-  lifecycle?: {
-    onEnable(ctx: ConnectorContext): Promise<void>;
-    onDisable(ctx: ConnectorContext): Promise<void>;
-  };
+  onEnable?(ctx: ConnectorContext): Promise<void>;  // connector-level setup (e.g. connection pools, connector-wide subscriptions)
+  onDisable?(ctx: ConnectorContext): Promise<void>; // connector-level teardown
   prepareRequest?(req: Request, ctx: ConnectorContext): Promise<Request>;
   handleWebhook?(req: Request, ctx: ConnectorContext): Promise<WebhookBatch[]>;
+  healthCheck?(ctx: ConnectorContext): Promise<HealthStatus>;
 }
 ```
 
@@ -43,6 +42,8 @@ interface EntityDefinition {
   schema?: Record<string, FieldDescriptor>;    // field metadata (e.g. { "fnavn": { description: "First name" }, "amount": { description: "Value in NOK", type: "number" } })
   scopes?: { read?: string[]; write?: string[]; always?: string[] }; // OAuth scopes by role; 'always' is requested whenever the entity is enabled
   dependsOn?: string[];                        // e.g. ['company'] — sync companies before contacts (entity names)
+  onEnable?(ctx: ConnectorContext): Promise<void>;  // register webhook subscription for this entity's events
+  onDisable?(ctx: ConnectorContext): Promise<void>; // deregister webhook subscription
 }
 ```
 
@@ -118,7 +119,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       },
       async *update(records, ctx) {
@@ -129,7 +130,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Batch update failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       },
       async *delete(ids, ctx) {
@@ -139,7 +140,7 @@ getEntities(): EntityDefinition[] {
             body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
           });
           if (!res.ok) throw new Error(`Batch delete failed: ${res.status}`);
-          yield* batch.map(id => ({ id, status: 'deleted' }));
+          yield* batch.map(id => ({ id }));
         }
       }
     },
@@ -173,7 +174,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       },
       async *update(records, ctx) {
@@ -184,7 +185,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Update failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       },
       async *delete(ids, ctx) {
@@ -194,7 +195,7 @@ getEntities(): EntityDefinition[] {
             body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
           });
           if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-          yield* batch.map(id => ({ id, status: 'deleted' }));
+          yield* batch.map(id => ({ id }));
         }
       }
     },
@@ -228,7 +229,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'created' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       },
       async *update(records, ctx) {
@@ -239,7 +240,7 @@ getEntities(): EntityDefinition[] {
           });
           if (!res.ok) throw new Error(`Update failed: ${res.status}`);
           const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties, status: 'updated' }));
+          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
         }
       }
       // no delete() — deals cannot be archived via the HubSpot API
@@ -467,27 +468,26 @@ Each write method yields one result per input record/ID, in the same order (posi
 
 ```typescript
 interface InsertResult {
-  id: string;                    // ID assigned by this (target) system
+  id: string;                     // ID assigned by this (target) system
   data?: Record<string, unknown>; // full API response; stored for echo prevention — lets the engine suppress its own writes when they come back through fetch()
-  status: 'created' | 'error';
-  error?: string;
+  error?: string;                 // present = this record failed; absent = success
 }
 
 interface UpdateResult {
   id: string;
   data?: Record<string, unknown>;
-  status: 'updated' | 'not_found' | 'error';
-  error?: string;
+  notFound?: true;                // record didn't exist in target — not an error, engine reconciles
+  error?: string;                 // present = this record failed; absent = success
 }
 
 interface DeleteResult {
   id: string;
-  status: 'deleted' | 'not_found' | 'error';
-  error?: string;
+  notFound?: true;                // record didn't exist in target — not an error, already gone
+  error?: string;                 // present = this record failed; absent = success
 }
 ```
 
-`InsertResult.id` is stored in the identity map and fed back as `UpdateRecord.id` and the delete ID on future writes. `InsertResult.data` / `UpdateResult.data` are stored for echo prevention — they let the engine recognise its own writes coming back through `fetch()` and suppress them as no-ops. `not_found` on delete or update is not an error — the record was already gone or never arrived.
+`InsertResult.id` is stored in the identity map and fed back as `UpdateRecord.id` and the delete ID on future writes. `InsertResult.data` / `UpdateResult.data` are stored for echo prevention — they let the engine recognise its own writes coming back through `fetch()` and suppress them as no-ops. `notFound` on delete or update is not an error — the record was already gone or never arrived. The happy-path result is just `{ id }` — no status annotation needed.
 
 ## ConnectorContext
 
@@ -634,7 +634,7 @@ All three write methods are optional. The engine only calls a method if the enti
 
 - The engine streams records in; the connector pulls and chunks however it wants.
 - Each method yields one result per input, in the same order — the engine correlates positionally.
-- Records missing fields marked `required: true` in the entity's `schema` are rejected by the engine before reaching `insert()` or `update()` — a synthetic result with `status: 'error'` is yielded on the connector's behalf.
+- Records missing fields marked `required: true` in the entity's `schema` are rejected by the engine before reaching `insert()` or `update()` — a synthetic result with `error` set is yielded on the connector's behalf.
 - The engine dispatches inserts, updates, and deletes in separate calls — no branching needed inside the connector.
 - Idempotent: `not_found` on delete or update is a valid terminal state, not an error.
 
@@ -735,22 +735,7 @@ This requires `lookup` to be implemented on the target entity. If it is absent, 
 
 ## Health Checks
 
-Connectors can optionally implement a health check for monitoring:
-
-```typescript
-interface Connector {
-  // ... existing methods
-  healthCheck?(ctx: ConnectorContext): Promise<HealthStatus>;
-}
-
-interface HealthStatus {
-  healthy: boolean;
-  message?: string;
-  details?: Record<string, unknown>;  // e.g. { apiVersion: '3', rateLimitRemaining: 450 }
-}
-```
-
-Called periodically by the engine to verify the connection is alive (valid credentials, API reachable, etc.). Results feed into the channel health status shown by `opensync status`.
+`healthCheck?(ctx): Promise<HealthStatus>` — called periodically by the engine to verify the connection is alive (valid credentials, API reachable, etc.). Results feed into the channel health status shown by `opensync status`.
 
 ## Error Hierarchy
 
@@ -814,7 +799,7 @@ Three connectors ship with the project for development and testing:
 - Deliberately different field names to exercise transforms
 - Implements: `insert` only (append-only log)
 
-### mock-file (hello world)
+### jsonfile (hello world)
 The simplest possible connector — reads and writes a JSON array file. Intended as the starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
 - Storage: a `.json` file on disk (path from `ctx.config.filePath`)
