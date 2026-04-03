@@ -1,0 +1,9 @@
+# Channel definitions
+#
+# Channels group connectors into sync rings. All connectors mapped to a channel
+# will receive each other's changes. Add future metadata here (e.g. conflict
+# resolution strategy, sync direction, rate limits).
+
+channels:
+  - id: customers
+  - id: orders
