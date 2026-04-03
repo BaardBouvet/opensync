@@ -1,12 +1,14 @@
 # OpenSync Specs
 
-Complete specification for OpenSync — an open-source, developer-friendly, bi-directional SaaS sync engine.
+Complete specification for OpenSync — an open-source, developer-friendly, bi-directional sync engine.
 
 ## Architecture & Design
 - [overview.md](overview.md) — Architecture, philosophy, tech stack, data flow
 
 ## Components
 - [connector-sdk.md](connector-sdk.md) — Connector interfaces, capabilities, lifecycle, NormalizedRecord, SyncContext
+- [connector-isolation.md](connector-isolation.md) — Statelessness contract, allowedHosts, bundling, execution isolation
+- [connector-distribution.md](connector-distribution.md) — Packaging, publishing, npm/git/local distribution, engine resolution, security
 - [sdk-helpers.md](sdk-helpers.md) — Optional SDK helper APIs for common REST connector patterns (pagination, mapping, state, batching)
 - [sync-engine.md](sync-engine.md) — Pipeline, shadow state, field tracking, diffing, transforms, conflict resolution, dispatch
 - [identity.md](identity.md) — Hub-and-spoke identity map, global IDs, associations, flat vs relational
