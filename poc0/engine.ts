@@ -53,9 +53,10 @@ export interface RecordSyncResult {
  *  - No conflict resolution — last write wins per field.
  *  - Deferred records (unresolved FK associations) are not retried automatically; they rely
  *    on the caller ordering entities parent-first so deferral never occurs in the happy path.
+ *  - Identity map is pairwise: does not scale correctly beyond 2 systems (use poc1/ for N systems).
  */
 export class SyncEngine {
-  // identityMap[entityName][`${instanceId}:${recordId}`] = otherInstancesRecordId
+  // identityMap[entityName][`${instanceId}:${recordId}`] = otherSystem's recordId
   private readonly identityMap = new Map<string, Map<string, string>>();
 
   // watermarks[`${instanceId}:${entityName}`] = since value for next incremental read
@@ -90,7 +91,7 @@ export class SyncEngine {
   // ─── Public helpers ──────────────────────────────────────────────────────────
 
   /**
-   * Look up what ID a source record has been assigned in another system.
+   * Look up what ID a source record has been assigned in the other system.
    * Returns undefined if the record has never been synced.
    */
   lookupTargetId(
@@ -107,19 +108,13 @@ export class SyncEngine {
 
   private idMap(entityName: string): Map<string, string> {
     let m = this.identityMap.get(entityName);
-    if (!m) {
-      m = new Map();
-      this.identityMap.set(entityName, m);
-    }
+    if (!m) { m = new Map(); this.identityMap.set(entityName, m); }
     return m;
   }
 
   private echoSet(instanceId: string): Set<string> {
     let s = this.echoes.get(instanceId);
-    if (!s) {
-      s = new Set();
-      this.echoes.set(instanceId, s);
-    }
+    if (!s) { s = new Set(); this.echoes.set(instanceId, s); }
     return s;
   }
 
@@ -135,9 +130,7 @@ export class SyncEngine {
     if (!associations || associations.length === 0) return [];
     const remapped: Association[] = [];
     for (const assoc of associations) {
-      const mapped = this.idMap(assoc.targetEntity).get(
-        `${fromInstanceId}:${assoc.targetId}`,
-      );
+      const mapped = this.lookupTargetId(assoc.targetEntity, fromInstanceId, assoc.targetId);
       if (mapped === undefined) return null; // unresolved dependency — defer
       remapped.push({ ...assoc, targetId: mapped });
     }

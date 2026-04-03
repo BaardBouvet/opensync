@@ -131,10 +131,10 @@ console.log("=".repeat(60));
 console.log("  OpenSync JSON-Files POC — polling daemon");
 console.log(`  Poll interval: ${POLL_MS}ms  |  Stop with Ctrl+C`);
 console.log("  Files:");
-console.log(`    poc/data/system-a/customers.json`);
-console.log(`    poc/data/system-a/orders.json`);
-console.log(`    poc/data/system-b/customers.json`);
-console.log(`    poc/data/system-b/orders.json`);
+console.log(`    poc0/data/system-a/customers.json`);
+console.log(`    poc0/data/system-a/orders.json`);
+console.log(`    poc0/data/system-b/customers.json`);
+console.log(`    poc0/data/system-b/orders.json`);
 console.log("=".repeat(60));
 console.log();
 
