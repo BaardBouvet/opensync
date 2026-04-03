@@ -14,9 +14,9 @@ import type {
 
 // ─── File format ─────────────────────────────────────────────────────────────
 // The JSON file is a flat array of objects. Each object must have an id field
-// (configurable via `idField`, default "id"). Any other fields are passed
-// through as-is. The connector also maintains a watermark field (configurable
-// via `watermarkField`, default "updatedAt") for incremental syncs.
+// (configurable via `idField`). Any other fields are passed through as-is. The
+// connector also maintains a watermark field (configurable via `watermarkField`)
+// for incremental syncs.
 
 interface FileRecord {
   [key: string]: unknown;
@@ -45,10 +45,13 @@ function filePath(ctx: ConnectorContext): string {
   return p;
 }
 
+const DEFAULT_ID_FIELD = "id";
+const DEFAULT_WATERMARK_FIELD = "updatedAt";
+
 function fieldConfig(ctx: ConnectorContext): FieldConfig {
   return {
-    idField: (ctx.config["idField"] as string | undefined) ?? "id",
-    watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? "updatedAt",
+    idField: (ctx.config["idField"] as string | undefined) ?? DEFAULT_ID_FIELD,
+    watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? DEFAULT_WATERMARK_FIELD,
   };
 }
 
@@ -195,13 +198,15 @@ const connector: Connector = {
       },
       idField: {
         type: "string",
-        description: "Field name used as the record identifier. Defaults to \"id\".",
+        description: "Field name used as the record identifier.",
         required: false,
+        default: DEFAULT_ID_FIELD,
       },
       watermarkField: {
         type: "string",
-        description: "Field name used as the incremental sync watermark (ISO 8601 timestamp). Defaults to \"updatedAt\".",
+        description: "Field name used as the incremental sync watermark (ISO 8601 timestamp).",
         required: false,
+        default: DEFAULT_WATERMARK_FIELD,
       },
     },
   },

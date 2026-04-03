@@ -31,8 +31,10 @@ import { ConnectorError } from "@opensync/sdk";
 
 const producers = new Map<string, Producer>();
 
+const DEFAULT_CLIENT_ID = "opensync";
+
 function clientId(ctx: ConnectorContext): string {
-  return (ctx.config["clientId"] as string | undefined) ?? "opensync";
+  return (ctx.config["clientId"] as string | undefined) ?? DEFAULT_CLIENT_ID;
 }
 
 function topicName(ctx: ConnectorContext): string {
@@ -250,9 +252,9 @@ const connector: Connector = {
       },
       clientId: {
         type: "string",
-        description: "Kafka client ID shown in broker logs. Defaults to 'opensync'.",
+        description: "Kafka client ID shown in broker logs.",
         required: false,
-        default: "opensync",
+        default: DEFAULT_CLIENT_ID,
       },
       saslMechanism: {
         type: "string",
