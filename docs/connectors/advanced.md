@@ -7,7 +7,7 @@ Once you have a basic connector working, these patterns help with production sce
 Use a generator to yield batches incrementally:
 
 ```typescript
-async *fetch(ctx: ConnectorContext, since?: string) {
+async *read(ctx: ConnectorContext, since?: string) {
   let cursor: string | undefined;
   
   while (true) {
@@ -43,7 +43,7 @@ handles persistence automatically. Use `ctx.state` when you need to store
 additional state that the `since` field alone can't carry:
 
 ```typescript
-async *fetch(ctx: ConnectorContext, since?: string) {
+async *read(ctx: ConnectorContext, since?: string) {
   let cursor = await ctx.state.get<string>('cursor:contact') ?? since;
   
   while (true) {
@@ -72,7 +72,7 @@ Throw typed errors. The engine uses them to decide retry strategy:
 ```typescript
 import { ConnectorError, RateLimitError, AuthError } from '@opensync/sdk';
 
-async *fetch(ctx: ConnectorContext, since?: string) {
+async *read(ctx: ConnectorContext, since?: string) {
   const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
   
   if (res.status === 429) {
@@ -178,7 +178,7 @@ Shows up in `opensync status` and triggers alerts if your API goes down.
 If your API doesn't physically delete records but marks them deleted:
 
 ```typescript
-async *fetch(ctx: ConnectorContext, since?: string) {
+async *read(ctx: ConnectorContext, since?: string) {
   const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
   const contacts = await res.json();
   
@@ -206,7 +206,7 @@ Some fields can't be changed after creation (like invoice numbers). Declare them
   schema: {
     invoiceNumber: { immutable: true },  // Can't update after creation
   },
-  async *fetch(ctx: ConnectorContext, since?: string) {
+  async *read(ctx: ConnectorContext, since?: string) {
     // ...
   },
 }
@@ -241,7 +241,7 @@ Called before every request. This is in addition to standard OAuth handling.
 ## GraphQL APIs
 
 ```typescript
-async *fetch(ctx: ConnectorContext, since?: string) {
+async *read(ctx: ConnectorContext, since?: string) {
   const query = `
     query GetContacts {
       contacts {
@@ -284,7 +284,7 @@ export default {
   getEntities(ctx: ConnectorContext) {
     return [{
       name: 'person',
-      async *fetch(ctx: ConnectorContext, since?: string) {
+      async *read(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.rdfUrl}`);
         const jsonld = await res.json(); // JSON-LD
         
@@ -371,7 +371,7 @@ export default {
     return [{
       name: 'row',
 
-      async *fetch(ctx: ConnectorContext, since?: string) {
+      async *read(ctx: ConnectorContext, since?: string) {
         const result = await pool.query('SELECT * FROM my_table ORDER BY id');
         yield { records: result.rows.map(r => ({ id: String(r.id), data: r })) };
       },

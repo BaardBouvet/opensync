@@ -76,9 +76,9 @@ describe("jsonfiles connector", () => {
   });
   // ── fetch ──────────────────────────────────────────────────────────────────
 
-  describe("fetch", () => {
+  describe("read", () => {
     it("returns empty batch when file does not exist", async () => {
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.records).toHaveLength(0);
     });
 
@@ -88,7 +88,7 @@ describe("jsonfiles connector", () => {
         { _id: "2", name: "Bob",   _updatedAt: "2026-01-02T00:00:00.000Z" },
       ]));
 
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.records.map((r) => r.id)).toEqual(["1", "2"]);
     });
 
@@ -98,7 +98,7 @@ describe("jsonfiles connector", () => {
         { _id: "2", name: "Bob",   _updatedAt: "2026-02-01T00:00:00.000Z" },
       ]));
 
-      const [batch] = await collect(entity.fetch!(ctx, "2026-01-15T00:00:00.000Z"));
+      const [batch] = await collect(entity.read!(ctx, "2026-01-15T00:00:00.000Z"));
       expect(batch.records.map((r) => r.id)).toEqual(["2"]);
     });
 
@@ -108,7 +108,7 @@ describe("jsonfiles connector", () => {
         { _id: "2", _updatedAt: "2026-03-01T00:00:00.000Z" },
       ]));
 
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.since).toBe("2026-03-01T00:00:00.000Z");
     });
   });
@@ -171,7 +171,7 @@ describe("jsonfiles connector", () => {
         )
       );
 
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.records).toHaveLength(2);
     });
   });
@@ -211,7 +211,7 @@ describe("jsonfiles connector", () => {
       const [result] = await collect(entity.delete!(from(["1"]), ctx));
       expect(result).toEqual({ id: "1" });
 
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.records).toHaveLength(0);
     });
 
@@ -248,7 +248,7 @@ describe("jsonfiles connector", () => {
         { uuid: "2", name: "New",  modifiedAt: "2026-03-01T00:00:00.000Z" },
       ]));
 
-      const [batch] = await collect(customEntity.fetch!(customCtx, "2026-02-01T00:00:00.000Z"));
+      const [batch] = await collect(customEntity.read!(customCtx, "2026-02-01T00:00:00.000Z"));
       expect(batch.records.map((r) => r.id)).toEqual(["2"]);
       expect(batch.since).toBe("2026-03-01T00:00:00.000Z");
     });
@@ -271,7 +271,7 @@ describe("jsonfiles connector", () => {
       const [result] = await collect(customEntity.delete!(from(["1"])));
       expect(result).toEqual({ id: "1" });
 
-      const [batch] = await collect(customEntity.fetch!(customCtx));
+      const [batch] = await collect(customEntity.read!(customCtx));
       expect(batch.records).toHaveLength(0);
     });
   });
@@ -290,7 +290,7 @@ describe("jsonfiles connector", () => {
 
       const assocCtx = makeCtx([fp], { associationsField: "links" });
       const assocEntity = connector.getEntities!(assocCtx)[0];
-      const [batch] = await collect(assocEntity.fetch!(assocCtx));
+      const [batch] = await collect(assocEntity.read!(assocCtx));
 
       expect(batch.records[0].associations).toEqual([
         { predicate: "company", targetEntity: "company", targetId: "c1" },
@@ -307,7 +307,7 @@ describe("jsonfiles connector", () => {
 
       const assocCtx = makeCtx([fp], { associationsField: "links" });
       const assocEntity = connector.getEntities!(assocCtx)[0];
-      const [batch] = await collect(assocEntity.fetch!(assocCtx));
+      const [batch] = await collect(assocEntity.read!(assocCtx));
 
       expect(batch.records[0].data).not.toHaveProperty("links");
     });
@@ -332,7 +332,7 @@ describe("jsonfiles connector", () => {
     it("does not set associations when field is not configured", async () => {
       writeFileSync(fp, JSON.stringify([{ _id: "1", links: [] }]));
 
-      const [batch] = await collect(entity.fetch!(ctx));
+      const [batch] = await collect(entity.read!(ctx));
       expect(batch.records[0].associations).toBeUndefined();
     });
   });
@@ -367,8 +367,8 @@ describe("jsonfiles connector", () => {
       const multiCtx = makeCtx([customersFile, invoicesFile]);
       const [customersEntity, invoicesEntity] = connector.getEntities!(multiCtx);
 
-      const [customerBatch] = await collect(customersEntity.fetch!(multiCtx));
-      const [invoiceBatch] = await collect(invoicesEntity.fetch!(multiCtx));
+      const [customerBatch] = await collect(customersEntity.read!(multiCtx));
+      const [invoiceBatch] = await collect(invoicesEntity.read!(multiCtx));
 
       expect(customerBatch.records.map((r) => r.id)).toEqual(["c1"]);
       expect(invoiceBatch.records.map((r) => r.id)).toEqual(["i1"]);
@@ -380,7 +380,7 @@ describe("jsonfiles connector", () => {
 
       await collect(customersEntity.insert!(from([{ data: { _id: "c1" } }] satisfies InsertRecord[])));
 
-      const [invoiceBatch] = await collect(invoicesEntity.fetch!(multiCtx));
+      const [invoiceBatch] = await collect(invoicesEntity.read!(multiCtx));
       expect(invoiceBatch.records).toHaveLength(0);
     });
   });

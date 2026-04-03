@@ -20,22 +20,22 @@ interface Connector {
 
 Every connector implements `Connector` and must provide at least `getEntities` or `getActions` — the engine rejects registration if neither is present. Implement only what applies: a pure action connector (email sender, Slack poster) omits `getEntities`; a read-only source omits `getActions`.
 
-Within `getEntities`, each `EntityDefinition` must implement at least one of `fetch`, `insert`, `update`, or `delete` — a bare empty entity is rejected at registration time.
+Within `getEntities`, each `EntityDefinition` must implement at least one of `read`, `insert`, `update`, or `delete` — a bare empty entity is rejected at registration time.
 
 ## Entities
 
 The connector defines what data it can provide via `getEntities()`. Each entity represents one object type with its own read/write logic, scheduling hints, and dependency ordering.
 
 ```typescript
-interface FetchBatch {
-  records: FetchRecord[];
+interface ReadBatch {
+  records: ReadRecord[];
   since?: string;  // watermark for this batch; engine stores for next poll
 }
 
 interface EntityDefinition {
   name: string;                                // e.g. 'contact', 'company'
-  fetch?(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch>;
-  lookup?(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]>;
+  read?(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch>;
+  lookup?(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]>;
   insert?(records: AsyncIterable<InsertRecord>, ctx: ConnectorContext): AsyncIterable<InsertResult>;
   update?(records: AsyncIterable<UpdateRecord>, ctx: ConnectorContext): AsyncIterable<UpdateResult>;
   delete?(ids: AsyncIterable<string>, ctx: ConnectorContext): AsyncIterable<DeleteResult>;
@@ -58,7 +58,7 @@ On `ActionDefinition`, `schema` describes the *input payload* the action expects
 The connector knows its own API best:
 
 - **Dependencies**: HubSpot contacts reference companies. The connector declares `dependsOn: ['company']` so the engine syncs companies first — otherwise contact creates fail because the referenced company doesn't exist in the target yet.
-- **Bundled APIs**: Some APIs return multiple entity types in one call. The connector can use a single HTTP request internally and yield records across multiple `fetch()` calls.
+- **Bundled APIs**: Some APIs return multiple entity types in one call. The connector can use a single HTTP request internally and yield records across multiple `read()` calls.
 - **Single source of truth**: The entity definitions ARE the source of truth — no separate `metadata.entities` that can drift out of sync with the actual implementation.
 
 ### Watermark Tracking
@@ -71,7 +71,7 @@ The connector receives the watermark via the `since` parameter. The semantics of
 - Sequence number
 - Any opaque string
 
-If `since` is undefined, it's a full sync. The connector's first return value from `fetch()` will be stored as the watermark for the next poll.
+If `since` is undefined, it's a full sync. The connector's first return value from `read()` will be stored as the watermark for the next poll.
 
 > **Naming note**: `since` was chosen over `cursor` (too database-flavored) and `checkpoint` (accurate but verbose). It reads naturally: "give me everything since this point."
 
@@ -94,7 +94,7 @@ getEntities(): EntityDefinition[] {
       name: 'company',
       schema: { name: { description: 'Company name' }, domain: { description: 'Company website domain' }, industry: { description: 'Industry category' } },
       scopes: { read: ['crm.objects.companies.read'], write: ['crm.objects.companies.write'] },
-      async *fetch(ctx, since) {
+      async *read(ctx, since) {
         for await (const page of paginate('/crm/v3/objects/companies', { after: since })) {
           yield {
             records: page.results.map(c => ({ id: c.id, data: c.properties })),
@@ -149,7 +149,7 @@ getEntities(): EntityDefinition[] {
       schema: { firstname: { description: 'First name' }, lastname: { description: 'Last name' }, email: { description: 'Email address' } },
       scopes: { read: ['crm.objects.contacts.read'], write: ['crm.objects.contacts.write'] },
       dependsOn: ['company'],
-      async *fetch(ctx, since) {
+      async *read(ctx, since) {
         for await (const page of paginate('/crm/v3/objects/contacts', { after: since })) {
           yield {
             records: page.results.map(c => ({ id: c.id, data: c.properties })),
@@ -204,7 +204,7 @@ getEntities(): EntityDefinition[] {
       schema: { dealId: { description: 'Deal ID', immutable: true }, dealname: { description: 'Deal name' }, amount: { description: 'Deal value in NOK', type: 'number' }, dealstage: { description: 'Current pipeline stage' } },
       scopes: { read: ['crm.objects.deals.read'], write: ['crm.objects.deals.write'] },
       dependsOn: ['contact', 'company'],
-      async *fetch(ctx, since) {
+      async *read(ctx, since) {
         for await (const page of paginate('/crm/v3/objects/deals', { after: since })) {
           yield {
             records: page.results.map(d => ({ id: d.id, data: d.properties })),
@@ -414,15 +414,15 @@ A user who only enables `contact` as a source isn't prompted for write permissio
 
 For `api-key`, the engine prompts for the key value, stores it encrypted, and injects it as `Authorization: Bearer <key>` (or the `header` value if specified). For `basic`, it prompts for username and password. For `none`, use `configSchema` for connection parameters and implement `prepareRequest` for any custom signing.
 
-## FetchRecord
+## ReadRecord
 
-Records returned by `fetch()` and `lookup()`. Also the record type inside `FetchBatch`.
+Records returned by `read()` and `lookup()`. Also the record type inside `ReadBatch`.
 
 ```typescript
-interface FetchRecord {
+interface ReadRecord {
   id: string;                                // this record's ID in the source system (uniqueness scope defined below)
   data: Record<string, unknown | unknown[]>; // raw JSON blob — values may be single or multi-valued
-  deleted?: boolean;                         // connector's intent to remove this record from the target (see FetchRecord — Deletion below)
+  deleted?: boolean;                         // connector's intent to remove this record from the target (see ReadRecord — Deletion below)
   associations?: Association[];              // pre-extracted reference fields (see Associations)
 }
 
@@ -502,7 +502,7 @@ Each write method yields one result per input record/ID, in the same order (posi
 ```typescript
 interface InsertResult {
   id: string;                     // ID assigned by this (target) system
-  data?: Record<string, unknown>; // full API response; stored for echo prevention — lets the engine suppress its own writes when they come back through fetch()
+  data?: Record<string, unknown>; // full API response; stored for echo prevention — lets the engine suppress its own writes when they come back through read()
   error?: string;                 // present = this record failed; absent = success
 }
 
@@ -520,7 +520,7 @@ interface DeleteResult {
 }
 ```
 
-`InsertResult.id` is stored in the identity map and fed back as `UpdateRecord.id` and the delete ID on future writes. `InsertResult.data` / `UpdateResult.data` are stored for echo prevention — they let the engine recognise its own writes coming back through `fetch()` and suppress them as no-ops. `notFound` on delete or update is not an error — the record was already gone or never arrived. The happy-path result is just `{ id }` — no status annotation needed.
+`InsertResult.id` is stored in the identity map and fed back as `UpdateRecord.id` and the delete ID on future writes. `InsertResult.data` / `UpdateResult.data` are stored for echo prevention — they let the engine recognise its own writes coming back through `read()` and suppress them as no-ops. `notFound` on delete or update is not an error — the record was already gone or never arrived. The happy-path result is just `{ id }` — no status annotation needed.
 
 ## ConnectorContext
 
@@ -581,7 +581,7 @@ The connector receives its previous state on the next invocation. Example: stori
 `update` is an atomic read-modify-write: concurrent calls for the same key are serialized — each caller waits for the previous `fn` to finish before starting. The lock is held for the entire duration of `fn`, including any async work inside it. Use this for any state that multiple streams might race to modify:
 
 ```typescript
-// Two parallel fetch() runs both see an expired token — only one refreshes it.
+// Two parallel read() runs both see an expired token — only one refreshes it.
 const token = await ctx.state.update('sessionToken', async (current) => {
   if (current && !isExpired(current)) return current;  // already refreshed by the other run
   const fresh = await fetchNewToken(ctx.config.clientId, ctx.config.clientSecret);
@@ -608,34 +608,34 @@ interface Logger {
 }
 ```
 
-## Fetch — Reading Data
+## Read — Reading Data
 
-`fetch` is optional. Omitting it makes the entity a write-only sink — the engine tracks identity and routes inserts, updates, and deletes, but never polls. Useful for targets like data warehouses or event sinks that can receive data but have no meaningful "read current state" operation.
+`read` is optional. Omitting it makes the entity a write-only sink — the engine tracks identity and routes inserts, updates, and deletes, but never polls. Useful for targets like data warehouses or event sinks that can receive data but have no meaningful "read current state" operation.
 
-When implemented, `fetch()` yields `FetchBatch` objects:
+When implemented, `read()` yields `ReadBatch` objects:
 
 ```typescript
-fetch?(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch>;
+read?(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch>;
 
-interface FetchBatch {
-  records: FetchRecord[];
+interface ReadBatch {
+  records: ReadRecord[];
   since?: string;  // watermark for this batch; engine stores for next poll
 }
 ```
 
 **Watermark behavior:**
 - Each yielded batch can include a `since` value — the engine stores the latest one it sees.
-- On the next poll, the engine passes that stored value as the `since` parameter to `fetch()`.
+- On the next poll, the engine passes that stored value as the `since` parameter to `read()`.
 - If `since` is provided, return only records modified after that watermark.
 - If `since` is undefined, return everything (full sync — used for onboarding and soft delete detection).
 - If interrupted, resumption uses the last stored watermark (no data loss or duplication).
 
-Do not store pagination cursors in `ctx.state` — cursors are only valid for a single in-progress fetch run. If interrupted, resumption should use the last-committed `since` watermark from `FetchBatch`, not a stale cursor. `ctx.state` is for durable per-instance data that outlives a single fetch run (webhook subscription IDs, session tokens, etc.).
+Do not store pagination cursors in `ctx.state` — cursors are only valid for a single in-progress read run. If interrupted, resumption should use the last-committed `since` watermark from `ReadBatch`, not a stale cursor. `ctx.state` is for durable per-instance data that outlives a single read run (webhook subscription IDs, session tokens, etc.).
 
 ## Lookup — On-Demand Batch Lookup
 
 ```typescript
-lookup?(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]>;
+lookup?(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]>;
 ```
 
 Optional method for fetching a set of records by ID on-demand (not streaming). The engine always calls it with a batch — accumulating all IDs it needs before dispatching, so connectors with batch read APIs can serve them in one round trip.
@@ -647,7 +647,7 @@ Optional method for fetching a set of records by ID on-demand (not streaming). T
 - **Conflict detection**: Before dispatching writes, the engine calls `lookup` to compare live target state against the source snapshots that drove the writes — field-scoped, so unrelated fields changed by other writers are not treated as conflicts
 
 **Contract:**
-- Return a `FetchRecord[]` for the records that were found; omit records that don't exist
+- Return a `ReadRecord[]` for the records that were found; omit records that don't exist
 - Throw an error on API failure (handled by engine retry logic)
 - Must use IDs exactly as stored in the identity map (external IDs in this system)
 
@@ -678,7 +678,7 @@ Connectors can implement optional methods on `Connector` for custom HTTP behavio
 ```typescript
 interface WebhookBatch {
   entity: string;            // matches an EntityDefinition name
-  records: FetchRecord[];
+  records: ReadRecord[];
 }
 
 prepareRequest?(req: Request, ctx: PrepareRequestContext): Promise<Request>;
@@ -700,8 +700,8 @@ Standard OAuth2 is handled by the engine automatically — connectors don't need
 async handleWebhook(req, ctx) {
   const body = await req.json();
 
-  // group events by entity type, map to FetchRecord
-  const byEntity = new Map<string, FetchRecord[]>();
+  // group events by entity type, map to ReadRecord
+  const byEntity = new Map<string, ReadRecord[]>();
   for (const event of body.events) {
     const entity = event.objectType;  // e.g. 'contact', 'company'
     const record = {
@@ -790,7 +790,7 @@ The engine uses error type to decide the response:
 
 ### Where errors apply
 
-**`fetch()`** — throw to abort the entire fetch run for this entity. The engine will retry on the next poll cycle using the last stored watermark for this entity.
+**`read()`** — throw to abort the entire read run for this entity. The engine will retry on the next poll cycle using the last stored watermark for this entity.
 - `RateLimitError` — API responded 429; engine backs off before retrying
 - `AuthError` — credentials invalid or expired
 - `ConnectorError` — unexpected API error, network failure, bad response shape
@@ -836,7 +836,7 @@ Three connectors ship with the project for development and testing:
 The simplest possible connector — reads and writes a JSON array file. Intended as the starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
 - Storage: a `.json` file on disk (path from `ctx.config.filePath`)
-- `fetch()` reads the file, returns all objects (or filters by a `updatedAt` field if `since` is provided)
+- `read()` reads the file, returns all objects (or filters by a `updatedAt` field if `since` is provided)
 - `insert()` appends, `update()` replaces by ID, `delete()` removes by ID — all write back to the file
 - Implements: `insert`, `update`, `delete`
 

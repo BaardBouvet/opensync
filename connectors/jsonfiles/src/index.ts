@@ -1,3 +1,7 @@
+// LOCAL-ONLY CONNECTOR — uses node:fs to read/write local JSON files.
+// This connector is a development and testing fixture. It cannot run in an
+// isolated sandbox (Deno, vm.Context, workerd) because it directly imports
+// node:fs. Do not use node:* imports in connectors intended for remote execution.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { basename, extname } from "node:path";
 import type {
@@ -5,8 +9,8 @@ import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
-  FetchBatch,
-  FetchRecord,
+  ReadBatch,
+  ReadRecord,
   InsertRecord,
   InsertResult,
   UpdateRecord,
@@ -72,12 +76,12 @@ function makeRecordEntity(
   { idField, watermarkField, associationsField }: FieldConfig
 ): EntityDefinition {
   /** Strip the id (and associations, if configured) from a raw file record. */
-  function extractRecord(r: FileRecord): FetchRecord {
+  function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
     const data = Object.fromEntries(
       Object.entries(r).filter(([k]) => k !== idField && k !== associationsField)
     );
-    const record: FetchRecord = { id, data };
+    const record: ReadRecord = { id, data };
     if (Array.isArray(r[associationsField])) {
       record.associations = r[associationsField] as Association[];
     }
@@ -104,7 +108,7 @@ function makeRecordEntity(
       },
     },
 
-    async *fetch(_ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch> {
+    async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
       const records = readFile(entityFilePath);
 
       const filtered = since
@@ -123,7 +127,7 @@ function makeRecordEntity(
       yield { records: filtered.map(extractRecord), since: maxWatermark ?? since };
     },
 
-    async lookup(ids: string[]): Promise<FetchRecord[]> {
+    async lookup(ids: string[]): Promise<ReadRecord[]> {
       const idSet = new Set(ids);
       return readFile(entityFilePath)
         .filter((r) => idSet.has(String(r[idField])))
@@ -135,7 +139,12 @@ function makeRecordEntity(
         const existing = readFile(entityFilePath);
         const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
         const now = new Date().toISOString();
-        const newRecord: FileRecord = { ...record.data, [idField]: id, [watermarkField]: now };
+        const newRecord: FileRecord = {
+          ...record.data,
+          [idField]: id,
+          [watermarkField]: now,
+          ...(record.associations ? { [associationsField]: record.associations } : {}),
+        };
         writeFile(entityFilePath, [...existing, newRecord]);
         yield { id, data: newRecord as Record<string, unknown> };
       }
@@ -155,6 +164,9 @@ function makeRecordEntity(
           ...record.data,
           [idField]: record.id,
           [watermarkField]: now,
+          ...(record.associations !== undefined
+            ? { [associationsField]: record.associations }
+            : {}),
         };
         existing[idx] = updated;
         writeFile(entityFilePath, existing);

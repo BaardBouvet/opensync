@@ -33,7 +33,7 @@ for contacts and invoices. Use the SDK from @opensync/sdk."
 
 The agent produces:
 - `getStreams()` with entity definitions, capabilities, dependencies
-- `fetch()` implementations with pagination
+- `read()` implementations with pagination
 - `upsert()` with create-vs-update logic
 - `prepareRequest()` if auth is non-standard
 

@@ -64,11 +64,11 @@ export interface Association {
 }
 
 /**
- * A record returned by fetch() or lookup(). Also the element type inside FetchBatch.
+ * A record returned by read() or lookup(). Also the element type inside ReadBatch.
  *
  * IDs are scoped to (entity, id): '123' from 'contact' and '123' from 'company' are distinct.
  */
-export interface FetchRecord {
+export interface ReadRecord {
   /** This record's ID in the source system. Unique within the entity. */
   id: string;
 
@@ -87,11 +87,11 @@ export interface FetchRecord {
 }
 
 /**
- * A page of records yielded by fetch(). Each batch carries its own watermark
+ * A page of records yielded by read(). Each batch carries its own watermark
  * so the engine can resume from the last committed position on interruption.
  */
-export interface FetchBatch {
-  records: FetchRecord[];
+export interface ReadBatch {
+  records: ReadRecord[];
 
   /** Opaque watermark for this batch. The engine stores the latest value it receives;
    *  on the next poll it passes it back via the `since` parameter.
@@ -248,12 +248,12 @@ export interface EntityDefinition {
    *  table or event log that can receive but has no meaningful read operation).
    *
    *  @param ctx  Connector context.
-   *  @param since  Opaque watermark from the previous fetch run. Undefined = full sync.
+   *  @param since  Opaque watermark from the previous read run. Undefined = full sync.
    *               Return only records modified after this point when provided. */
-  fetch?(
+  read?(
     ctx: ConnectorContext,
     since?: string
-  ): AsyncIterable<FetchBatch>;
+  ): AsyncIterable<ReadBatch>;
 
   /** Fetch a specific set of records by ID on-demand (non-streaming).
    *  The engine batches all IDs it needs and calls this once, so connectors with
@@ -263,7 +263,7 @@ export interface EntityDefinition {
    *  Throw on API failure; the engine handles retry.
    *
    *  Used for conflict detection, rollback verification, and reconciliation. */
-  lookup?(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]>;
+  lookup?(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]>;
 
   /** Create new records in this system. Yields one InsertResult per input record,
    *  in the same order. The assigned id is stored in the engine's identity map.
@@ -434,6 +434,12 @@ export interface ConnectorMetadata {
    *  before injecting ctx.config.baseUrl.
    *  Example: { production: 'https://api.fiken.no/v2', test: 'https://api.fiken.no/sandbox' } */
   environments?: Record<string, string>;
+
+  /** Outbound hostnames this connector is allowed to contact via ctx.http.
+   *  Informational today; will be enforced by ctx.http when isolation is in place.
+   *  Use exact hostnames or '*.' wildcard prefixes (e.g. '*.hubapi.com').
+   *  Omit for connectors that make no outbound HTTP calls (e.g. database connectors). */
+  allowedHosts?: string[];
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────────────────
@@ -445,7 +451,7 @@ export interface ConnectorMetadata {
 export interface WebhookBatch {
   /** Must match an EntityDefinition name returned by getEntities(). */
   entity: string;
-  records: FetchRecord[];
+  records: ReadRecord[];
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────

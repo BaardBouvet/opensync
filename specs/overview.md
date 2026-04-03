@@ -61,7 +61,7 @@ This means users can choose: `bun install && bun run dev` for speed, or `npm ins
 Source System
     │
     ▼
-[Connector.fetch()]  ─── raw JSON + field descriptions
+[Connector.read()]  ─── raw JSON + field descriptions
     │
     ▼
 [Transform]  ─── TypeScript transform functions

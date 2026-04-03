@@ -395,7 +395,7 @@ The engine tracks how far each stream has been read in `stream_state`:
 | hubspot-prod | company | `{"since": "2026-04-01T09:30:00Z"}` | 2026-04-01T09:35:00Z |
 | fiken-prod | invoice | `{"since": "2026-03-31T02:00:00Z"}` | 2026-03-31T02:05:00Z |
 
-After a successful fetch cycle, the engine updates the cursor. On the next poll, the cursor is passed as `since` to the stream's `fetch()`.
+After a successful fetch cycle, the engine updates the cursor. On the next poll, the cursor is passed as `since` to the stream's `read()`.
 
 The cursor is JSONB rather than a plain timestamp because some APIs use opaque cursors, page tokens, or sequence numbers instead of timestamps. The connector decides what goes in the cursor — the engine just stores and passes it back.
 

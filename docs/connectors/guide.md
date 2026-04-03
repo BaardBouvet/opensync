@@ -37,7 +37,7 @@ export default {
       {
         name: 'contact',
 
-        async *fetch(ctx: ConnectorContext, since?: string) {
+        async *read(ctx: ConnectorContext, since?: string) {
           const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
           const contacts = await res.json();
           yield {
@@ -84,7 +84,7 @@ getEntities(ctx: ConnectorContext) {
   return [
     {
       name: 'contact',
-      async *fetch(ctx: ConnectorContext, since?: string) {
+      async *read(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
         const contacts = await res.json();
         yield {
@@ -104,7 +104,7 @@ getEntities(ctx: ConnectorContext) {
     },
     {
       name: 'company',
-      async *fetch(ctx: ConnectorContext, since?: string) {
+      async *read(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.apiUrl}/companies`);
         const companies = await res.json();
         yield companies.map((c: any) => ({
@@ -123,7 +123,7 @@ Now declare the dependency:
 {
   name: 'contact',
   dependsOn: ['company'],  // Sync companies first
-  async *fetch(ctx: ConnectorContext, since?: string) {
+  async *read(ctx: ConnectorContext, since?: string) {
     // ...
   },
 }

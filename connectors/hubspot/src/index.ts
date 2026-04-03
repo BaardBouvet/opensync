@@ -2,8 +2,8 @@ import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
-  FetchBatch,
-  FetchRecord,
+  ReadBatch,
+  ReadRecord,
   InsertRecord,
   InsertResult,
   UpdateRecord,
@@ -96,10 +96,10 @@ function makeCrmEntity(opts: {
     scopes,
     dependsOn,
 
-    async *fetch(
+    async *read(
       ctx: ConnectorContext,
       since?: string
-    ): AsyncIterable<FetchBatch> {
+    ): AsyncIterable<ReadBatch> {
       for await (const page of paginate(ctx, path, since)) {
         const maxUpdated = page.results.reduce<string | undefined>(
           (max, r) => {
@@ -121,7 +121,7 @@ function makeCrmEntity(opts: {
     async lookup(
       ids: string[],
       ctx: ConnectorContext
-    ): Promise<FetchRecord[]> {
+    ): Promise<ReadRecord[]> {
       const res = await ctx.http(`${BASE}${path}/batch/read`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -287,6 +287,7 @@ const connector: Connector = {
       // Base scopes always requested. Entity read/write scopes are unioned at channel setup.
       scopes: ["oauth"],
     },
+    allowedHosts: ["api.hubspot.com", "*.hubapi.com"],
     configSchema: {
       portalId: {
         type: "string",

@@ -26,7 +26,7 @@ Source System
 [Webhook Processor]
     │  1. Dequeue entry
     │  2. Call connector.handleWebhook(req, ctx) → NormalizedRecord[]
-    │  3. For thin webhooks: call connector.fetch() to enrich
+    │  3. For thin webhooks: call connector.read() to enrich
     │  4. Feed into normal sync pipeline
     │
     ▼

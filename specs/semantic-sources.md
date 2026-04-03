@@ -65,7 +65,7 @@ For 99% of connectors (HubSpot, Fiken, Tripletex), nothing changes:
 getStreams(ctx) {
   return [{
     entity: 'contact',
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       const records = await ctx.api.get('/contacts');
       yield records.map(r => ({
         id: r.id,
@@ -99,7 +99,7 @@ getStreams(ctx) {
   return [{
     entity: 'person',
     graphAware: true,  // inherited from metadata but can override
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       const graph = await ctx.api.get('/graph.jsonld');
       
       yield graph['@graph'].map(node => ({
@@ -133,7 +133,7 @@ getStreams(ctx) {
   return [{
     entity: 'resource',
     graphAware: true,
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       const jsonld = await ctx.api.get('/ld');  // returns @context + @graph
       
       yield jsonld['@graph'].map(doc => ({
@@ -271,7 +271,7 @@ Both engines ingest the same connector output; storage + diffing differ.
 getStreams(ctx) {
   return [{
     entity: 'contact',
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       yield [{
         id: '123',
         data: { name: 'Alice', email: 'alice@hubspot.com' }
@@ -288,7 +288,7 @@ getStreams(ctx) {
 getStreams(ctx) {
   return [{
     entity: 'contact',
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       yield [{
         id: '123',
         data: { name: 'Alice', email: 'alice@hubspot.com' },
@@ -311,7 +311,7 @@ getStreams(ctx) {
   return [{
     entity: 'person',
     graphAware: true,
-    async *fetch(ctx, since) {
+    async *read(ctx, since) {
       yield [{
         id: 'alice@example.com',
         data: {

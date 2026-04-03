@@ -3,9 +3,11 @@
  *
  * Design decisions:
  * - One connector instance = one table. If you need multiple tables, run multiple instances.
- * - The primary key column is mapped to FetchRecord.id. Defaults to 'id'.
+ * - The primary key column is mapped to ReadRecord.id. Defaults to 'id'.
  * - Incremental fetch uses an `updated_at` timestamp column. If absent, every fetch is a full sync.
  * - Uses parameterised queries throughout — no string interpolation of user data.
+ * - No module-level state. A Pool is created at the start of each entity method and ended on
+ *   completion or error, keeping this connector safe for stateless / isolated execution.
  *
  * Auth: connection string (DSN) in configSchema, marked secret.
  * No ctx.http used — all I/O goes through the pg Pool.
@@ -15,8 +17,8 @@ import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
-  FetchBatch,
-  FetchRecord,
+  ReadBatch,
+  ReadRecord,
   InsertRecord,
   InsertResult,
   UpdateRecord,
@@ -26,21 +28,16 @@ import type {
 import { ConnectorError, ValidationError } from "@opensync/sdk";
 
 // ─── Pool management ──────────────────────────────────────────────────────────
-// One pool per connector instance, keyed by connection string. In production the
-// engine will only instantiate one Connector object per instance so this is
-// effectively a singleton per instance, but we guard with a Map anyway.
+// A fresh Pool is created at the start of each entity method and ended when that
+// method completes or throws. This keeps the connector stateless across calls —
+// no module-level globals means it is safe to run in an ephemeral worker/isolate.
 
-const pools = new Map<string, Pool>();
-
-function getPool(ctx: ConnectorContext): Pool {
+function createPool(ctx: ConnectorContext): Pool {
   const dsn = ctx.config["connectionString"];
   if (typeof dsn !== "string" || !dsn) {
     throw new ValidationError("config.connectionString must be a non-empty string");
   }
-  if (!pools.has(dsn)) {
-    pools.set(dsn, new Pool({ connectionString: dsn, max: 5 }));
-  }
-  return pools.get(dsn)!;
+  return new Pool({ connectionString: dsn, max: 5 });
 }
 
 function tableName(ctx: ConnectorContext): string {
@@ -77,7 +74,7 @@ function updatedAtColumn(ctx: ConnectorContext): string | null {
   return col;
 }
 
-function rowToRecord(row: Record<string, unknown>, idCol: string): FetchRecord {
+function rowToRecord(row: Record<string, unknown>, idCol: string): ReadRecord {
   const id = String(row[idCol]);
   const data = { ...row };
   return { id, data };
@@ -95,11 +92,11 @@ const tableEntity: EntityDefinition = {
     // Connector authors can extend this if they want field-level metadata.
   },
 
-  async *fetch(
+  async *read(
     ctx: ConnectorContext,
     since?: string
-  ): AsyncIterable<FetchBatch> {
-    const pool = getPool(ctx);
+  ): AsyncIterable<ReadBatch> {
+    const pool = createPool(ctx);
     const table = tableName(ctx);
     const idCol = idColumn(ctx);
     const updCol = updatedAtColumn(ctx);
@@ -107,61 +104,67 @@ const tableEntity: EntityDefinition = {
     const pageSize = 500;
     let offset = 0;
 
-    while (true) {
-      let query: string;
-      const params: unknown[] = [];
+    try {
+      while (true) {
+        let query: string;
+        const params: unknown[] = [];
 
-      if (updCol && since) {
-        query = `SELECT * FROM ${table} WHERE ${updCol} > $1 ORDER BY ${updCol} ASC, ${idCol} ASC LIMIT ${pageSize} OFFSET $2`;
-        params.push(since, offset);
-      } else {
-        query = `SELECT * FROM ${table} ORDER BY ${idCol} ASC LIMIT ${pageSize} OFFSET $1`;
-        params.push(offset);
+        if (updCol && since) {
+          query = `SELECT * FROM ${table} WHERE ${updCol} > $1 ORDER BY ${updCol} ASC, ${idCol} ASC LIMIT ${pageSize} OFFSET $2`;
+          params.push(since, offset);
+        } else {
+          query = `SELECT * FROM ${table} ORDER BY ${idCol} ASC LIMIT ${pageSize} OFFSET $1`;
+          params.push(offset);
+        }
+
+        let rows: Record<string, unknown>[];
+        try {
+          const result = await pool.query(query, params);
+          rows = result.rows as Record<string, unknown>[];
+        } catch (err) {
+          throw new ConnectorError(
+            `Postgres query failed: ${(err as Error).message}`,
+            "QUERY_ERROR",
+            true
+          );
+        }
+
+        if (rows.length === 0) break;
+
+        const maxUpdated = updCol
+          ? rows.reduce<string | undefined>((max, r) => {
+              const v = r[updCol];
+              const s = v instanceof Date ? v.toISOString() : String(v ?? "");
+              return !max || s > max ? s : max;
+            }, undefined)
+          : undefined;
+
+        yield {
+          records: rows.map((r) => rowToRecord(r, idCol)),
+          since: maxUpdated ?? since,
+        };
+
+        if (rows.length < pageSize) break;
+        offset += rows.length;
       }
-
-      let rows: Record<string, unknown>[];
-      try {
-        const result = await pool.query(query, params);
-        rows = result.rows as Record<string, unknown>[];
-      } catch (err) {
-        throw new ConnectorError(
-          `Postgres query failed: ${(err as Error).message}`,
-          "QUERY_ERROR",
-          true
-        );
-      }
-
-      if (rows.length === 0) break;
-
-      const maxUpdated = updCol
-        ? rows.reduce<string | undefined>((max, r) => {
-            const v = r[updCol];
-            const s = v instanceof Date ? v.toISOString() : String(v ?? "");
-            return !max || s > max ? s : max;
-          }, undefined)
-        : undefined;
-
-      yield {
-        records: rows.map((r) => rowToRecord(r, idCol)),
-        since: maxUpdated ?? since,
-      };
-
-      if (rows.length < pageSize) break;
-      offset += rows.length;
+    } finally {
+      await pool.end();
     }
   },
 
-  async lookup(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]> {
-    const pool = getPool(ctx);
+  async lookup(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]> {
+    const pool = createPool(ctx);
     const table = tableName(ctx);
     const idCol = idColumn(ctx);
 
     // Use ANY($1) for a single-query batch fetch.
-    let result;
     try {
-      result = await pool.query(
+      const result = await pool.query(
         `SELECT * FROM ${table} WHERE ${idCol} = ANY($1)`,
         [ids]
+      );
+      return (result.rows as Record<string, unknown>[]).map((r) =>
+        rowToRecord(r, idCol)
       );
     } catch (err) {
       throw new ConnectorError(
@@ -169,59 +172,62 @@ const tableEntity: EntityDefinition = {
         "QUERY_ERROR",
         true
       );
+    } finally {
+      await pool.end();
     }
-    return (result.rows as Record<string, unknown>[]).map((r) =>
-      rowToRecord(r, idCol)
-    );
   },
 
   async *insert(
     records: AsyncIterable<InsertRecord>,
     ctx: ConnectorContext
   ): AsyncIterable<InsertResult> {
-    const pool = getPool(ctx);
+    const pool = createPool(ctx);
     const table = tableName(ctx);
     const idCol = idColumn(ctx);
 
-    for await (const record of records) {
-      const cols = Object.keys(record.data);
-      if (cols.length === 0) {
-        yield { id: "", error: "InsertRecord.data is empty" };
-        continue;
-      }
+    try {
+      for await (const record of records) {
+        const cols = Object.keys(record.data);
+        if (cols.length === 0) {
+          yield { id: "", error: "InsertRecord.data is empty" };
+          continue;
+        }
 
-      // Validate column names — they come from engine-transformed data, not raw user input,
-      // but we guard anyway.
-      for (const col of cols) {
-        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+        // Validate column names — they come from engine-transformed data, not raw user input,
+        // but we guard anyway.
+        for (const col of cols) {
+          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+            yield {
+              id: "",
+              error: `Invalid column name: '${col}'`,
+            };
+            continue;
+          }
+        }
+
+        const colList = cols.map((c) => `"${c}"`).join(", ");
+        const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+        const values = cols.map((c) => record.data[c]);
+
+        let result;
+        try {
+          result = await pool.query(
+            `INSERT INTO ${table} (${colList}) VALUES (${placeholders}) RETURNING *`,
+            values
+          );
+        } catch (err) {
           yield {
-            id: "",
-            error: `Invalid column name: '${col}'`,
+            id: String(record.data[idCol] ?? ""),
+            error: (err as Error).message,
           };
           continue;
         }
+
+        const row = result.rows[0] as Record<string, unknown>;
+        yield { id: String(row[idCol]), data: row };
       }
-
-      const colList = cols.map((c) => `"${c}"`).join(", ");
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-      const values = cols.map((c) => record.data[c]);
-
-      let result;
-      try {
-        result = await pool.query(
-          `INSERT INTO ${table} (${colList}) VALUES (${placeholders}) RETURNING *`,
-          values
-        );
-      } catch (err) {
-        yield {
-          id: String(record.data[idCol] ?? ""),
-          error: (err as Error).message,
-        };
-        continue;
-      }
-
-      const row = result.rows[0] as Record<string, unknown>;
-      yield { id: String(row[idCol]), data: row };
+    } finally {
+      await pool.end();
     }
   },
 
@@ -229,51 +235,55 @@ const tableEntity: EntityDefinition = {
     records: AsyncIterable<UpdateRecord>,
     ctx: ConnectorContext
   ): AsyncIterable<UpdateResult> {
-    const pool = getPool(ctx);
+    const pool = createPool(ctx);
     const table = tableName(ctx);
     const idCol = idColumn(ctx);
 
-    for await (const record of records) {
-      const cols = Object.keys(record.data);
-      if (cols.length === 0) {
-        yield { id: record.id, error: "UpdateRecord.data is empty" };
-        continue;
-      }
+    try {
+      for await (const record of records) {
+        const cols = Object.keys(record.data);
+        if (cols.length === 0) {
+          yield { id: record.id, error: "UpdateRecord.data is empty" };
+          continue;
+        }
 
-      for (const col of cols) {
-        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+        for (const col of cols) {
+          if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+            yield {
+              id: record.id,
+              error: `Invalid column name: '${col}'`,
+            };
+            continue;
+          }
+        }
+
+        const setClause = cols.map((c, i) => `"${c}" = $${i + 1}`).join(", ");
+        const values = [...cols.map((c) => record.data[c]), record.id];
+
+        let result;
+        try {
+          result = await pool.query(
+            `UPDATE ${table} SET ${setClause} WHERE "${idCol}" = $${cols.length + 1} RETURNING *`,
+            values
+          );
+        } catch (err) {
           yield {
             id: record.id,
-            error: `Invalid column name: '${col}'`,
+            error: (err as Error).message,
           };
           continue;
         }
+
+        if (result.rowCount === 0) {
+          yield { id: record.id, notFound: true as const };
+          continue;
+        }
+
+        const row = result.rows[0] as Record<string, unknown>;
+        yield { id: record.id, data: row };
       }
-
-      const setClause = cols.map((c, i) => `"${c}" = $${i + 1}`).join(", ");
-      const values = [...cols.map((c) => record.data[c]), record.id];
-
-      let result;
-      try {
-        result = await pool.query(
-          `UPDATE ${table} SET ${setClause} WHERE "${idCol}" = $${cols.length + 1} RETURNING *`,
-          values
-        );
-      } catch (err) {
-        yield {
-          id: record.id,
-          error: (err as Error).message,
-        };
-        continue;
-      }
-
-      if (result.rowCount === 0) {
-        yield { id: record.id, notFound: true as const };
-        continue;
-      }
-
-      const row = result.rows[0] as Record<string, unknown>;
-      yield { id: record.id, data: row };
+    } finally {
+      await pool.end();
     }
   },
 
@@ -281,30 +291,34 @@ const tableEntity: EntityDefinition = {
     ids: AsyncIterable<string>,
     ctx: ConnectorContext
   ): AsyncIterable<DeleteResult> {
-    const pool = getPool(ctx);
+    const pool = createPool(ctx);
     const table = tableName(ctx);
     const idCol = idColumn(ctx);
 
-    for await (const id of ids) {
-      let result;
-      try {
-        result = await pool.query(
-          `DELETE FROM ${table} WHERE "${idCol}" = $1`,
-          [id]
-        );
-      } catch (err) {
-        yield {
-          id,
-          error: (err as Error).message,
-        };
-        continue;
-      }
+    try {
+      for await (const id of ids) {
+        let result;
+        try {
+          result = await pool.query(
+            `DELETE FROM ${table} WHERE "${idCol}" = $1`,
+            [id]
+          );
+        } catch (err) {
+          yield {
+            id,
+            error: (err as Error).message,
+          };
+          continue;
+        }
 
-      if (result.rowCount === 0) {
-        yield { id, notFound: true as const };
-      } else {
-        yield { id };
+        if (result.rowCount === 0) {
+          yield { id, notFound: true as const };
+        } else {
+          yield { id };
+        }
       }
+    } finally {
+      await pool.end();
     }
   },
 };
@@ -351,7 +365,7 @@ const connector: Connector = {
   },
 
   async healthCheck(ctx) {
-    const pool = getPool(ctx);
+    const pool = createPool(ctx);
     try {
       await pool.query("SELECT 1");
       return { healthy: true };
@@ -360,14 +374,8 @@ const connector: Connector = {
         healthy: false,
         message: `Database connection failed: ${(err as Error).message}`,
       };
-    }
-  },
-
-  async onDisable(ctx) {
-    const dsn = ctx.config["connectionString"] as string | undefined;
-    if (dsn && pools.has(dsn)) {
-      await pools.get(dsn)!.end();
-      pools.delete(dsn);
+    } finally {
+      await pool.end();
     }
   },
 };

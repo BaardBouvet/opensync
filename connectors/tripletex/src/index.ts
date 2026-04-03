@@ -13,8 +13,8 @@ import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
-  FetchBatch,
-  FetchRecord,
+  ReadBatch,
+  ReadRecord,
   InsertRecord,
   InsertResult,
   UpdateRecord,
@@ -208,7 +208,7 @@ const customerEntity: EntityDefinition = {
     await deregisterSubscription("customer", ctx);
   },
 
-  async *fetch(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch> {
+  async *read(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
     const params: Record<string, string> = {};
     if (since) params["changedSince"] = since;
 
@@ -228,9 +228,9 @@ const customerEntity: EntityDefinition = {
     }
   },
 
-  async lookup(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]> {
+  async lookup(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]> {
     const base = ctx.config["baseUrl"] as string;
-    const results: FetchRecord[] = [];
+    const results: ReadRecord[] = [];
     // Tripletex has no batch read — loop through IDs.
     for (const id of ids) {
       const res = await ctx.http(`${base}/customer/${id}`);
@@ -331,7 +331,7 @@ const invoiceEntity: EntityDefinition = {
     await deregisterSubscription("invoice", ctx);
   },
 
-  async *fetch(ctx: ConnectorContext, since?: string): AsyncIterable<FetchBatch> {
+  async *read(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
     const params: Record<string, string> = {};
     if (since) params["invoiceDateFrom"] = since;
 
@@ -362,9 +362,9 @@ const invoiceEntity: EntityDefinition = {
     }
   },
 
-  async lookup(ids: string[], ctx: ConnectorContext): Promise<FetchRecord[]> {
+  async lookup(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]> {
     const base = ctx.config["baseUrl"] as string;
-    const results: FetchRecord[] = [];
+    const results: ReadRecord[] = [];
     for (const id of ids) {
       const res = await ctx.http(`${base}/invoice/${id}`);
       if (res.status === 404) continue;
@@ -406,6 +406,7 @@ const connector: Connector = {
     // Tripletex uses session tokens, not standard OAuth2. We use auth: 'none' and
     // implement prepareRequest to inject the session token.
     auth: { type: "none" },
+    allowedHosts: ["tripletex.no", "api.tripletex.io"],
     configSchema: {
       baseUrl: {
         type: "string",
@@ -469,7 +470,7 @@ const connector: Connector = {
     };
 
     const action = body.event.slice(body.event.indexOf(".") + 1);
-    const record: FetchRecord = {
+    const record: ReadRecord = {
       id: String(body.id),
       data: body.value ?? {},
       deleted: action === "delete",

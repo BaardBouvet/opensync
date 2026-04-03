@@ -35,7 +35,7 @@ export default {
       {
         name: 'contact',
 
-        async *fetch(ctx: ConnectorContext, since?: string) {
+        async *read(ctx: ConnectorContext, since?: string) {
           const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
           const contacts = await res.json();
           yield {
