@@ -11,9 +11,3 @@ this directory.
 | `backlog` | Identified, not yet started |
 | `in-progress` | Actively being implemented |
 | `done` | Implemented — plan pending conversion to spec/code |
-
-## Index
-
-| Plan | Status |
-|------|--------|
-| [jsonfiles-sync-poc](jsonfiles-sync-poc.md) | `backlog` |
