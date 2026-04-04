@@ -2,18 +2,22 @@
   "connectors": {
     "crm": {
       "plugin": "../../connectors/mock-crm/src/index.ts",
+      "auth": {
+        "apiKey": "${MOCK_CRM_API_KEY}"
+      },
       "config": {
         "baseUrl": "http://localhost:4000",
-        "apiKey": "${MOCK_CRM_API_KEY}",
         "webhookMode": "thick"
       }
     },
     "erp": {
       "plugin": "../../connectors/mock-erp/src/index.ts",
-      "config": {
-        "baseUrl": "http://localhost:4001",
+      "auth": {
         "clientId": "opensync-test",
         "clientSecret": "secret"
+      },
+      "config": {
+        "baseUrl": "http://localhost:4001"
       }
     }
   },

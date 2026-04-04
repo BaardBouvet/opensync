@@ -52,7 +52,8 @@ async function main() {
   const crmInstance = makeConnectorInstance(
     "crm",
     mockCrm,
-    { baseUrl: crm.baseUrl, apiKey: MOCK_API_KEY, webhookMode: "thick" },
+    { baseUrl: crm.baseUrl, webhookMode: "thick" },
+    { apiKey: MOCK_API_KEY },
     db,
     "http://localhost:4003",
   );
@@ -60,11 +61,8 @@ async function main() {
   const erpInstance = makeConnectorInstance(
     "erp",
     mockErp,
-    {
-      baseUrl: erp.baseUrl,
-      clientId: MOCK_CLIENT_ID,
-      clientSecret: MOCK_CLIENT_SECRET,
-    },
+    { baseUrl: erp.baseUrl },
+    { clientId: MOCK_CLIENT_ID, clientSecret: MOCK_CLIENT_SECRET },
     db,
     "http://localhost:4003",
   );

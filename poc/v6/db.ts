@@ -468,7 +468,7 @@ export function makeConnectorState(db: Db, connectorId: string) {
 
 // ─── Request journal (v5) ─────────────────────────────────────────────────────
 
-export type JournalTrigger = "poll" | "webhook" | "on_enable" | "on_disable";
+export type JournalTrigger = "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh";
 
 export function dbLogRequestJournal(
   db: Db,

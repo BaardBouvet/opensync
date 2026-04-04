@@ -60,11 +60,8 @@ function makeErpInstance(db: Db, erpServer: MockErpServer) {
   return makeConnectorInstance(
     "mock-erp",
     mockErp,
-    {
-      baseUrl: erpServer.baseUrl,
-      clientId: MOCK_CLIENT_ID,
-      clientSecret: MOCK_CLIENT_SECRET,
-    },
+    { baseUrl: erpServer.baseUrl },
+    { clientId: MOCK_CLIENT_ID, clientSecret: MOCK_CLIENT_SECRET },
     db,
     `http://localhost:${WEBHOOK_PORT}`,
   );
@@ -106,17 +103,25 @@ describe("OAuth2 — token lifecycle", () => {
     const batchId = crypto.randomUUID();
     await engine.ingest("people-channel", "mock-erp", { batchId, fullSync: true });
 
-    // Token must be stored in DB (OAuth token endpoint uses raw fetch, not ctx.http)
+    // Token must be stored in DB
     const stored = dbGetOAuthToken(db, "mock-erp");
     expect(stored).toBeDefined();
     expect(stored!.access_token).toBeTruthy();
     expect(stored!.expires_at).toBeTruthy();
 
-    // A successful GET /employees call proves the token was used and accepted
+    // The token endpoint call itself must appear in the journal with trigger "oauth_refresh"
     const rows = dbGetJournalRows(db, "mock-erp");
+    const tokenCall = rows.find((r) => r.url.includes("/oauth/token"));
+    expect(tokenCall).toBeDefined();
+    expect(tokenCall!.trigger).toBe("oauth_refresh");
+    expect(tokenCall!.batch_id).toBe(batchId);
+    expect(tokenCall!.response_status).toBe(200);
+
+    // A successful GET /employees call proves the token was used and accepted
     const employeesCall = rows.find((r) => r.url.includes("/employees"));
     expect(employeesCall).toBeDefined();
     expect(employeesCall!.response_status).toBe(200);
+    expect(employeesCall!.trigger).toBe("poll");
   });
 
   it("second ingest reuses the cached token — no second /oauth/token call", async () => {
@@ -185,8 +190,7 @@ describe("OAuth2 — token lifecycle", () => {
     await fetch(`${erpServer.baseUrl}/__expire-token`, { method: "POST" });
 
     // OAuthTokenManager sends scopes as a space-separated string in the form body.
-    // We can't check the journal (raw fetch), but we can verify the refresh succeeded
-    // and the mock server responded with the requested scopes in the token response.
+    // Verify the refresh succeeded and the mock server responded with the requested scopes.
     // The manager stores the token — a successful ingest proves scopes were accepted.
     await expect(
       engine.ingest("people-channel", "mock-erp", { batchId: crypto.randomUUID(), fullSync: true }),
@@ -202,11 +206,8 @@ describe("OAuth2 — token lifecycle", () => {
     const badInstance = makeConnectorInstance(
       "erp-bad-creds",
       mockErp,
-      {
-        baseUrl: erpServer.baseUrl,
-        clientId: "wrong",
-        clientSecret: "wrong",
-      },
+      { baseUrl: erpServer.baseUrl },
+      { clientId: "wrong", clientSecret: "wrong" },
       badDb,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -236,6 +237,7 @@ describe("prepareRequest — session token", () => {
       "erp-session",
       sessionConnector,
       { baseUrl: erpServer.baseUrl, username: "admin", password: "pass" },
+      {},
       db,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -305,6 +307,7 @@ describe("prepareRequest — HMAC signing", () => {
       "erp-hmac",
       hmacConnector,
       { baseUrl: erpServer.baseUrl },
+      {},
       db,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -327,6 +330,7 @@ describe("prepareRequest — HMAC signing", () => {
       "erp-hmac2",
       hmacConnector,
       { baseUrl: erpServer.baseUrl },
+      {},
       db,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -381,7 +385,8 @@ describe("prepareRequest — HMAC signing", () => {
     const hybridInstance = makeConnectorInstance(
       "hybrid",
       hybridConnector,
-      { baseUrl: erpServer.baseUrl, clientId: "x", clientSecret: "x" },
+      { baseUrl: erpServer.baseUrl },
+      { clientId: "x", clientSecret: "x" },
       hybridDb,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -454,7 +459,8 @@ describe("ETag threading — version and snapshot in UpdateRecord", () => {
     const crmInstance = makeConnectorInstance(
       "mock-crm",
       mockCrm,
-      { baseUrl: crmServer.baseUrl, apiKey: MOCK_API_KEY, webhookMode: "thick" },
+      { baseUrl: crmServer.baseUrl, webhookMode: "thick" },
+      { apiKey: MOCK_API_KEY },
       db,
       `http://localhost:${WEBHOOK_PORT}`,
     );
@@ -569,7 +575,8 @@ describe("ETag threading — version and snapshot in UpdateRecord", () => {
     const instance = makeConnectorInstance(
       "mock-crm",
       mockCrm,
-      { baseUrl: crmServer.baseUrl, apiKey: MOCK_API_KEY, webhookMode: "thick" },
+      { baseUrl: crmServer.baseUrl, webhookMode: "thick" },
+      { apiKey: MOCK_API_KEY },
       db,
       `http://localhost:${WEBHOOK_PORT}`,
     );

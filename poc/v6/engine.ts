@@ -99,6 +99,8 @@ export class OAuthTokenManager {
     private readonly clientId: string,
     private readonly clientSecret: string,
     private readonly db: Db,
+    private readonly batchIdRef?: { current: string | undefined },
+    private readonly triggerRef?: { current: JournalTrigger | undefined },
   ) {}
 
   /** Return a valid access token, fetching or refreshing as needed. */
@@ -150,14 +152,55 @@ export class OAuthTokenManager {
       scope: this.scopes.join(" "),
     });
 
-    const res = await fetch(this.oauthConfig.tokenUrl, {
+    const requestBody = body.toString();
+    const requestHeaders = JSON.stringify({ "content-type": "application/x-www-form-urlencoded" });
+    const t0 = Date.now();
+    let res: Response;
+    try {
+      res = await fetch(this.oauthConfig.tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: requestBody,
+      });
+    } catch (err) {
+      dbLogRequestJournal(this.db, {
+        connectorId: this.connectorId,
+        batchId: this.batchIdRef?.current,
+        trigger: "oauth_refresh",
+        method: "POST",
+        url: this.oauthConfig.tokenUrl,
+        requestBody: "[credentials redacted]",
+        requestHeaders,
+        responseStatus: -1,
+        responseBody: String(err),
+        durationMs: Date.now() - t0,
+      });
+      throw err;
+    }
+
+    const durationMs = Date.now() - t0;
+    let responseBody: string | null = null;
+    try {
+      const text = await res.clone().text();
+      // Mask the access_token in the logged body
+      responseBody = text.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token":"[REDACTED]"');
+    } catch { /* ignore */ }
+
+    dbLogRequestJournal(this.db, {
+      connectorId: this.connectorId,
+      batchId: this.batchIdRef?.current,
+      trigger: "oauth_refresh",
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
+      url: this.oauthConfig.tokenUrl,
+      requestBody: "[credentials redacted]",
+      requestHeaders,
+      responseStatus: res.status,
+      responseBody,
+      durationMs,
     });
 
     if (!res.ok) {
-      const text = await res.text();
+      const text = responseBody ?? await res.text();
       throw new Error(
         `OAuth token request failed for ${this.connectorId}: ${res.status} ${text}`,
       );
@@ -200,11 +243,11 @@ export class OAuthTokenManager {
  */
 function resolveAuthHeader(
   auth: AuthConfig | undefined,
-  config: Record<string, unknown>,
+  credentials: Record<string, unknown>,
 ): { header: string; value: string } | undefined {
   if (!auth) return undefined;
   if (auth.type === "api-key") {
-    const token = config["apiKey"];
+    const token = credentials["apiKey"];
     if (typeof token !== "string") return undefined;
     const header = auth.header ?? "Authorization";
     return { header, value: `Bearer ${token}` };
@@ -215,7 +258,7 @@ function resolveAuthHeader(
 export function makeTrackedFetch(
   connectorId: string,
   auth: AuthConfig | undefined,
-  config: Record<string, unknown>,
+  credentials: Record<string, unknown>,
   db: Db,
   batchIdRef: { current: string | undefined },
   triggerRef: { current: JournalTrigger | undefined },
@@ -283,7 +326,7 @@ export function makeTrackedFetch(
         req.headers.set("Authorization", `Bearer ${token}`);
       } else {
         // 3. api-key static injection
-        const injected = resolveAuthHeader(auth, config);
+        const injected = resolveAuthHeader(auth, credentials);
         if (injected) req.headers.set(injected.header, injected.value);
       }
     }
@@ -477,6 +520,7 @@ export function makeConnectorInstance(
   id: string,
   connector: Connector,
   config: Record<string, unknown>,
+  credentials: Record<string, unknown>,
   db: Db,
   webhookBaseUrl: string,
 ): ConnectorInstance {
@@ -519,16 +563,17 @@ export function makeConnectorInstance(
       id,
       oauthCfg,
       scopes,
-      config["clientId"] as string,
-      config["clientSecret"] as string,
+      credentials["clientId"] as string,
+      credentials["clientSecret"] as string,
       db,
+      batchIdRef,
     );
   }
 
   const http = makeTrackedFetch(
     id,
     connector.metadata.auth,
-    config,
+    credentials,
     db,
     batchIdRef,
     triggerRef,
@@ -1134,81 +1179,99 @@ export class SyncEngine {
       return { channelId, connectorId, records: [] };
     }
 
-    // Propagate batch_id and trigger into ctx.http so journal rows can be correlated
+    // Propagate batch_id and trigger into ctx.http so journal rows can be correlated.
+    // Both the source connector and every target connector need the refs set so that
+    // all HTTP calls made during the ingest (reads from source, writes to targets) are
+    // attributed to this poll batch.
+    const pollTargets = channel.members
+      .filter((m) => m.connectorId !== connectorId)
+      .flatMap((m) => { const inst = this.connectors.get(m.connectorId); return inst ? [inst] : []; });
+
     if (source.batchIdRef) source.batchIdRef.current = opts.batchId;
     if (source.triggerRef) source.triggerRef.current = "poll";
-
-    const ingestTs = Date.now();
-    const since = opts.fullSync
-      ? undefined
-      : dbGetWatermark(this.db, connectorId, sourceMember.entity);
-
-    // ── Read all records from the source ──────────────────────────────────
-    //
-    // Raced against a deadline. If the connector's read() generator stalls the
-    // ingest() call rejects after readTimeoutMs. The generator itself is not
-    // cancelled (no AbortSignal threading yet — deferred to a future engine
-    // rewrite); it is simply abandoned.
-
-    const allRecords: ReadRecord[] = [];
-    let newWatermark: string | undefined;
-
-    const readTimeoutMs = this.readTimeoutMs;
-    await Promise.race([
-      (async () => {
-        for await (const batch of sourceEntity.read(source.ctx, since)) {
-          allRecords.push(...batch.records);
-          if (batch.since) newWatermark = batch.since;
-        }
-      })(),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error(
-            `ingest() read timed out after ${readTimeoutMs}ms` +
-            ` (connector: ${connectorId}, entity: ${sourceMember.entity})`,
-          )),
-          readTimeoutMs,
-        )
-      ),
-    ]);
-
-    // ── Diff + fan-out ────────────────────────────────────────────────────
-
-    const results = await this._processRecords(
-      channelId,
-      sourceMember,
-      allRecords,
-      opts.batchId,
-      ingestTs,
-    );
-
-    // ── Advance watermark ─────────────────────────────────────────────────
-
-    if (newWatermark && !opts.fullSync) {
-      dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
+    for (const t of pollTargets) {
+      if (t.batchIdRef) t.batchIdRef.current = opts.batchId;
+      if (t.triggerRef) t.triggerRef.current = "poll";
     }
 
-    // ── Log sync run ──────────────────────────────────────────────────────
+    try {
+      const ingestTs = Date.now();
+      const since = opts.fullSync
+        ? undefined
+        : dbGetWatermark(this.db, connectorId, sourceMember.entity);
 
-    const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0 };
-    for (const r of results) {
-      if (r.action === "insert") counts.inserted++;
-      else if (r.action === "update") counts.updated++;
-      else if (r.action === "skip") counts.skipped++;
-      else if (r.action === "defer") counts.deferred++;
-      else if (r.action === "error") counts.errors++;
+      // ── Read all records from the source ──────────────────────────────────
+      //
+      // Raced against a deadline. If the connector's read() generator stalls the
+      // ingest() call rejects after readTimeoutMs. The generator itself is not
+      // cancelled (no AbortSignal threading yet — deferred to a future engine
+      // rewrite); it is simply abandoned.
+
+      const allRecords: ReadRecord[] = [];
+      let newWatermark: string | undefined;
+
+      const readTimeoutMs = this.readTimeoutMs;
+      await Promise.race([
+        (async () => {
+          for await (const batch of sourceEntity.read(source.ctx, since)) {
+            allRecords.push(...batch.records);
+            if (batch.since) newWatermark = batch.since;
+          }
+        })(),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(
+              `ingest() read timed out after ${readTimeoutMs}ms` +
+              ` (connector: ${connectorId}, entity: ${sourceMember.entity})`,
+            )),
+            readTimeoutMs,
+          )
+        ),
+      ]);
+
+      // ── Diff + fan-out ────────────────────────────────────────────────────
+
+      const results = await this._processRecords(
+        channelId,
+        sourceMember,
+        allRecords,
+        opts.batchId,
+        ingestTs,
+      );
+
+      // ── Advance watermark ─────────────────────────────────────────────────
+
+      if (newWatermark && !opts.fullSync) {
+        dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
+      }
+
+      // ── Log sync run ──────────────────────────────────────────────────────
+
+      const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0 };
+      for (const r of results) {
+        if (r.action === "insert") counts.inserted++;
+        else if (r.action === "update") counts.updated++;
+        else if (r.action === "skip") counts.skipped++;
+        else if (r.action === "defer") counts.deferred++;
+        else if (r.action === "error") counts.errors++;
+      }
+
+      dbLogSyncRun(this.db, {
+        batchId: opts.batchId,
+        channelId,
+        connectorId,
+        ...counts,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      });
+
+      return { channelId, connectorId, records: results };
+    } finally {
+      if (source.triggerRef) source.triggerRef.current = undefined;
+      for (const t of pollTargets) {
+        if (t.triggerRef) t.triggerRef.current = undefined;
+      }
     }
-
-    dbLogSyncRun(this.db, {
-      batchId: opts.batchId,
-      channelId,
-      connectorId,
-      ...counts,
-      startedAt,
-      finishedAt: new Date().toISOString(),
-    });
-
-    return { channelId, connectorId, records: results };
   }
 
   // ─── processWebhookQueue ─────────────────────────────────────────────────
@@ -1246,9 +1309,17 @@ export class SyncEngine {
         continue;
       }
 
-      // Propagate batchId into this connector's ctx.http
+      // Propagate batchId and trigger into this connector's ctx.http and all target connectors
+      const webhookTargets = channel.members
+        .filter((m) => m.connectorId !== row.connector_id)
+        .flatMap((m) => { const inst = this.connectors.get(m.connectorId); return inst ? [inst] : []; });
+
       if (instance.batchIdRef) instance.batchIdRef.current = batchId;
       if (instance.triggerRef) instance.triggerRef.current = "webhook";
+      for (const t of webhookTargets) {
+        if (t.batchIdRef) t.batchIdRef.current = batchId;
+        if (t.triggerRef) t.triggerRef.current = "webhook";
+      }
 
       try {
         const startedAt = new Date().toISOString();
@@ -1299,6 +1370,9 @@ export class SyncEngine {
         dbMarkWebhookFailed(this.db, row.id, String(err));
       } finally {
         if (instance.triggerRef) instance.triggerRef.current = undefined;
+        for (const t of webhookTargets) {
+          if (t.triggerRef) t.triggerRef.current = undefined;
+        }
       }
     }
 
