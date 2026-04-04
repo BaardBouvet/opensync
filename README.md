@@ -2,7 +2,7 @@
 
 An open-source, hub-and-spoke bi-directional SaaS sync engine.
 
-Stop writing point-to-point integrations. Build a connector once, sync to any system.
+→ [What it is and why](./ESSENCE.md) · [Roadmap](./ROADMAP.md) · [Changelog](./CHANGELOG.md)
 
 ## What It Does
 
@@ -12,7 +12,7 @@ Connect N systems (HubSpot, Salesforce, your API, databases, knowledge graphs) w
 - **Field-level conflict resolution** — different systems master different fields
 - **Full undo/rollback** — any sync can be reversed
 - **Webhooks for real-time** — or poll on your schedule
-- **Schema-agnostic** — works with REST, GraphQL, databases, RDF, file systems
+- **Schema-agnostic** — works with REST, GraphQL, network-accessible databases, RDF, file systems
 - **Safety first** — circuit breakers, echo prevention, idempotency built-in
 
 ## Getting Started
@@ -21,9 +21,8 @@ Connect N systems (HubSpot, Salesforce, your API, databases, knowledge graphs) w
 
 ## Architecture
 
-- **Connectors**: Dumb pipes. You map data. That's it.
-- **Engine**: The brain. Diffing, conflict resolution, undo, safety.
-- **Backends**: Pluggable storage (relational now, graph later).
+- **Connectors**: Dumb pipes. They expose raw records. No field mapping, no business logic.
+- **Engine**: The brain. Diffing, conflict resolution, field mapping, undo, safety.
 - **CLI**: User interface. No web UI for MVP.
 
 ## Documentation
