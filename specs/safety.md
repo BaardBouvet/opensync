@@ -223,3 +223,54 @@ For 429 (Rate Limit) responses, the engine checks the `Retry-After` header:
 ### Integration
 
 Integrated into `ctx.http` — connectors get automatic retry without any code. The retry config can be overridden per connector instance in the YAML config.
+
+## Optimistic Locking (ETag threading)
+
+Prevents lost-update races when an external system modifies a record between the engine's read and write.
+
+### How it works
+
+When a connector's `read()` returns a `version` field on a record, the engine stores it in `shadow_state.version`. When the engine later dispatches an update to the same connector, it passes that stored version back in `UpdateRecord.version`. The connector can then send `If-Match: <version>` (or equivalent) and receive a `412 Precondition Failed` if the record changed externally since it was last read.
+
+```
+Engine reads record from connector A
+  → ReadRecord { id: "a1", data: {...}, version: "etag-xyz" }
+  → shadow_state row written with version = "etag-xyz"
+
+[External system modifies the record in A]
+
+Engine dispatches update to connector A
+  → UpdateRecord { id: "a1", data: {...}, version: "etag-xyz" }
+  → Connector sends: PUT /contacts/a1 with If-Match: etag-xyz
+  → API returns 412 Precondition Failed (version mismatch)
+```
+
+### 412 retry loop
+
+When a connector receives a 412, it should throw `ConflictError`. The engine handles this by:
+
+1. Re-reading the current record from the connector (`entity.lookup([id])`).
+2. Updating `shadow_state` with the fresh record and its new version.
+3. Re-computing the canonical diff against the original source.
+4. If the diff still exists (i.e. the external change did not already incorporate it), retrying the update with the new version.
+
+The retry loop runs at most once by default (configurable). If the conflict persists after retry, the record is moved to the dead letter queue with `action = 'conflict'`.
+
+### Connector contract
+
+- `ReadRecord.version` is optional. If the connector does not return a version, the engine skips ETag threading entirely — optimistic locking is connector-opt-in.
+- `UpdateRecord.version` is only set when `shadow_state.version` is non-null for that record.
+- The connector is responsible for sending the correct header and interpreting the 412. The engine supplies the version; the connector decides how to use it.
+
+### Spec reference
+
+Validated in POC v6. The `version` field flow (read → shadow → update) was confirmed working. The 412 retry loop is a known gap from v6 (engine did not implement the re-read + retry; it let the error propagate to the dead letter queue instead). This section specifies the production behaviour.
+
+```typescript
+// Thrown by connector when remote returns 412 Precondition Failed
+class ConflictError extends ConnectorError {
+  constructor(message: string, public readonly currentVersion?: string) {
+    super(message, 'CONFLICT', false);  // not retryable via backoff — handled by re-read loop
+  }
+}
+```

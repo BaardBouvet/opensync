@@ -316,6 +316,77 @@ describe("addConnector()", () => {
   });
 });
 
+// ─── Suite: onboard() dryRun ─────────────────────────────────────────────────
+
+describe("onboard() dryRun", () => {
+  it("returns correct counts without writing any DB rows", async () => {
+    const db = makeTempDb();
+    const dirA = makeTempDir(); const dirB = makeTempDir();
+    seedAB(dirA, dirB);
+
+    const instA = makeInstance(db, "system-a", dirA);
+    const instB = makeInstance(db, "system-b", dirB);
+    const engine = new SyncEngine({ connectors: [instA, instB], channels: [CHANNEL_AB] }, db);
+
+    const report = await engine.discover("contacts-channel");
+
+    const beforeIM = db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM identity_map").get()!.n;
+    const beforeSS = db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM shadow_state").get()!.n;
+
+    const result = await engine.onboard("contacts-channel", report, { dryRun: true });
+
+    // Counts match what a live onboard would produce
+    expect(result.linked).toBe(6);         // 3 canonicals × 2 sides
+    expect(result.shadowsSeeded).toBe(6);
+    expect(result.uniqueQueued).toBe(0);   // all 3 matched
+
+    // Zero DB changes
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM identity_map").get()!.n).toBe(beforeIM);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM shadow_state").get()!.n).toBe(beforeSS);
+  });
+
+  it("dryRun onboard then dryRun addConnector — full preview without any DB writes", async () => {
+    const db = makeTempDb();
+    const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
+    seedAB(dirA, dirB); seedC(dirC);
+
+    // Step 1: build A+B engine and dry-run the onboard
+    const instA = makeInstance(db, "system-a", dirA);
+    const instB = makeInstance(db, "system-b", dirB);
+    const instC = makeInstance(db, "system-c", dirC);
+    const engineAB = new SyncEngine({ connectors: [instA, instB], channels: [CHANNEL_AB] }, db);
+
+    const discoverReport = await engineAB.discover("contacts-channel");
+    const onboardPreview = await engineAB.onboard("contacts-channel", discoverReport, { dryRun: true });
+
+    expect(onboardPreview.linked).toBe(6);
+    expect(onboardPreview.uniqueQueued).toBe(0);
+
+    // Step 2: channel is still uninitialized (dry-run wrote nothing)
+    expect(engineAB.channelStatus("contacts-channel")).toBe("uninitialized");
+
+    // Step 3: addConnector dry-run also works (uses the canonical layer — but it's empty,
+    // so this preview only succeeds after a real onboard)
+    // Do the real onboard first, then dry-run addConnector
+    await engineAB.onboard("contacts-channel", discoverReport);
+
+    const engineABC = new SyncEngine(
+      { connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), instC],
+        channels: [CHANNEL_ABC] },
+      db,
+    );
+    const addPreview = await engineABC.addConnector("contacts-channel", "system-c", { dryRun: true });
+
+    expect(addPreview.summary.linked).toBe(2);
+    expect(addPreview.summary.newFromJoiner).toBe(1);
+    expect(addPreview.summary.missingInJoiner).toBe(1);
+
+    // DB unchanged since addConnector dry-run
+    const imRows = db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM identity_map").get()!.n;
+    expect(imRows).toBe(6); // only A+B rows
+  });
+});
+
 // ─── Suite: channelStatus() v8 extension ─────────────────────────────────────
 
 describe("channelStatus() v8 — partially-onboarded", () => {

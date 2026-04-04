@@ -1012,13 +1012,17 @@ export class SyncEngine {
    *   - For unique records: either propagate (default) or skip.
    *   - Advance watermarks for all channel members to `now`.
    *   - Mark channel as "ready" so ingest() no longer blocks.
+   *
+   * Pass `{ dryRun: true }` to preview the result without writing anything.
+   * The returned counts reflect what _would_ be written; no DB rows are created.
    */
   async onboard(
     channelId: string,
     report: DiscoveryReport,
-    opts?: { propagateUnique?: boolean },
+    opts?: { propagateUnique?: boolean; dryRun?: boolean },
   ): Promise<OnboardResult> {
     const propagateUnique = opts?.propagateUnique ?? true;
+    const dryRun = opts?.dryRun ?? false;
     const startedAt = new Date().toISOString();
 
     const channel = this.channels.get(channelId);
@@ -1033,6 +1037,20 @@ export class SyncEngine {
     const ts = Date.now();
 
     // ── 1. Commit matched pairs ───────────────────────────────────────────────
+
+    if (dryRun) {
+      // Dry-run: count what would be written without touching the DB
+      for (const match of report.matched) {
+        linked += match.sides.length;
+        shadowsSeeded += match.sides.length;
+      }
+      if (propagateUnique) {
+        uniqueQueued = report.uniquePerSide.length;
+      } else {
+        uniqueSkipped = report.uniquePerSide.length;
+      }
+      return { linked, shadowsSeeded, uniqueQueued, uniqueSkipped };
+    }
 
     // Wrap in a single SQLite transaction for atomicity
     const commitMatched = this.db.transaction(() => {
