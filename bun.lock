@@ -43,6 +43,13 @@
         "@types/node": "^25.5.0",
       },
     },
+    "connectors/mock-crm": {
+      "name": "@opensync/connector-mock-crm",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+    },
     "connectors/postgres": {
       "name": "@opensync/connector-postgres",
       "version": "0.1.0",
@@ -98,6 +105,8 @@
     "@opensync/connector-jsonfiles": ["@opensync/connector-jsonfiles@workspace:connectors/jsonfiles"],
 
     "@opensync/connector-kafka": ["@opensync/connector-kafka@workspace:connectors/kafka"],
+
+    "@opensync/connector-mock-crm": ["@opensync/connector-mock-crm@workspace:connectors/mock-crm"],
 
     "@opensync/connector-postgres": ["@opensync/connector-postgres@workspace:connectors/postgres"],
 

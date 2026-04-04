@@ -375,6 +375,15 @@ export type ConfigField =
       description: string;
       required: boolean;
       default?: unknown[];
+    }
+  | {
+      type: "object";
+      description: string;
+      required: boolean;
+      /** Informational property hints shown in CLI/agent output.
+       *  Not enforced at runtime — the engine passes the value through as-is. */
+      properties?: Record<string, { type?: string; description?: string }>;
+      default?: Record<string, unknown>;
     };
 
 /** Returned by getOAuthConfig() — the URLs the engine needs to run the OAuth2 flow. */
