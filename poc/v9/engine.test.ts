@@ -382,7 +382,7 @@ describe("onboard() with merged provisionals", () => {
 
 // ─── Suite: partial-onboarding safety ────────────────────────────────────────
 
-describe("partially-onboarded: A+B can sync while C is collected", () => {
+describe("A+B stays ready while C is being collected / addConnector'd", () => {
   it("A+B ingest produces no fan-out to C (collected-but-not-linked C is skipped)", async () => {
     const db = makeTempDb();
     const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
@@ -394,10 +394,10 @@ describe("partially-onboarded: A+B can sync while C is collected", () => {
     await engineAB.ingest("contacts-channel", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
     await engineAB.onboard("contacts-channel", await engineAB.discover("contacts-channel"));
 
-    // Phase 2: collect C (partially-onboarded)
+    // Phase 2: collect C — channel stays 'ready' (A+B are cross-linked; C is invisible until addConnector)
     const engineABC = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
     await engineABC.ingest("contacts-channel", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
-    expect(engineABC.channelStatus("contacts-channel")).toBe("partially-onboarded");
+    expect(engineABC.channelStatus("contacts-channel")).toBe("ready");
 
     // Phase 3: update Alice in A, then run a normal A ingest
     const aContacts = readJson(join(dirA, "contacts.json")) as Array<Record<string, unknown>>;
@@ -436,7 +436,7 @@ describe("partially-onboarded: A+B can sync while C is collected", () => {
     const engineABC = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
     await engineABC.ingest("contacts-channel", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
 
-    // Update Alice in A while C is partially-onboarded
+    // Update Alice in A while C is being onboarded — channel is still 'ready'
     const aContacts = readJson(join(dirA, "contacts.json")) as Array<Record<string, unknown>>;
     const alice = aContacts.find((r) => r["email"] === "alice@example.com")!;
     alice["name"] = "Alice Updated";
@@ -584,7 +584,7 @@ describe("addConnector() with shadow-backed matching", () => {
     seedAB(dirA, dirB); seedC(dirC);
 
     const engine = await onboardABCollectC(db, dirA, dirB, dirC);
-    expect(engine.channelStatus("contacts-channel")).toBe("partially-onboarded");
+    expect(engine.channelStatus("contacts-channel")).toBe("ready");
 
     await engine.addConnector("contacts-channel", "system-c");
     expect(engine.channelStatus("contacts-channel")).toBe("ready");

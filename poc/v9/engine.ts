@@ -24,10 +24,14 @@
  *   ingest(C, { collectOnly: true }) → addConnector (reads C's shadow_state) → sync.
  *
  * ChannelStatus gains a new 'collected' state:
- *   uninitialized → no shadow_state rows
- *   collected      → shadow rows exist, no cross-canonical links yet
- *   partially-onboarded → some members linked, others still collected
- *   ready          → all members have cross-canonical links
+ *   uninitialized → no shadow_state rows exist for any channel member
+ *   collected      → shadow rows exist but no cross-canonical links yet
+ *   ready          → at least two members are cross-linked (normal sync is live)
+ *
+ * A connector that has been collected but not yet linked via addConnector() is
+ * invisible to channelStatus() — it does not downgrade a ready channel.  The
+ * channel stays 'ready' for its currently-linked members while a new connector
+ * is being onboarded in the background.
  */
 import type {
   Association,
@@ -560,7 +564,7 @@ export interface OnboardResult {
   uniqueSkipped: number;
 }
 
-export type ChannelStatus = "uninitialized" | "collected" | "partially-onboarded" | "ready";
+export type ChannelStatus = "uninitialized" | "collected" | "ready";
 
 export class OnboardingRequiredError extends Error {
   constructor(message: string) {
@@ -874,51 +878,30 @@ export class SyncEngine {
     const memberIds = channel.members.map((m) => m.connectorId);
     const placeholders = memberIds.map(() => "?").join(", ");
 
+    // 'ready': the DB flag is set AND at least two declared members are cross-linked.
+    // A connector that has been collected but not yet linked via addConnector() is
+    // invisible here — its provisional self-only rows don't count.
     const base = dbGetChannelStatus(this.db, channelId);
-
     if (base === "ready") {
-      // "ready" only if ALL declared members appear in at least one cross-linked canonical
-      // (i.e. a canonical that spans more than one connector in this channel).
-      // Provisional self-only identity_map rows don't count.
-      const crossLinkedConnectors = this.db
-        .query<{ connector_id: string }, string[]>(
-          `SELECT DISTINCT connector_id FROM identity_map
-           WHERE connector_id IN (${placeholders})
-             AND canonical_id IN (
-               SELECT canonical_id FROM identity_map WHERE connector_id IN (${placeholders})
-               GROUP BY canonical_id HAVING COUNT(DISTINCT connector_id) > 1
-             )`,
-        )
-        .all(...memberIds, ...memberIds)
-        .map((r) => r.connector_id);
-
-      const allCrossLinked = channel.members.every((m) => crossLinkedConnectors.includes(m.connectorId));
-      return allCrossLinked ? "ready" : "partially-onboarded";
-    }
-
-    // Not yet marked ready — check if any shadow_state rows exist for this channel
-    // (meaning collectOnly ingest has run for at least one member).
-    const hasShadow = this.db
-      .query<{ n: number }, string[]>(
-        `SELECT COUNT(*) as n FROM shadow_state WHERE connector_id IN (${placeholders})`,
-      )
-      .get(...memberIds);
-
-    if ((hasShadow?.n ?? 0) > 0) {
-      // Has shadow rows — check if any cross-canonical links exist yet
-      const hasLinks = this.db
+      const crossLinked = this.db
         .query<{ n: number }, string[]>(
-          // A "cross-link" exists when two different connectors share the same canonical_id
           `SELECT COUNT(*) as n FROM (
              SELECT canonical_id FROM identity_map WHERE connector_id IN (${placeholders})
              GROUP BY canonical_id HAVING COUNT(DISTINCT connector_id) > 1
            )`,
         )
         .get(...memberIds);
-      return (hasLinks?.n ?? 0) > 0 ? "partially-onboarded" : "collected";
+      if ((crossLinked?.n ?? 0) > 0) return "ready";
     }
 
-    return "uninitialized";
+    // Not ready yet — check whether any shadow rows exist (i.e. collect has run).
+    const hasShadow = this.db
+      .query<{ n: number }, string[]>(
+        `SELECT COUNT(*) as n FROM shadow_state WHERE connector_id IN (${placeholders})`,
+      )
+      .get(...memberIds);
+
+    return (hasShadow?.n ?? 0) > 0 ? "collected" : "uninitialized";
   }
 
   /**
