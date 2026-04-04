@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/sdk" },
+    { "path": "packages/engine" },
     { "path": "connectors/jsonfiles" },
     { "path": "connectors/hubspot" },
     { "path": "connectors/tripletex" },

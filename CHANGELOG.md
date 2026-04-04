@@ -15,6 +15,22 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
+- `packages/engine/` (`@opensync/engine`): initial production engine package implementing `SyncEngine` class with:
+  - `ingest(channelId, connectorId, opts?)` — full poll cycle with collectOnly fast path, timeout, and fan-out
+  - `discover(channelId, snapshotAt?)` — pure DB-backed match report from shadow_state
+  - `onboard(channelId, report, opts?)` — merge canonicals, propagate unique-per-side records, advance watermarks
+  - `addConnector(channelId, connectorId, opts?)` — live join of a new connector to an existing channel
+  - `channelStatus(channelId)` — returns `"uninitialized" | "collected" | "ready"`
+  - **Gap 1 fix**: `snapshotAt` captured before the read phase starts; passed through `IngestResult` and used as the watermark anchor so records written mid-collect are not missed by the next incremental
+  - **Gap 2 fix**: `CircuitBreaker` persists trip/reset events to `circuit_breaker_events` table; state restored from DB on engine construction so a tripped breaker survives restarts
+  - **Gap 6 fix**: 412 Precondition Failed on dispatched update triggers a re-read (`entity.lookup`) to fetch the fresh ETag, then one retry; dead-letters with `action = "error"` if still conflicts
+  - **Gap 8 fix**: `onboard()` checks circuit breaker before any writes and throws immediately if OPEN; unique-per-side propagation route writes `transaction_log` entries for auditability
+  - `loadConfig(rootDir)` — loads `opensync.json` + `mappings/*.yaml` from disk, resolves `${ENV_VAR}` interpolation, dynamically imports connector plugins
+  - `openDb(path)` — runtime-adaptive SQLite adapter: `bun:sqlite` under Bun, `better-sqlite3` under Node.js 18+
+  - Full SQLite schema (9 tables) created idempotently on construction
+  - Integration tests T1–T9 covering all M2 exit criteria scenarios
+- `tsconfig.json` (root): added `packages/engine` project reference
+
 - `servers/mock-crm/` (`@opensync/server-mock-crm`): standalone `MockCrmServer` package extracted from `poc/v5`; supports env-var config (`MOCK_CRM_PORT`, `MOCK_CRM_API_KEY`), `/__reset` test-helper endpoint, and a `src/main.ts` process entrypoint
 - `servers/mock-erp/` (`@opensync/server-mock-erp`): standalone `MockErpServer` package extracted from `poc/v6`; supports env-var config (`MOCK_ERP_PORT`, `MOCK_ERP_CLIENT_ID`, `MOCK_ERP_CLIENT_SECRET`, `MOCK_ERP_HMAC_SECRET`), `/__reset` test-helper endpoint, and a `src/main.ts` process entrypoint
 - `connectors/mock-crm/src/index.test.ts`: connector tests covering `read()`, `insert()`, `update()`, `onEnable()`/`onDisable()`, automatic webhook delivery on create/update, and `handleWebhook()` in both thick and thin modes

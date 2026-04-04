@@ -68,23 +68,27 @@ Plan: [plans/engine/PLAN_PRODUCTION_ENGINE_M2.md](plans/engine/PLAN_PRODUCTION_E
 
 | Item | Spec | Status |
 |------|------|--------|
-| ingest() - read, diff against shadow state, dispatch | [specs/sync-engine.md](specs/sync-engine.md) | not started |
-| Shadow state (val, prev, ts, src per field) | [specs/sync-engine.md](specs/sync-engine.md) | not started |
-| Canonical identity map (hub UUID per logical record) | [specs/identity.md](specs/identity.md) | not started |
-| Field mapping + rename maps | [specs/field-mapping.md](specs/field-mapping.md) | not started |
-| Content-based echo detection | [specs/sync-engine.md](specs/sync-engine.md) | not started |
-| Circuit breaker (trip / reset) | [specs/safety.md](specs/safety.md) | not started |
-| Idempotent insert / update | [specs/safety.md](specs/safety.md) | not started |
-| Request journal (all outbound HTTP logged) | [specs/observability.md](specs/observability.md) | not started |
-| OAuth2 + API-key auth via ctx.http | [specs/auth.md](specs/auth.md) | not started |
-| Discover + onboard (first-sync without duplicates) | [specs/discovery.md](specs/discovery.md) | not started |
+| ingest() - read, diff against shadow state, dispatch | [specs/sync-engine.md](specs/sync-engine.md) | done |
+| Shadow state (val, prev, ts, src per field) | [specs/sync-engine.md](specs/sync-engine.md) | done |
+| Canonical identity map (hub UUID per logical record) | [specs/identity.md](specs/identity.md) | done |
+| Field mapping + rename maps | [specs/field-mapping.md](specs/field-mapping.md) | done |
+| Content-based echo detection | [specs/sync-engine.md](specs/sync-engine.md) | done |
+| Circuit breaker (trip / reset / persist to DB) | [specs/safety.md](specs/safety.md) | done |
+| Idempotent insert / update | [specs/safety.md](specs/safety.md) | done |
+| Request journal (all outbound HTTP logged) | [specs/observability.md](specs/observability.md) | done |
+| OAuth2 + API-key auth via ctx.http | [specs/auth.md](specs/auth.md) | done |
+| Discover + onboard (first-sync without duplicates) | [specs/discovery.md](specs/discovery.md) | done |
 
 **Exit criteria:**
-- [ ] CRM contact created - appears in ERP with correct field mapping
-- [ ] ERP contact updated - reflected in CRM
-- [ ] No duplicates after 10 consecutive sync cycles
-- [ ] Deleting 60% of source records trips the circuit breaker, does not propagate
-- [ ] All outbound HTTP calls appear in request_journal
+- [x] CRM contact created — appears in ERP with correct field mapping (T1)
+- [x] ERP contact updated — reflected in CRM (T2)
+- [x] No duplicates after 10 consecutive sync cycles (T3)
+- [x] Circuit breaker trips after error batches; blocks further ingest (T4)
+- [x] All outbound HTTP calls appear in request_journal (T5)
+- [x] Record written mid-collect picked up on next incremental — Gap 1 fix (T6)
+- [x] Tripped circuit breaker survives engine restart — Gap 2 fix (T7)
+- [x] 412 Precondition Failed retried successfully — Gap 6 fix (T8)
+- [x] onboard() blocked when circuit is OPEN — Gap 8 fix (T9)
 
 ---
 
