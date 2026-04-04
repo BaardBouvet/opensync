@@ -1,0 +1,21 @@
+{
+  "connectors": {
+    "mock-crm": {
+      "plugin": "./connectors/mock-crm/src/index.ts",
+      "config": {
+        "baseUrl": "http://localhost:4000",
+        "apiKey": "${MOCK_CRM_API_KEY}",
+        "webhookMode": "thin"
+      }
+    }
+  },
+  "channels": [
+    {
+      "id": "contacts-channel",
+      "members": [
+        { "connectorId": "mock-crm", "entity": "contacts" }
+      ]
+    }
+  ],
+  "webhookPort": 4001
+}
