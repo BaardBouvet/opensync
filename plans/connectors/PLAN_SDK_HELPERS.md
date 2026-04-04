@@ -1,6 +1,8 @@
 # Plan: SDK Helpers
 
 **Status:** `backlog`
+**Date:** 2026-04-04
+**Spec:** [specs/sdk-helpers.md](../../specs/sdk-helpers.md)
 
 ## Goal
 

@@ -1,7 +1,8 @@
 # Plan: Connector Cleanup
 
 **Status:** `backlog`
-**Depends on:** `plans/sdk-helpers.md` (all helpers must be implemented and exported first)
+**Date:** 2026-04-04
+**Depends on:** [connectors/PLAN_SDK_HELPERS.md](PLAN_SDK_HELPERS.md) (all helpers must be implemented and exported first)
 
 ## Goal
 
