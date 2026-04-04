@@ -84,6 +84,12 @@ export interface ReadRecord {
   /** Pre-extracted reference fields. The engine uses these to resolve relationships without
    *  inspecting raw data values. */
   associations?: Association[];
+
+  /** Opaque version token from the source system (e.g. ETag, sequence number).
+   *  Returned by lookup(). The engine carries it through the dispatch pass and
+   *  delivers it as UpdateRecord.version so connectors can use it for conditional
+   *  writes (If-Match / optimistic locking). Connectors that omit it are unaffected. */
+  version?: string;
 }
 
 /**
@@ -124,6 +130,17 @@ export interface UpdateRecord {
 
   /** Updated association set, if any changed. */
   associations?: Association[];
+
+  /** Version token from ReadRecord.version (e.g. ETag). Set by the engine when it has
+   *  a live lookup result for this record in the current dispatch pass. Connectors
+   *  forward this as If-Match for conditional writes; absent means write unconditionally. */
+  version?: string;
+
+  /** Full live record snapshot from the most recent lookup(), if the engine already
+   *  fetched it in this dispatch pass. Lets connectors that require full-replace PUT
+   *  merge changes without a second fetch. Absent means the engine did not pre-fetch;
+   *  connector should fall back to its own fetchOne() call. */
+  snapshot?: Record<string, unknown>;
 }
 
 // ─── Write Results ────────────────────────────────────────────────────────────

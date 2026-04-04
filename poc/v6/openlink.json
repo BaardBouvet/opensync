@@ -1,0 +1,30 @@
+{
+  "connectors": {
+    "crm": {
+      "plugin": "../../connectors/mock-crm/src/index.ts",
+      "config": {
+        "baseUrl": "http://localhost:4000",
+        "apiKey": "${MOCK_CRM_API_KEY}",
+        "webhookMode": "thick"
+      }
+    },
+    "erp": {
+      "plugin": "../../connectors/mock-erp/src/index.ts",
+      "config": {
+        "baseUrl": "http://localhost:4001",
+        "clientId": "opensync-test",
+        "clientSecret": "secret"
+      }
+    }
+  },
+  "channels": [
+    {
+      "id": "people-channel",
+      "members": [
+        { "connectorId": "crm", "entity": "contacts" },
+        { "connectorId": "erp", "entity": "employees" }
+      ]
+    }
+  ],
+  "webhookPort": 4003
+}
