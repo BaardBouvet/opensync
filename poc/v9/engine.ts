@@ -1321,6 +1321,36 @@ export class SyncEngine {
     });
     commitLinks();
 
+    // ── 4b. Catch-up: push changes that occurred during partial-onboarding ──
+    //
+    // While C was in "collected" state, ingest from A/B could advance the A/B
+    // shadows (and write to each other) but skipped fan-out to C.  Now that C
+    // is linked, reconcile any matched record whose canonical differs from what
+    // C collected: call C's update() and advance C's shadow to match.
+    for (const entry of linkedEntries) {
+      const currentCanonical = canonicalMap.get(entry.canonicalId);
+      if (!currentCanonical) continue;
+
+      const joinerRecord = joinerRecords.find((r) => r.id === entry.externalId)!;
+
+      // Compare canonical fields to C's collected snapshot
+      const changed = Object.keys(currentCanonical).some(
+        (k) => String(currentCanonical[k] ?? "") !== String(joinerRecord.canonical[k] ?? ""),
+      );
+      if (!changed) continue;
+
+      const outboundData = applyRename(currentCanonical, joinerMember.outbound, "outbound");
+      for await (const r of joinerEntity.update!(
+        oneRecord<UpdateRecord>({ id: entry.externalId, data: outboundData }),
+        joinerInstance.ctx,
+      )) {
+        if (!r.notFound && !r.error) {
+          const fieldData = buildFieldData(undefined, currentCanonical, connectorId, ts, undefined);
+          dbSetShadow(this.db, connectorId, joinerMember.entity, entry.externalId, entry.canonicalId, fieldData);
+        }
+      }
+    }
+
     // ── 5. Propagate net-new joiner records to all existing members ────────
     //
     // Cannot use _processRecords here because the joiner's shadow_state was already
@@ -1535,13 +1565,6 @@ export class SyncEngine {
     const targets = channel.members.filter(
       (m) => m.connectorId !== sourceMember.connectorId && crossLinkedConnectors.has(m.connectorId),
     );
-
-    // If ANY configured non-source channel member is NOT yet cross-linked, we must
-    // hold back the source's shadow advancement for changed records.  This ensures
-    // those records are re-processed — and the pending update is delivered — after
-    // the missing connector is linked via addConnector().
-    const allConfiguredTargets = channel.members.filter((m) => m.connectorId !== sourceMember.connectorId);
-    const hasUncrosslinkedTargets = allConfiguredTargets.some((m) => !crossLinkedConnectors.has(m.connectorId));
 
     const results: RecordSyncResult[] = [];
 
@@ -1771,12 +1794,8 @@ export class SyncEngine {
       }
 
       // ── Atomic commit ─────────────────────────────────────────────────────
-      // Only advance source shadow when all configured targets are cross-linked.
-      // If some targets were skipped (partial-onboarding), hold the source shadow
-      // back so this record is re-processed — and the update delivered — once
-      // those targets are linked via addConnector().
       this.db.transaction(() => {
-        if (!hasUncrosslinkedTargets) {
+        {
           const sourceFieldData = buildFieldData(
             existingSourceShadow,
             record.canonical,

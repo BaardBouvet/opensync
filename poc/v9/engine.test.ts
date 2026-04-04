@@ -422,7 +422,7 @@ describe("partially-onboarded: A+B can sync while C is collected", () => {
     expect(aliceInC?.["name"]).toBe("Alice Liddell");  // original — not "Alice Updated"
   });
 
-  it("after addConnector, the queued update reaches C on next A ingest", async () => {
+  it("addConnector catches C up with changes made during partial-onboarding window", async () => {
     const db = makeTempDb();
     const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
     seedAB(dirA, dirB); seedC(dirC);
@@ -444,17 +444,20 @@ describe("partially-onboarded: A+B can sync while C is collected", () => {
     writeJson(join(dirA, "contacts.json"), aContacts);
     await engineABC.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
 
-    // Now complete the onboarding of C
+    // Now complete the onboarding of C — addConnector catches C up immediately
     await engineABC.addConnector("contacts-channel", "system-c");
     expect(engineABC.channelStatus("contacts-channel")).toBe("ready");
 
-    // C now has all 4 records linked. Run A ingest again — Alice update propagates to C.
-    const engine2 = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
-    await engine2.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
-
+    // C has "Alice Updated" right after addConnector — no extra ingest needed
     const cAfter = readJson(join(dirC, "contacts.json")) as Array<Record<string, unknown>>;
     const aliceInC = cAfter.find((r) => r["email"] === "alice@example.com");
-    expect(aliceInC?.["name"]).toBe("Alice Updated");  // update arrived after addConnector ✓
+    expect(aliceInC?.["name"]).toBe("Alice Updated");  // caught up during addConnector ✓
+
+    // Subsequent A ingest is a no-op (nothing to re-process)
+    const engine2 = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
+    const noOpResult = await engine2.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
+    const writesToC = noOpResult.records.filter((r) => r.targetConnectorId === "system-c");
+    expect(writesToC).toHaveLength(0);  // nothing left to deliver ✓
   });
 });
 
