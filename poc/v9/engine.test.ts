@@ -380,6 +380,84 @@ describe("onboard() with merged provisionals", () => {
   });
 });
 
+// ─── Suite: partial-onboarding safety ────────────────────────────────────────
+
+describe("partially-onboarded: A+B can sync while C is collected", () => {
+  it("A+B ingest produces no fan-out to C (collected-but-not-linked C is skipped)", async () => {
+    const db = makeTempDb();
+    const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
+    seedAB(dirA, dirB); seedC(dirC);
+
+    // Phase 1: onboard A+B
+    const engineAB = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB)], channels: [CHANNEL_AB] }, db);
+    await engineAB.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engineAB.ingest("contacts-channel", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engineAB.onboard("contacts-channel", await engineAB.discover("contacts-channel"));
+
+    // Phase 2: collect C (partially-onboarded)
+    const engineABC = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
+    await engineABC.ingest("contacts-channel", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
+    expect(engineABC.channelStatus("contacts-channel")).toBe("partially-onboarded");
+
+    // Phase 3: update Alice in A, then run a normal A ingest
+    const aContacts = readJson(join(dirA, "contacts.json")) as Array<Record<string, unknown>>;
+    const alice = aContacts.find((r) => r["email"] === "alice@example.com")!;
+    alice["name"] = "Alice Updated";
+    alice["_updatedAt"] = new Date().toISOString();
+    writeJson(join(dirA, "contacts.json"), aContacts);
+
+    const ingestResult = await engineABC.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
+
+    // The update should go to B (cross-linked) but NOT to C (only collected, not linked)
+    const actionsToB = ingestResult.records.filter((r) => r.targetConnectorId === "system-b").map((r) => r.action);
+    const actionsToC = ingestResult.records.filter((r) => r.targetConnectorId === "system-c").map((r) => r.action);
+
+    expect(actionsToB).toContain("update");   // B gets Alice's name update ✓
+    expect(actionsToC).toHaveLength(0);        // C is skipped — not yet cross-linked ✓
+
+    // C's file is unchanged (no duplicate Alice inserted)
+    const cAfter = readJson(join(dirC, "contacts.json")) as Array<Record<string, unknown>>;
+    expect(cAfter.length).toBe(3);
+    const aliceInC = cAfter.find((r) => r["email"] === "alice@example.com");
+    expect(aliceInC?.["name"]).toBe("Alice Liddell");  // original — not "Alice Updated"
+  });
+
+  it("after addConnector, the queued update reaches C on next A ingest", async () => {
+    const db = makeTempDb();
+    const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
+    seedAB(dirA, dirB); seedC(dirC);
+
+    // Onboard A+B, collect C
+    const engineAB = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB)], channels: [CHANNEL_AB] }, db);
+    await engineAB.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engineAB.ingest("contacts-channel", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engineAB.onboard("contacts-channel", await engineAB.discover("contacts-channel"));
+
+    const engineABC = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
+    await engineABC.ingest("contacts-channel", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
+
+    // Update Alice in A while C is partially-onboarded
+    const aContacts = readJson(join(dirA, "contacts.json")) as Array<Record<string, unknown>>;
+    const alice = aContacts.find((r) => r["email"] === "alice@example.com")!;
+    alice["name"] = "Alice Updated";
+    alice["_updatedAt"] = new Date().toISOString();
+    writeJson(join(dirA, "contacts.json"), aContacts);
+    await engineABC.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
+
+    // Now complete the onboarding of C
+    await engineABC.addConnector("contacts-channel", "system-c");
+    expect(engineABC.channelStatus("contacts-channel")).toBe("ready");
+
+    // C now has all 4 records linked. Run A ingest again — Alice update propagates to C.
+    const engine2 = new SyncEngine({ connectors: [makeInstance(db, "system-a", dirA), makeInstance(db, "system-b", dirB), makeInstance(db, "system-c", dirC)], channels: [CHANNEL_ABC] }, db);
+    await engine2.ingest("contacts-channel", "system-a", { batchId: crypto.randomUUID(), fullSync: true });
+
+    const cAfter = readJson(join(dirC, "contacts.json")) as Array<Record<string, unknown>>;
+    const aliceInC = cAfter.find((r) => r["email"] === "alice@example.com");
+    expect(aliceInC?.["name"]).toBe("Alice Updated");  // update arrived after addConnector ✓
+  });
+});
+
 // ─── Suite: addConnector() with shadow-backed matching ────────────────────────
 
 describe("addConnector() with shadow-backed matching", () => {

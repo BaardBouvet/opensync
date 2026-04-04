@@ -1514,7 +1514,35 @@ export class SyncEngine {
     ingestTs: number,
   ): Promise<RecordSyncResult[]> {
     const channel = this.channels.get(channelId)!;
-    const targets = channel.members.filter((m) => m.connectorId !== sourceMember.connectorId);
+
+    // ── v9: Skip fan-out to targets that haven't been cross-linked yet ─────
+    // A connector in "collected" state has only provisional self-only canonicals.
+    // Fanning out to it would insert records without going through the identity
+    // phase first — creating duplicates.  Precompute which targets are safe.
+    const crossLinkedConnectors = new Set(
+      this.db
+        .query<{ connector_id: string }, []>(
+          `SELECT DISTINCT connector_id FROM identity_map
+           WHERE canonical_id IN (
+             SELECT canonical_id FROM identity_map
+             GROUP BY canonical_id HAVING COUNT(DISTINCT connector_id) > 1
+           )`,
+        )
+        .all()
+        .map((r) => r.connector_id),
+    );
+
+    const targets = channel.members.filter(
+      (m) => m.connectorId !== sourceMember.connectorId && crossLinkedConnectors.has(m.connectorId),
+    );
+
+    // If ANY configured non-source channel member is NOT yet cross-linked, we must
+    // hold back the source's shadow advancement for changed records.  This ensures
+    // those records are re-processed — and the pending update is delivered — after
+    // the missing connector is linked via addConnector().
+    const allConfiguredTargets = channel.members.filter((m) => m.connectorId !== sourceMember.connectorId);
+    const hasUncrosslinkedTargets = allConfiguredTargets.some((m) => !crossLinkedConnectors.has(m.connectorId));
+
     const results: RecordSyncResult[] = [];
 
     // ── 1. Diff incoming records against shadow state ─────────────────────
@@ -1743,22 +1771,28 @@ export class SyncEngine {
       }
 
       // ── Atomic commit ─────────────────────────────────────────────────────
+      // Only advance source shadow when all configured targets are cross-linked.
+      // If some targets were skipped (partial-onboarding), hold the source shadow
+      // back so this record is re-processed — and the update delivered — once
+      // those targets are linked via addConnector().
       this.db.transaction(() => {
-        const sourceFieldData = buildFieldData(
-          existingSourceShadow,
-          record.canonical,
-          sourceMember.connectorId,
-          ingestTs,
-          record.assocSentinel,
-        );
-        dbSetShadow(
-          this.db,
-          sourceMember.connectorId,
-          sourceMember.entity,
-          record.sourceId,
-          canonId,
-          sourceFieldData,
-        );
+        if (!hasUncrosslinkedTargets) {
+          const sourceFieldData = buildFieldData(
+            existingSourceShadow,
+            record.canonical,
+            sourceMember.connectorId,
+            ingestTs,
+            record.assocSentinel,
+          );
+          dbSetShadow(
+            this.db,
+            sourceMember.connectorId,
+            sourceMember.entity,
+            record.sourceId,
+            canonId,
+            sourceFieldData,
+          );
+        }
 
         for (const outcome of dispatchOutcomes) {
           if (outcome.result.action === "insert") {
