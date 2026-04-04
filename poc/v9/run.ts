@@ -130,6 +130,38 @@ function check(cond: boolean, passed: string, failed: string): void {
   if (cond) ok(passed); else bad(failed);
 }
 
+function dumpDb(dbPath: string, outPath: string): void {
+  const db = openDb(dbPath);
+
+  const identityMap = db.query<{
+    canonical_id: string; connector_id: string; external_id: string;
+  }, []>("SELECT canonical_id, connector_id, external_id FROM identity_map ORDER BY canonical_id, connector_id").all();
+
+  const shadowState = db.query<{
+    connector_id: string; entity_name: string; external_id: string;
+    canonical_id: string; canonical_data: string; deleted_at: string | null; updated_at: string;
+  }, []>("SELECT connector_id, entity_name, external_id, canonical_id, canonical_data, deleted_at, updated_at FROM shadow_state ORDER BY connector_id, external_id").all().map((r) => ({
+    ...r,
+    canonical_data: JSON.parse(r.canonical_data),
+  }));
+
+  const onboardingLog = db.query<Record<string, unknown>, []>(
+    "SELECT * FROM onboarding_log ORDER BY started_at",
+  ).all();
+
+  const channelStatus = db.query<Record<string, unknown>, []>(
+    "SELECT * FROM channel_onboarding_status ORDER BY channel_id",
+  ).all();
+
+  const txLog = db.query<Record<string, unknown>, []>(
+    "SELECT id, batch_id, connector_id, entity_name, external_id, canonical_id, action, synced_at FROM transaction_log ORDER BY synced_at",
+  ).all();
+
+  const dump = { identityMap, shadowState, channelStatus, onboardingLog, txLog };
+  writeFileSync(outPath, JSON.stringify(dump, null, 2), "utf8");
+  console.log(`  [db dump] → ${outPath}`);
+}
+
 // ─── Scenario 1 — Collect → Discover → Onboard → Sync ────────────────────────
 
 async function scenario1(): Promise<void> {
@@ -184,6 +216,9 @@ async function scenario1(): Promise<void> {
   console.log(`  [ingest  ] ${writes} writes`);
   check(writes === 0, "zero writes — shadow state was pre-seeded during collect", `expected 0, got ${writes}`);
   console.log();
+
+  dumpDb(dbPath, join(dataDir, "v9-s1", "db-dump.json"));
+  console.log();
 }
 
 // ─── Scenario 2 — Discover is a free dry-run ─────────────────────────────────
@@ -228,6 +263,9 @@ async function scenario2(): Promise<void> {
   const imAfter = db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM identity_map").get()!.n;
   check(imAfter === 6, `identity_map still has 6 rows (provisionals merged, no extras)`, `expected 6, got ${imAfter}`);
   console.log();
+
+  dumpDb(dbPath, join(dataDir, "v9-s2", "db-dump.json"));
+  console.log();
 }
 
 // ─── Scenario 3 — Adding a third system ──────────────────────────────────────
@@ -265,7 +303,7 @@ async function scenario3(): Promise<void> {
   console.log("  Collecting C (collectOnly: true) …");
   await engineABC.ingest("contacts-channel", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
   console.log(`  Status after collecting C: ${engineABC.channelStatus("contacts-channel")}`);
-  check(engineABC.channelStatus("contacts-channel") === "partially-onboarded", "channel is 'partially-onboarded'", "expected 'partially-onboarded'");
+  check(engineABC.channelStatus("contacts-channel") === "ready", "channel stays 'ready' (A+B cross-linked; C not yet committed)", "expected 'ready'");
   console.log();
 
   console.log("  Dry-run addConnector …");
@@ -305,6 +343,9 @@ async function scenario3(): Promise<void> {
   ]);
   const writes = [...r1.records, ...r2.records, ...r3.records].filter((r) => r.action !== "skip").length;
   check(writes === 0, "0 writes across all 3 connectors", `expected 0, got ${writes}`);
+  console.log();
+
+  dumpDb(dbPath, join(dataDir, "v9-s3", "db-dump.json"));
   console.log();
 }
 
@@ -354,6 +395,9 @@ async function scenario4(): Promise<void> {
   console.log(`  system-a: ${aLen2} records  system-b: ${bLen2} records`);
   check(aLen2 === 3, "system-a: exactly 3 records", `expected 3, got ${aLen2}`);
   check(bLen2 === 3, "system-b: exactly 3 records", `expected 3, got ${bLen2}`);
+  console.log();
+
+  dumpDb(dbPath2, join(dataDir, "v9-s4b", "db-dump.json"));
   console.log();
 }
 
