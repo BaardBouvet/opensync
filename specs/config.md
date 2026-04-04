@@ -8,7 +8,7 @@ explicit `--root <dir>` flag.
 
 ```
 my-sync-project/
-├── openlink.json        # connector registry
+├── opensync.json        # connector registry
 ├── mappings/
 │   ├── channels.yaml    # explicit channel definitions
 │   ├── customers.yaml   # field mappings for the "customers" channel
@@ -18,7 +18,7 @@ my-sync-project/
 
 ### Convention rules
 
-- `openlink.json` must be present at the root.
+- `opensync.json` must be present at the root.
 - `mappings/` must be present and contain at least one `channels.yaml` (or any file with a
   top-level `channels` key).
 - Mapping files can be split however the user likes — by entity, by channel, or all in one file.
@@ -28,7 +28,7 @@ my-sync-project/
 
 ---
 
-## `openlink.json` — Connector Registry
+## `opensync.json` — Connector Registry
 
 Lists every connector instance available to this project. The key is the **connector ID**
 referenced throughout the mappings.
@@ -205,7 +205,7 @@ opensync run --root /path/to/my-sync-project
 ```
 
 The `--root` flag is the only override. There are no separate `--config` or `--mappings` flags —
-`openlink.json` and `mappings/` are always co-located by convention.
+`opensync.json` and `mappings/` are always co-located by convention.
 
 ---
 
@@ -213,7 +213,7 @@ The `--root` flag is the only override. There are no separate `--config` or `--m
 
 All config is validated at load time before any sync runs:
 
-- `openlink.json` must have a `connectors` object (not an array).
+- `opensync.json` must have a `connectors` object (not an array).
 - Each `mappings/*.yaml` must have a `mappings` array or a `channels` array (or both); unknown
   top-level keys are ignored.
 - A mapping referencing an unknown connector ID or channel ID is a hard error.
@@ -225,9 +225,9 @@ Invalid config fails fast with a clear message before touching any external syst
 
 ## Design Rationale: Why Three-Section Config
 
-The `openlink.json` + `mappings/` structure separates three orthogonal concerns:
+The `opensync.json` + `mappings/` structure separates three orthogonal concerns:
 
-1. **Connector instances** (`openlink.json`) — which systems exist and how to connect (credentials, base URL, plugin name). One entry per instance. Edited when adding or removing a system.
+1. **Connector instances** (`opensync.json`) — which systems exist and how to connect (credentials, base URL, plugin name). One entry per instance. Edited when adding or removing a system.
 
 2. **Channels** (`mappings/channels.yaml`) — what syncs (groups of members, identity fields, future conflict rules). Edited when adding a new sync ring or changing channel metadata.
 
@@ -237,5 +237,5 @@ The `openlink.json` + `mappings/` structure separates three orthogonal concerns:
 
 **File splitting is opt-in.** The engine merges all `mappings/*.yaml` files alphabetically. A single file is fine for small projects; larger teams can split by entity, by team, or by connector without any schema changes. Each file must have at least one of a top-level `channels` or `mappings` key.
 
-**One document in version control.** The config describes wiring, not runtime state. Everything in `openlink.json` and `mappings/` should be committed and code-reviewed. Generated runtime state goes in `data/` which is gitignored.
+**One document in version control.** The config describes wiring, not runtime state. Everything in `opensync.json` and `mappings/` should be committed and code-reviewed. Generated runtime state goes in `data/` which is gitignored.
 

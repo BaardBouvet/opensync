@@ -1,6 +1,373 @@
 # Sync Engine
 
-The core pipeline that processes data changes and propagates them across systems.
+The core pipeline that reads records from a source connector, diffs them against shadow state,
+resolves conflicts, and fans out accepted changes to all other members of the same channel.
+
+Proven across POC v0–v9. The schema, algorithms, and API signatures in this document are
+implementation-ready.
+
+---
+
+## Setup
+
+The engine is constructed with an `EngineConfig`:
+
+```typescript
+interface EngineConfig {
+  connectors: ConnectorInstance[];     // resolved connector instances
+  channels:   ChannelConfig[];         // channel topology + field mappings
+  eventBus?:  EventBus;                // in-process event emission (optional)
+  conflict?:  ConflictConfig;          // global conflict resolution rules
+  circuitBreaker?: CircuitBreaker;     // override default breaker settings
+  readTimeoutMs?:  number;             // max ms for a read() call, default 30 000
+}
+
+interface ChannelConfig {
+  id:              string;
+  members:         ChannelMember[];
+  identityFields?: string[];           // canonical field names used for record matching
+}
+
+interface ChannelMember {
+  connectorId: string;
+  entity:      string;                 // entity name as declared in the connector
+  inbound?:    FieldMappingList;       // source → canonical renames
+  outbound?:   FieldMappingList;       // canonical → target renames
+}
+
+interface FieldMapping {
+  source?:    string;                  // omit to use target name as source name
+  target:     string;                  // canonical field name
+  direction?: "bidirectional" | "forward_only" | "reverse_only";
+}
+```
+
+Every `ConnectorInstance` is created by `makeConnectorInstance()`, which wires up `ctx.http`,
+`ctx.state`, OAuth management, and the webhook base URL for that connector.
+
+---
+
+## Ingest Loop
+
+`engine.ingest(channelId, connectorId, opts?)` is the primary entry point. It reads all
+changed records from one source connector, diffs each record against shadow state, and fans
+the accepted changes out to all other channel members.
+
+```
+ingest(channelId, connectorId, opts)
+  1. Resolve channel + source ChannelMember
+  2. Get watermark for (connectorId, entity) — undefined = full sync
+  3. Call connector.read(ctx, since) — streams ReadBatch[]
+     ├─ If opts.collectOnly: write shadow + provisional canonical; no fan-out → STOP
+     └─ Otherwise continue to step 4
+  4. For each record:
+     a. Strip _-prefixed meta fields; apply inbound field mapping
+     b. Resolve canonical ID (via identity_map; identityFields matching if configured)
+     c. Diff incoming canonical against source shadow_state
+     d. If no changes: skip (echo prevention)
+     e. Apply conflict resolution against each target's shadow
+     f. Fan-out to cross-linked targets only (skip provisionally-only connectors)
+        For each target:
+          i.  Apply outbound field mapping
+          ii. Look up target's external ID via identity_map (insert if absent)
+          iii.Optionally pre-fetch live record for ETag (connector.lookup())
+          iv. Call target.insert() or target.update()
+          v.  On success: write target shadow_state
+     g. Atomic commit: write source shadow_state + all target shadow_states +
+        identity links + transaction_log entries
+  5. Advance watermark for (connectorId, entity) — same transaction as final shadow write
+  6. Log sync_run summary row
+```
+
+### Watermark atomicity
+
+The watermark advance and shadow writes are committed in the **same SQLite transaction**
+for each batch. A crash cannot produce a watermark ahead of its written shadow state.
+On restart, the engine re-reads from the last committed watermark; shadow comparison
+suppresses any records already dispatched.
+
+### Fan-out guard
+
+A target connector only receives fan-out if it has at least one **cross-linked** canonical_id
+— i.e. a canonical_id shared by more than one connector in `identity_map`. Connectors that
+have been collected but not yet linked via `onboard()` / `addConnector()` have only provisional
+self-only rows and are silently skipped. This prevents inserting records into a connector that
+hasn't completed onboarding and would create duplicates.
+
+### `collectOnly` mode
+
+`ingest(channelId, connectorId, { collectOnly: true })` reads and writes shadow_state but
+performs **zero fan-out**. Every record gets a provisional self-only `identity_map` row. These
+provisionals are later merged into the shared canonical layer by `onboard()` or `addConnector()`.
+`collectOnly` never throws — it is safe to call at any time.
+
+---
+
+## Field Mapping
+
+Field mappings translate between each connector's native field names and the channel's canonical
+field names. The canonical form exists only in memory during a sync pass — it is never stored.
+
+### Inbound (source → canonical)
+
+Applied when reading from a source connector before diffing. Fields listed in `inbound` are
+renamed; unlisted fields pass through unchanged if no `fields` whitelist is declared, or are
+dropped if a whitelist is declared (see config.md).
+
+### Outbound (canonical → target)
+
+Applied before writing to each target connector. Fields listed in `outbound` are renamed back.
+
+### Direction
+
+| `direction`    | Inbound | Outbound |
+|----------------|---------|----------|
+| `bidirectional` (default) | ✓ | ✓ |
+| `reverse_only` | ✓ | ✗ |
+| `forward_only` | ✗ | ✓ |
+
+---
+
+## Shadow State
+
+The engine's memory. One row per `(connector_id, entity_name, external_id)`. Tracks each field
+individually with provenance.
+
+```typescript
+type FieldData = Record<string, FieldEntry>;
+
+interface FieldEntry {
+  val:  unknown;   // current value
+  prev: unknown;   // previous value (preserved for rollback)
+  ts:   number;    // epoch ms when this value was last written
+  src:  string;    // connector_id that last wrote this field
+}
+```
+
+Shadow state serves three purposes:
+1. **Echo prevention** — if incoming canonical matches shadow, skip (no-op).
+2. **Diff engine** — determines exactly which fields changed and produces the update payload.
+3. **Conflict resolution** — each target's shadow is compared against the incoming canonical
+   to decide which values to accept.
+
+### Shadow row lifecycle
+
+| Event | Shadow action |
+|-------|---------------|
+| `collectOnly` ingest, new record | Insert row with provisional canonical_id |
+| Normal ingest, no change | Nothing (shadow matches incoming) |
+| Normal ingest, changed fields | Update row; write `prev` before overwriting `val` |
+| `onboard()` / `addConnector()` | Re-seed: update `canonical_id` to merged value |
+| Record deleted in source | Set `deleted_at` |
+
+---
+
+## Diff Engine
+
+A pure function. Compares incoming canonical fields against the existing source shadow.
+
+```
+diff(incoming, shadow):
+  if shadow is null → action = "insert" for the target (no prior state)
+  for each field in incoming:
+    if shadow[field] is undefined OR incoming[field] !== shadow[field].val → changed
+  if no fields changed → action = "skip"
+  otherwise → action = "update"
+```
+
+Fields absent from `incoming` but present in `shadow` are **not** treated as deletions.
+Sparse updates are valid — the connector only returns what changed.
+
+---
+
+## Conflict Resolution
+
+Conflict resolution runs per-target before dispatch. It compares the incoming canonical
+values against the target connector's current shadow to decide which values to actually write.
+
+### Global strategies
+
+**`lww` (last-write-wins)** — the default. If `incoming.ts >= shadow[field].ts`, accept the
+incoming value. Otherwise drop it (the target already has something newer).
+
+**`field_master`** — a named connector always wins for declared fields. Other connectors'
+updates to mastered fields are dropped. Unmastered fields fall back to LWW.
+
+### Per-field strategies
+
+Declared in `ConflictConfig.fieldStrategies` to override the global strategy for specific fields:
+
+- **`coalesce`** — lower `connectorPriority` number wins; `last_modified` is tiebreaker for equal priority
+- **`last_modified`** — equivalent to LWW
+- **`collect`** — accumulates values from all connectors into an array
+
+### Configuration
+
+```typescript
+interface ConflictConfig {
+  strategy:           "lww" | "field_master";
+  fieldMasters?:      Record<string, string>;    // field → connectorId
+  connectorPriorities?: Record<string, number>;  // connectorId → priority (lower = wins)
+  fieldStrategies?:   Record<string, FieldStrategy>;
+}
+```
+
+---
+
+## Dispatch
+
+For each accepted change, the engine dispatches to each eligible target:
+
+1. Resolve the target's external ID via `identity_map`. No ID → this is a new record.
+2. For connectors that declare `lookup()`: pre-fetch the live record to get its ETag/version
+   and (optionally) its full snapshot for full-replace PUT connectors.
+3. Call `targetEntity.insert(record)` or `targetEntity.update(record)`.
+4. On success: write the target's new `shadow_state` row and any new `identity_map` link.
+5. Emit `record.created` or `record.updated` event on the `EventBus`.
+6. Append a `transaction_log` entry (for rollback).
+
+All of steps 4–6 happen inside the per-record atomic commit transaction.
+
+### Deferred records
+
+If a record has an `Association` whose `targetId` is not yet in `identity_map`, the record
+is deferred (`action = "defer"`). It will be re-processed on the next ingest cycle after
+the referenced entity has been synced. See Association Propagation below.
+
+---
+
+## Association Propagation
+
+Associations (`Association[]` on a `ReadRecord`) represent foreign-key style links. The engine
+remaps `targetId` through `identity_map` before writing to targets.
+
+**Rule 1: `associations: undefined`** — sparse update; leave associations untouched at target.
+
+**Rule 2: `associations: []`** — explicit empty; propagate removal to target.
+
+**Rule 3: Null or falsy `targetId`** — explicit disassociation, not a missing dependency.
+Propagate the removal rather than deferring.
+
+**Rule 4: Unknown `targetEntity`** — configuration error, never self-resolves.
+Action = `"error"`, not `"defer"`.
+
+**Rule 5: Duplicate predicates** — deduplicated (last-wins) before remapping.
+
+---
+
+## Echo Prevention
+
+The shadow diff is itself the primary echo prevention mechanism. When the engine writes a
+record to target B, it seeds B's shadow state with the canonical values it just wrote. When B
+is later ingested as a source, the incoming canonical for that record matches B's shadow exactly
+→ diff produces zero changes → action = `"skip"`. No additional echo set is needed.
+
+---
+
+## Circuit Breaker
+
+In-memory, per-engine instance. Tracks a ring buffer of recent batch outcomes.
+
+```
+State machine:
+  CLOSED → OPEN:      error rate > threshold after minSamples batches
+  OPEN → HALF_OPEN:   resetAfterMs elapsed
+  HALF_OPEN → CLOSED: next batch succeeds
+  HALF_OPEN → OPEN:   next batch fails
+```
+
+When OPEN, `ingest()` aborts before any connector I/O. When HALF_OPEN, one test batch is
+allowed through. Default thresholds: 50% error rate, 3 samples, 10 s reset.
+
+---
+
+## Webhook Processing
+
+`engine.processWebhookQueue()` drains the `webhook_queue` table. For each pending entry:
+
+1. Mark as `processing`.
+2. Call `connector.handleWebhook(payload, ctx)` → `WebhookBatch`.
+3. Run the returned records through the same `_processRecords` pipeline as a normal ingest.
+4. Mark as `completed` or `failed`.
+
+The webhook HTTP server (`POST /webhooks/:connectorId`) writes raw bodies to `webhook_queue`
+and responds 200 immediately. Processing is decoupled so slow connectors don't block receipt.
+
+---
+
+## Context & Auth
+
+Each connector receives a `ConnectorContext` (ctx) with:
+
+- **`ctx.http`**: tracked fetch — auto-logs to `request_journal`, auto-injects auth headers,
+  handles OAuth2 token refresh (mutex to prevent concurrent refreshes).
+- **`ctx.state`**: per-connector persistent KV store backed by `connector_state` table.
+- **`ctx.webhookUrl`**: base URL for inbound webhooks.
+- **`ctx.logger`**: structured logger.
+- **`ctx.config`**: static config from `opensync.json`.
+
+### Auth priority order
+
+1. `connector.prepareRequest` defined → call it, skip 2–4.
+2. `auth.type === "oauth2"` → inject Bearer token (acquire / refresh via `OAuthTokenManager`).
+3. `auth.type === "api-key"` → inject static key as Bearer (or custom header).
+4. `auth.type === "none"` → no auth header.
+
+---
+
+## Transaction Log
+
+Every successful write to a target connector appends a row to `transaction_log`:
+
+```
+(id, batch_id, connector_id, entity_name, external_id, canonical_id,
+ action, data_before, data_after, synced_at)
+```
+
+`data_before` is the target's previous `shadow_state.canonical_data`; `data_after` is the new
+value. Both are stored as JSON. This is the basis for rollback — see `rollback.md`.
+
+---
+
+## Public API
+
+```typescript
+class SyncEngine {
+  // Primary operations
+  ingest(channelId, connectorId, opts?): Promise<IngestResult>
+  processWebhookQueue(channelId, connectorId): Promise<number>   // returns processed count
+
+  // Onboarding (see discovery.md)
+  discover(channelId): Promise<DiscoveryReport>
+  onboard(channelId, report, opts?): Promise<OnboardResult>
+  addConnector(channelId, connectorId, opts?): Promise<AddConnectorReport>
+
+  // Observability
+  onboardedConnectors(channelId): string[]   // connectors with cross-linked canonicals
+
+  // Lifecycle
+  start(): void                              // starts webhook server if configured
+  stop(): void
+}
+```
+
+`ingest()` result:
+
+```typescript
+interface IngestResult {
+  channelId:   string;
+  connectorId: string;
+  records: Array<{
+    entity:            string;
+    action:            "insert" | "update" | "skip" | "defer" | "error";
+    sourceId:          string;
+    targetConnectorId: string;
+    targetId:          string;
+    error?:            string;
+  }>;
+}
+```
+
 
 ## Pipeline Steps
 
