@@ -80,6 +80,20 @@ bun test packages/sdk/
 - No `bun:*` imports in engine or SDK source (adapter pattern abstracts the SQLite driver)
 - Use global `fetch()` — available in both Bun and Node 18+
 - Connectors never import from each other
+- **Never hardcode a list of things that can be discovered at runtime.** Use the filesystem
+  (`readdirSync`), registry, config, or other authoritative source instead. This applies to
+  example names, connector lists, entity lists, migration files, and anything else that changes
+  without touching the code that uses it.
+- **Keep READMEs concise.** Cover purpose, quick-start, and the non-obvious. Omit long
+  prose, exhaustive option tables, and anything self-evident from the code or other docs.
+  A good README fits on one screen.
+- **No database migration infrastructure before the first public release.** The schema is
+  append-only pre-release: modify `packages/engine/src/db/migrations.ts` directly
+  (`CREATE TABLE IF NOT EXISTS`). See `plans/engine/PLAN_DB_MIGRATIONS.md` for the post-release plan.
+- **No backward compatibility before the first public release.** Interfaces, config shapes,
+  and internal contracts can be changed freely. Do not add fallback paths or shims to
+  preserve compatibility with pre-release callers — remove the old shape and fix all call
+  sites.
 
 ---
 
@@ -110,6 +124,9 @@ the spec section first, then the code.
 | All others | `specs/<name>.md` | See `specs/README.md` |
 
 `plans/<topic>/` holds only GAP and REPORT documents — never a parallel design authority.
+All plan files must live inside a subfolder (`plans/engine/`, `plans/connectors/`, `plans/poc/`,
+`plans/meta/`, etc.). No `.md` files go in the root of `plans/` itself (only `INDEX.md` and
+`README.md` are allowed there).
 
 ### Spec numbering
 
@@ -131,10 +148,11 @@ preserve existing numbering and append new numbered items at the end of a sectio
 
 ```
 packages/sdk/       — connector SDK types and helpers (no bun:* imports)
+packages/engine/    — sync engine
 connectors/         — individual connector implementations
   <name>/src/index.ts   — the connector (read + write functions only)
   <name>/src/index.test.ts
-poc/                — completed POC experiments (do not copy into packages/)
+demo/               — interactive demo runner and examples
 specs/              — canonical specifications (the authority)
 plans/              — gap analyses, research, historical rationale
   poc/              — pre-POC design intent documents
@@ -152,7 +170,7 @@ CHANGELOG.md        — all notable changes
 
 - [ ] Spec reference comment on non-trivial logic (`// Spec: specs/...`)
 - [ ] TypeScript strict — no `any`, no `// @ts-ignore`
-- [ ] No `bun:*` imports outside of `poc/`
+- [ ] No `bun:*` imports in engine or SDK source
 - [ ] No direct connector-to-connector writes
 - [ ] Test covers both success and failure paths
 - [ ] `CHANGELOG.md` updated for any feature or fix

@@ -15,7 +15,65 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
-- `packages/engine/` (`@opensync/engine`): initial production engine package implementing `SyncEngine` class with:
+- `specs/demo.md`: spec for the demo/ directory — example folder convention, `-d` flag,
+  seed/ format, field-mapping showcase plan, runner architecture, path resolution.
+
+### Changed
+
+- `demo/run.ts`: rewritten as generic runner using `-d <example-dir>` flag; available
+  examples discovered via `readdirSync` — no hardcoded list.
+- `ConnectorInstance.auth`: auth credentials separated from `config` throughout the engine
+  (`loader.ts`, `context.ts`, `http.ts`). Credentials in `opensync.json` go under an `auth:`
+  key; connectors never receive them directly.
+
+### Removed
+
+- `poc/` directory (v0–v9): all lessons captured in specs, plans, and engine tests.
+  272 → 77 tests (POC tests removed; engine parity confirmed by T1–T25).
+
+
+  both directions; edit JSON files under `demo/data/` to see live sync. Uses the packaged
+  `@opensync/engine` and `@opensync/connector-jsonfiles` (not the POC engine).
+- `plans/meta/PLAN_DEV_PACKAGES.md`: plan to consolidate dev-only packages
+  (connector-jsonfiles, connector-mock-crm, connector-mock-erp, server-mock-crm,
+  server-mock-erp) under a `dev/` top-level directory, separate from distributable
+  connectors.
+
+- `specs/associations.md`: new spec extracted from `connector-sdk.md` — Association type,
+  composite-key resolution, pending-edge handling, JSON-LD pattern, storage as `__assoc__`
+  shadow-state field, and design rationale
+- `specs/data-access.md`: early draft spec for shadow state as a queryable unified data layer
+- `specs/agent-assistance.md`: early draft spec for agent-assisted connector generation and
+  field mapping
+- `plans/PLAN_DB_MIGRATIONS.md`: plan for post-release migration system using SQLite
+  `PRAGMA user_version`; rule: no migration infrastructure before first public release
+- `plans/PLAN_REMOVE_POC.md`: gate criteria and procedure for removing `poc/` once the engine
+  and connectors provide equivalent coverage
+- `plans/connectors/GAP_CONNECTOR_SDK_SPEC.md`: gap report for `connector-sdk.md` vs.
+  `packages/sdk/src/types.ts`
+- `plans/engine/GAP_ENGINE_DECISIONS.md`: gap report for M2 engine decisions not yet in specs
+- `AGENTS.md` rule: no database migration infrastructure before the first public release
+
+### Changed
+
+- `specs/connector-sdk.md`: removed HubSpot example code block (use `connectors/` for
+  reference implementations); removed "Design Alternative: Engine-Driven Entity Dispatch"
+  section; replaced in-line Associations section with a summary linking to
+  `specs/associations.md`; fixed `ReadRecord` and `UpdateRecord` to include `version` and
+  `snapshot` fields matching `packages/sdk/src/types.ts`; fixed `ctx.state` backing table
+  name (`connector_state`, not `instance_meta`)
+- `specs/database.md`: removed obsolete pre-POC schema section (old `entities`,
+  `entity_links`, `connector_instances`, `sync_channels`, `sync_jobs`, `instance_meta`,
+  `stream_state`, and related Drizzle ORM content); corrected `channel_onboarding_status`
+  table definition; added `circuit_breaker_events` table
+- `specs/overview.md`: removed Drizzle ORM and pino from tech stack table; updated SQLite
+  adapter description to match actual custom `Db` interface; updated monorepo structure to
+  include `servers/` and `poc/`; updated Key Concepts to use current table names
+- `specs/README.md`: updated link from `sdk-helpers.md` to `connector-helpers.md`; added
+  `associations.md` entry; added `connector-helpers.md` entry
+- `specs/sdk-helpers.md` → `specs/connector-helpers.md`: renamed for logical grouping
+
+
   - `ingest(channelId, connectorId, opts?)` — full poll cycle with collectOnly fast path, timeout, and fan-out
   - `discover(channelId, snapshotAt?)` — pure DB-backed match report from shadow_state
   - `onboard(channelId, report, opts?)` — merge canonicals, propagate unique-per-side records, advance watermarks
