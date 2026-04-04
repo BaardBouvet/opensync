@@ -25,6 +25,16 @@ class OAuthTokenManager {
 
 **Token storage**: `oauth_tokens` table with `access_token`, `refresh_token`, `expires_at`, `locked_at`.
 
+> **Why a dedicated table, not `connector_state`?** The `locked_at` column implements a
+> SQLite-serialised mutex for concurrent-safe token refresh (see Lock mechanism below). This
+> pattern requires an atomic `UPDATE … WHERE locked_at IS NULL` which would be awkward in a
+> generic KV store like `connector_state`. The dedicated table also keeps token expiry
+> queries simple.
+>
+> **Connectors cannot access `oauth_tokens`**: this table is engine-internal. Connector code
+> never receives raw tokens — it calls `ctx.http()` and auth injection happens automatically.
+> Connectors that need session state (non-OAuth bespoke auth) use `ctx.state` for that data.
+
 **Refresh flow**:
 1. `getAccessToken()` checks if token is expired (or within 5-minute buffer)
 2. If expired: acquire lock (`locked_at` column), call token endpoint, store new tokens, release lock
@@ -37,7 +47,9 @@ class OAuthTokenManager {
 
 ### 2. API Key / Bearer Token (Static)
 
-Simple: token stored in `connector_instances.config` (encrypted), injected into `ctx.http` as a header.
+Simple: token stored in the `auth:` key of `opensync.json` (see §Credentials in opensync.json),
+injected into `ctx.http` as a header. The engine reads `apiKey`, `api_key`, or `accessToken`
+from the resolved auth credentials.
 
 ### 3. Bespoke Auth (prepareRequest Hook)
 
@@ -88,6 +100,49 @@ When `ctx.http` makes a request:
    - `api-key` → inject the stored key as `Authorization: Bearer <key>` (or `auth.header` if specified)
    - `basic` → inject `Authorization: Basic <base64(user:pass)>`
    - `none` → no auth header injected
+
+## Credentials in opensync.json
+
+Auth credentials are declared in `opensync.json` under a top-level `auth` key per connector,
+**separate** from the connector's `config`. This separation is intentional: a connector may
+have its own `config` key named `apiKey` (e.g. a connector that exposes a key as part of its
+domain model, unrelated to auth). Merging credentials into `config` would cause silent
+collisions. The engine auth layer reads exclusively from `auth`; `config` is passed untouched
+to `ctx.config` inside the connector.
+
+```json
+{
+  "connectors": {
+    "crm": {
+      "plugin": "./connectors/my-crm/src/index.ts",
+      "auth": {
+        "apiKey": "${CRM_API_KEY}"
+      },
+      "config": {
+        "baseUrl": "https://api.example.com"
+      }
+    },
+    "erp": {
+      "plugin": "./connectors/my-erp/src/index.ts",
+      "auth": {
+        "clientId": "${ERP_CLIENT_ID}",
+        "clientSecret": "${ERP_CLIENT_SECRET}"
+      },
+      "config": {
+        "baseUrl": "https://erp.example.com"
+      }
+    }
+  }
+}
+```
+
+The `${VAR}` interpolation is applied to all string values in `auth` before they reach the
+engine. The `auth` values are resolved at load time and held in `ConnectorInstance.auth`
+through to `makeWiredInstance` — the connector never sees credentials directly.
+
+Recognised auth credential keys:
+- `apiKey` (also `api_key`, `accessToken`) — API key / bearer token (static)
+- `clientId` (also `client_id`) + `clientSecret` (also `client_secret`) — OAuth2 client credentials
 
 ## Environment-Specific Auth
 

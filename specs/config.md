@@ -68,6 +68,44 @@ Connector-specific config object — passed verbatim to the connector's `Connect
 The shape is defined by each connector. Environment variable interpolation (`${VAR}`) is resolved
 at load time for **string** values.
 
+### `auth`
+
+Auth credentials — kept separate from `config` so connector-specific config keys never collide
+with credential names. Auth credentials are resolved, env-var-interpolated, and passed to the
+engine auth layer; connectors never receive them directly (they call `ctx.http()` instead).
+
+```json
+{
+  "connectors": {
+    "crm": {
+      "plugin": "@opensync/connector-hubspot",
+      "auth": {
+        "apiKey": "${HUBSPOT_ACCESS_TOKEN}"
+      },
+      "config": {
+        "baseUrl": "https://api.hubspot.com"
+      }
+    },
+    "erp": {
+      "plugin": "@opensync/connector-netsuite",
+      "auth": {
+        "clientId": "${NETSUITE_CLIENT_ID}",
+        "clientSecret": "${NETSUITE_CLIENT_SECRET}"
+      },
+      "config": {
+        "accountId": "${NETSUITE_ACCOUNT_ID}"
+      }
+    }
+  }
+}
+```
+
+Recognised credential keys (see `specs/auth.md §Credentials in opensync.json`):
+- `apiKey` (also `api_key`, `accessToken`) — static API key / bearer token
+- `clientId` (also `client_id`) + `clientSecret` (also `client_secret`) — OAuth2 client credentials
+
+`${VAR}` interpolation applies to all string values in `auth` the same way as `config`.
+
 Nested objects are also valid config values. This is intentional but not user-friendly — reserved
 for cases where a whole JSON document must be supplied, such as a GCP service account key file or
 an Azure service principal:

@@ -12,7 +12,8 @@ with a POC lesson, the POC wins and the spec should be updated.
 - [connector-sdk.md](connector-sdk.md) — Connector interfaces, capabilities, lifecycle, ConnectorContext
 - [connector-isolation.md](connector-isolation.md) — Statelessness contract, allowedHosts, bundling, execution isolation
 - [connector-distribution.md](connector-distribution.md) — Packaging, publishing, npm/git/local distribution, engine resolution, security
-- [sdk-helpers.md](sdk-helpers.md) — Optional SDK helper APIs for common REST connector patterns (pagination, mapping, state, batching)
+- [connector-helpers.md](connector-helpers.md) — Optional SDK helper APIs for common REST connector patterns (pagination, mapping, state, batching)
+- [associations.md](associations.md) — Cross-connector references: Association type, composite-key resolution, JSON-LD pattern, pending-edge handling
 - [sync-engine.md](sync-engine.md) — Pipeline, shadow state, field tracking, diffing, conflict resolution, dispatch, echo prevention, circuit breaker, webhooks
 - [identity.md](identity.md) — Hub-and-spoke identity map, canonical UUIDs, associations, flat vs relational
 - [safety.md](safety.md) — Circuit breakers, echo prevention, idempotency, soft deletes, retry, external change detection
@@ -29,7 +30,8 @@ with a POC lesson, the POC wins and the spec should be updated.
 - [agent-assistance.md](agent-assistance.md) — Agent-generated connectors and mappings
 
 ## Infrastructure
-- [database.md](database.md) — SQLite schema (10 tables), FieldData structure, key queries, no Drizzle
+- [database.md](database.md) — SQLite schema, FieldData structure, key queries
 - [config.md](config.md) — `opensync.json` connector registry, `mappings/` YAML format, channel definitions
 - [cli.md](cli.md) — Commands, scaffolding, packaging, npm distribution, connector resolution
+- [demo.md](demo.md) — Interactive demo runner: example folder convention, seed/, field-mapping showcase, path resolution
 

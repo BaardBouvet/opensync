@@ -22,25 +22,22 @@ An open-source, developer-friendly, hub-and-spoke bi-directional SaaS sync engin
 | Language | TypeScript (strict) | Type safety for connector SDK, agent-friendly |
 | Runtime | Bun (Node.js compatible) | Instant TS execution, fast installs, fast tests |
 | Database | SQLite via adapter (see below) | Single file, zero setup, WAL mode for concurrent reads |
-| ORM | Drizzle ORM | Type-safe queries, works with both SQLite drivers |
-| Validation | Zod | Runtime validation of connector outputs and config |
 | Testing | bun:test | Fast, built-in, no extra deps |
 | Monorepo | npm workspaces | Simple, supported by both Bun and Node |
-| Logging | pino (structured JSON) | Production-grade, low overhead |
 
 ### SQLite Driver Strategy
 
-The engine never imports a SQLite driver directly. It uses a thin adapter interface so the same
-engine code runs in two deployment modes:
+The engine never imports a SQLite driver directly. A thin `Db` interface abstracts the
+driver so the same engine code runs in two deployment modes:
 
 | Mode | Driver | How |
 |------|--------|-----|
 | npm package / Node.js | `better-sqlite3` | Standard native binding, works on Node 18+ and Bun |
 | Compiled binary (`bun build --compile`) | `bun:sqlite` | Built into the Bun runtime — zero native files on disk |
 
-At startup, `openDb(path)` detects the environment and returns a Drizzle instance backed by
-whichever driver is available. All engine code types against Drizzle's `BaseSQLiteDatabase` — the
-driver is never visible beyond that one boot function. See `database.md` for the full interface.
+At startup, `openDb(path)` detects the environment and returns a `Db` instance with a
+single `exec(sql)` method. All engine code types against this interface — the driver is
+never visible beyond that one boot function. See `database.md` for the full schema.
 
 ### Runtime: Bun-First, Node-Compatible
 
@@ -68,12 +65,18 @@ without modification, *except* the compiled binary target which is Bun-only by d
 ├── packages/
 │   ├── sdk/              # @opensync/sdk — connector interfaces + types
 │   └── engine/           # @opensync/engine — core logic, DB, pipeline, CLI
-├── connectors/
-│   ├── mock-crm/         # Relational: contacts + companies (in-memory)
-│   └── mock-erp/         # Flat: customers (in-memory)
-├── config/               # Example YAML configs
-├── tests/integration/    # End-to-end tests
-└── specs/                # This directory
+├── connectors/           # reference connector implementations
+│   ├── mock-crm/         # Relational: contacts (API-key auth, webhooks)
+│   ├── mock-erp/         # Flat: employees (OAuth2, session, HMAC, ETags)
+│   ├── jsonfiles/        # Hello World: JSON array file connector
+│   └── ...               # postgres, kafka, hubspot, etc.
+├── servers/              # Mock HTTP servers used by connector tests
+│   ├── mock-crm/
+│   └── mock-erp/
+├── poc/                  # Completed POC experiments (do not copy into packages/)
+├── plans/                # Gap analyses and design docs
+├── specs/                # This directory — canonical specifications
+└── docs/                 # User-facing documentation
 ```
 
 ## Data Flow
@@ -115,9 +118,10 @@ JSONB blobs in SQLite storing field-level metadata per record per system:
 ```
 
 ### Identity Map (Hub-and-Spoke)
-A global `entities` table with UUIDs. Each entity links to external IDs via `entity_links`:
+A global `identity_map` table maps every external ID to a shared `canonical_id` UUID.
+Two connectors "know about" the same real-world entity when they share the same `canonical_id`:
 ```
-Entity UUID-123:
+canonical_id = UUID-123:
   - hubspot: hs_contact_99
   - salesforce: sf_contact_55
   - fiken: fiken_customer_44
@@ -126,13 +130,19 @@ Entity UUID-123:
 One change in any system propagates to all others through the hub — not point-to-point. This avoids the N^2 problem and circular loops.
 
 ### Sync Channels
-A channel defines which connector instances sync a given entity type. Members have role configs including field-level master rules.
+A channel defines which connector instances sync a given entity type. See `specs/sync-engine.md`
+for the full pipeline and `specs/config.md` for channel definition syntax.
 
 ### Circuit Breakers
-Three states: OPERATIONAL → DEGRADED → TRIPPED. Triggered by volume spikes, loop detection (field oscillation), or high error rates. Part of core engine, not optional.
+Three states: OPERATIONAL → DEGRADED → TRIPPED. Triggered by volume spikes, loop detection
+(field oscillation), or high error rates. Part of core engine, not optional. See `specs/safety.md`.
 
 ### Connector Capabilities
-Connectors declare what they can do: `canDelete`, `canUpdate`, `immutableFields`. The engine uses these for pre-flight warnings and capability-aware rollback.
+Connectors declare capabilities by implementing (or omitting) `read`, `insert`, `update`, and
+`delete` on their entities. The engine checks at channel setup which operations are available
+and shows pre-flight warnings. Capability-aware rollback uses the same information.
 
 ### External Change Detection
-When the engine polls a system and sees changes that don't match its own outbound log or shadow state, it flags them as external changes. This detects "shadow IT" — other integrations or manual edits modifying data outside the engine's control.
+When the engine polls a system and sees changes that don't match its own outbound log or shadow
+state, it flags them as external changes. This detects "shadow IT" — other integrations or
+manual edits modifying data outside the engine's control.

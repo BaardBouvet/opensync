@@ -85,188 +85,12 @@ The engine resolves `dependsOn` into a topological order before running a sync c
 
 Circular dependencies are detected at config validation time and rejected.
 
-### Example: HubSpot Connector Entities
+### Example Connectors
 
-```typescript
-getEntities(): EntityDefinition[] {
-  return [
-    {
-      name: 'company',
-      schema: { name: { description: 'Company name' }, domain: { description: 'Company website domain' }, industry: { description: 'Industry category' } },
-      scopes: { read: ['crm.objects.companies.read'], write: ['crm.objects.companies.write'] },
-      async *read(ctx, since) {
-        for await (const page of paginate('/crm/v3/objects/companies', { after: since })) {
-          yield {
-            records: page.results.map(c => ({ id: c.id, data: c.properties })),
-            since: page.paging?.next?.after,
-          };
-        }
-      },
-      async lookup(ids, ctx) {
-        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/read', {
-          method: 'POST',
-          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
-        });
-        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
-        const result = await res.json();
-        return result.results.map(c => ({ id: c.id, data: c.properties }));
-      },
-      async *insert(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/create', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      },
-      async *update(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/update', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Batch update failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      },
-      async *delete(ids, ctx) {
-        for await (const batch of chunk(ids, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/companies/batch/archive', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
-          });
-          if (!res.ok) throw new Error(`Batch delete failed: ${res.status}`);
-          yield* batch.map(id => ({ id }));
-        }
-      }
-    },
-    {
-      name: 'contact',
-      schema: { firstname: { description: 'First name' }, lastname: { description: 'Last name' }, email: { description: 'Email address' } },
-      scopes: { read: ['crm.objects.contacts.read'], write: ['crm.objects.contacts.write'] },
-      dependsOn: ['company'],
-      async *read(ctx, since) {
-        for await (const page of paginate('/crm/v3/objects/contacts', { after: since })) {
-          yield {
-            records: page.results.map(c => ({ id: c.id, data: c.properties })),
-            since: page.paging?.next?.after,
-          };
-        }
-      },
-      async lookup(ids, ctx) {
-        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/read', {
-          method: 'POST',
-          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
-        });
-        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
-        const result = await res.json();
-        return result.results.map(c => ({ id: c.id, data: c.properties }));
-      },
-      async *insert(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/create', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      },
-      async *update(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/update', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Update failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      },
-      async *delete(ids, ctx) {
-        for await (const batch of chunk(ids, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/contacts/batch/archive', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(id => ({ id })) })
-          });
-          if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-          yield* batch.map(id => ({ id }));
-        }
-      }
-    },
-    {
-      name: 'deal',
-      schema: { dealId: { description: 'Deal ID', immutable: true }, dealname: { description: 'Deal name' }, amount: { description: 'Deal value in NOK', type: 'number' }, dealstage: { description: 'Current pipeline stage' } },
-      scopes: { read: ['crm.objects.deals.read'], write: ['crm.objects.deals.write'] },
-      dependsOn: ['contact', 'company'],
-      async *read(ctx, since) {
-        for await (const page of paginate('/crm/v3/objects/deals', { after: since })) {
-          yield {
-            records: page.results.map(d => ({ id: d.id, data: d.properties })),
-            since: page.paging?.next?.after,
-          };
-        }
-      },
-      async lookup(ids, ctx) {
-        const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/read', {
-          method: 'POST',
-          body: JSON.stringify({ inputs: ids.map(id => ({ id })) })
-        });
-        if (!res.ok) throw new Error(`Batch read failed: ${res.status}`);
-        const result = await res.json();
-        return result.results.map(d => ({ id: d.id, data: d.properties }));
-      },
-      async *insert(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/create', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Batch create failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      },
-      async *update(records, ctx) {
-        for await (const batch of chunk(records, 100)) {
-          const res = await ctx.http('https://api.hubspot.com/crm/v3/objects/deals/batch/update', {
-            method: 'POST',
-            body: JSON.stringify({ inputs: batch.map(r => ({ id: r.id, properties: r.data })) })
-          });
-          if (!res.ok) throw new Error(`Update failed: ${res.status}`);
-          const result = await res.json();
-          yield* result.results.map(item => ({ id: item.id, data: item.properties }));
-        }
-      }
-      // no delete() — deals cannot be archived via the HubSpot API
-    }
-  ];
-}
-```
-
-### Design Alternative: Engine-Driven Entity Dispatch
-
-> **Note**: This is the alternative design we considered. Documented here for future reference.
->
-> Instead of `getEntities()`, the connector would declare entities in metadata and the engine would call `fetch/upsert/delete` by `entity` on top-level methods:
->
-> ```typescript
-> interface OpenSyncConnector {
->   metadata: { entities: string[]; /* ... */ };
->   fetch(entity: string, ctx: SyncContext, since?: Date): AsyncIterable<FetchRecord[]>;
->   upsert(entity: string, record: FetchRecord, ctx: SyncContext): Promise<PushResult>;
->   delete?(entity: string, id: string, ctx: SyncContext): Promise<void>;
-> }
-> ```
->
-> Simpler interface, less boilerplate for basic connectors. But the engine has to guess dependencies and poll intervals, and connector behavior for each entity gets split between metadata and top-level dispatch logic.
->
-> Could be revisited if `getEntities()` proves too verbose for simple connectors.
+Real connector implementations are in `connectors/`. See `connectors/mock-crm` for a
+relational example (API-key auth, watermark reads, webhook registration) and
+`connectors/mock-erp` for a multi-auth example (OAuth2, session tokens, HMAC signing, ETag
+conditional writes).
 
 ## Metadata
 
@@ -439,6 +263,7 @@ Records returned by `read()` and `lookup()`. Also the record type inside `ReadBa
 interface ReadRecord {
   id: string;                                // this record's ID in the source system (uniqueness scope defined below)
   data: Record<string, unknown | unknown[]>; // raw JSON blob — values may be single or multi-valued
+  version?: string;                          // opaque concurrency token (e.g. ETag) — passed back in UpdateRecord.version
   deleted?: boolean;                         // connector's intent to remove this record from the target (see ReadRecord — Deletion below)
   associations?: Association[];              // pre-extracted reference fields (see Associations)
 }
@@ -475,19 +300,19 @@ The engine always resolves records as `(entity, id)` — the entity name is the 
 
 ### Associations
 
-Associations are an explicit index of which fields in `data` are references, and to what. For a HubSpot contact with `data: { companyId: 'hs_456', name: 'Alice' }`, the association is just that field made explicit:
+Associations are an explicit index of which fields in `data` are references to other records.
+The full design — rationale, storage layout, JSON-LD example, edge metadata — is in
+[`specs/associations.md`](associations.md).
+
+Short form: a contact with `data.companyId = 'hs_456'` declares the reference explicitly:
 
 ```typescript
 associations: [{ predicate: 'companyId', targetEntity: 'company', targetId: 'hs_456' }]
 ```
 
-`predicate` is typically the field key in `data` whose value is the reference. `targetId` is that value. `targetEntity` tells the engine which entity to look in — together they form the same `(entity, id)` composite key used everywhere else.
-
-The engine resolves associations using `(targetEntity, targetId)` and does not silently pick a candidate if the target is not found — the edge is left pending until the target record arrives.
-
-For JSON-LD connectors, `predicate` may be a URI (e.g. `https://schema.org/worksFor`), and associations are typically derived by extracting `@id` references from `data`. The two representations are two views of the same thing — `associations` is the pre-extracted, engine-readable form.
-
-For flat systems where contact and company live in one object — the connector just returns one record with all fields. No splitting required. The engine handles many-to-many mapping.
+`(targetEntity, targetId)` is the same composite key the identity map uses everywhere. The
+engine resolves the edge using the identity map. Pending associations (target not yet seen)
+are stored and resolved once the target record arrives.
 
 ## Write Records
 
@@ -502,6 +327,8 @@ interface InsertRecord {
 interface UpdateRecord {
   id: string;                                  // ID previously returned by InsertResult.id
   data: Record<string, unknown | unknown[]>;
+  version?: string;                            // last-seen version token from ReadRecord.version — used for conditional writes (e.g. If-Match ETag)
+  snapshot?: Record<string, unknown>;          // full field snapshot at the time the delta was computed — used for conflict detection without a lookup() round trip
   associations?: Association[];
 }
 
@@ -580,7 +407,7 @@ Inspect `new URL(req.url).pathname` or `.searchParams` inside `handleWebhook` to
 
 ### ctx.state — Persistent Key-Value Store
 
-For storing per-instance data like session tokens, pagination cursors, or webhook registration IDs. Backed by the `instance_meta` table in SQLite.
+For storing per-instance data like session tokens, pagination cursors, or webhook registration IDs. Backed by the `connector_state` table in SQLite.
 
 ```typescript
 interface StateStore {
