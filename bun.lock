@@ -49,6 +49,19 @@
       "dependencies": {
         "@opensync/sdk": "workspace:*",
       },
+      "devDependencies": {
+        "@opensync/server-mock-crm": "workspace:*",
+      },
+    },
+    "connectors/mock-erp": {
+      "name": "@opensync/connector-mock-erp",
+      "version": "0.0.1",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@opensync/server-mock-erp": "workspace:*",
+      },
     },
     "connectors/postgres": {
       "name": "@opensync/connector-postgres",
@@ -98,6 +111,14 @@
         "@types/node": "^25.5.0",
       },
     },
+    "servers/mock-crm": {
+      "name": "@opensync/server-mock-crm",
+      "version": "0.1.0",
+    },
+    "servers/mock-erp": {
+      "name": "@opensync/server-mock-erp",
+      "version": "0.1.0",
+    },
   },
   "packages": {
     "@opensync/connector-hubspot": ["@opensync/connector-hubspot@workspace:connectors/hubspot"],
@@ -108,6 +129,8 @@
 
     "@opensync/connector-mock-crm": ["@opensync/connector-mock-crm@workspace:connectors/mock-crm"],
 
+    "@opensync/connector-mock-erp": ["@opensync/connector-mock-erp@workspace:connectors/mock-erp"],
+
     "@opensync/connector-postgres": ["@opensync/connector-postgres@workspace:connectors/postgres"],
 
     "@opensync/connector-sparql": ["@opensync/connector-sparql@workspace:connectors/sparql"],
@@ -117,6 +140,10 @@
     "@opensync/connector-waveapps": ["@opensync/connector-waveapps@workspace:connectors/waveapps"],
 
     "@opensync/sdk": ["@opensync/sdk@workspace:packages/sdk"],
+
+    "@opensync/server-mock-crm": ["@opensync/server-mock-crm@workspace:servers/mock-crm"],
+
+    "@opensync/server-mock-erp": ["@opensync/server-mock-erp@workspace:servers/mock-erp"],
 
     "@types/js-yaml": ["@types/js-yaml@4.0.9", "", {}, "sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg=="],
 

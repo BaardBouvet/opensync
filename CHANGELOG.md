@@ -15,7 +15,11 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
-- `plans/connectors/PLAN_MOCK_SERVERS.md`: plan for extracting `MockCrmServer` and `MockErpServer` from the POC directories into standalone `servers/mock-crm/` and `servers/mock-erp/` packages, with connector test files and process entrypoints
+- `servers/mock-crm/` (`@opensync/server-mock-crm`): standalone `MockCrmServer` package extracted from `poc/v5`; supports env-var config (`MOCK_CRM_PORT`, `MOCK_CRM_API_KEY`), `/__reset` test-helper endpoint, and a `src/main.ts` process entrypoint
+- `servers/mock-erp/` (`@opensync/server-mock-erp`): standalone `MockErpServer` package extracted from `poc/v6`; supports env-var config (`MOCK_ERP_PORT`, `MOCK_ERP_CLIENT_ID`, `MOCK_ERP_CLIENT_SECRET`, `MOCK_ERP_HMAC_SECRET`), `/__reset` test-helper endpoint, and a `src/main.ts` process entrypoint
+- `connectors/mock-crm/src/index.test.ts`: connector tests covering `read()`, `insert()`, `update()`, `onEnable()`/`onDisable()`, automatic webhook delivery on create/update, and `handleWebhook()` in both thick and thin modes
+- `connectors/mock-erp/src/index.test.ts`: connector tests covering `read()`, `lookup()` (ETag as version), `insert()`, and `update()` with If-Match matching and stale-ETag error path
+- `specs/connector-sdk.md`: added `The connectors/ folder` section documenting the three purposes of the folder (reference implementations, design validation, agent-writeable baseline); added `Mock servers (servers/)` section documenting design principles, mock CRM and ERP server contracts, and the automatic webhook delivery behaviour
 - `ROADMAP.md` Milestone 1: added two new items tracking the mock server extraction and connector test coverage for mock-crm and mock-erp
 - `AGENTS.md`: added doc-writing rules (informative not promotional; connectors expose raw records; only network-accessible databases are valid connector targets)
 - `plans/engine/PLAN_PRODUCTION_ENGINE_M2.md`: implementation plan for Milestone 2 — minimal production engine; covers config loading, SQLite schema, core ingest pipeline, circuit breaker with persistence, discovery/onboarding, and closes POC gaps 1, 2, 6, and 8

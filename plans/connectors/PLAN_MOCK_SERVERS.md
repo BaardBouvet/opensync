@@ -1,6 +1,6 @@
 # PLAN — Mock System Servers
 
-> Status: backlog
+> Status: done
 > Relevant milestone: Milestone 1 (connector tests), Milestone 2 (integration tests)
 
 ---

@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "connectors/*"
+    "connectors/*",
+    "servers/*"
   ],
   "scripts": {
     "build": "tsc --build",

@@ -1,0 +1,9 @@
+{
+  "name": "@opensync/server-mock-erp",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/server.ts",
+  "scripts": {
+    "start": "bun run src/main.ts"
+  }
+}

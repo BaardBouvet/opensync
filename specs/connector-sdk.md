@@ -874,34 +874,124 @@ The engine uses error type to decide the response:
 
 
 
+## The `connectors/` folder
+
+`connectors/` is the canonical home for connectors that ship with this repository. It has three
+purposes:
+
+1. **Reference implementations** — each connector shows exactly how a real-world integration
+   maps onto the SDK contract. Agents, contributors, and reviewers read these to understand what
+   correct connector code looks like: how `ctx.http` is used, how auth is threaded through, how
+   watermarks are returned, how errors are expressed.
+
+2. **Design validation** — if the SDK contract makes a connector awkward to write, the
+   connector code is the evidence. Every time the SDK changes, the connectors are the first place
+   to look for breakage. They serve as integration-level type-checking for the API surface.
+
+3. **Agent-writeable baseline** — the connectors serve as ground truth for evaluating whether
+   an agent can generate a correct connector from the spec alone. A new connector written by a
+   code-generation agent should be indistinguishable from a human-authored one in this folder.
+
+Connectors in this folder are **not** a registry or marketplace. They are development artefacts
+maintained alongside the SDK and engine. Production users publish their own connectors as separate
+npm packages; the engine resolves them at runtime from `opensync.json`.
+
+---
+
+## Mock servers (`servers/`)
+
+`servers/mock-crm` and `servers/mock-erp` are standalone HTTP services used exclusively by
+connector tests and integration tests. They live in `servers/` (not `connectors/`) because
+they are infrastructure, not SDK implementations.
+
+### Why they exist
+
+Connector tests need a real HTTP peer. Mocking `ctx.http` in-process hides entire categories
+of bugs: URL construction, header injection, auth negotiation, error-status handling, ETag
+round-trips. The mock servers provide a genuine HTTP server that the connector drives over the
+loopback interface, so the connector's network path is exercised exactly as it will be in
+production.
+
+### Design principles
+
+- **Real HTTP, not mocked fetch** — Bun.serve runs on an ephemeral port; every test makes
+  genuine TCP connections. No `fetch` patching.
+- **In-memory state** — all state lives in `Map`s. There is no database, no disk I/O, no
+  teardown complexity. A `POST /__reset` call clears everything between tests.
+- **Automatic event delivery** — the mock CRM server fires webhooks to all registered
+  subscribers on every `POST /contacts` (created) and `PUT /contacts/:id` (updated). This
+  exercises the full webhook pipeline — registration, delivery, connector `handleWebhook()` —
+  without orchestration in the test itself.
+- **Test-helper endpoints** — `/__reset`, `/__trigger`, `/__expire-token`,
+  `/__invalidate-session`, `/__mutate-employee/:id` exist only for test setup and teardown.
+  They bypass auth and are never available in "production" mode; there is no production mode
+  because these servers are test-only.
+- **Env-var config** — ports and credentials are configurable via environment variables
+  (`MOCK_CRM_PORT`, `MOCK_CRM_API_KEY`, `MOCK_ERP_PORT`, etc.) so the servers can be started
+  as long-running processes during integration test runs without hard-coded port conflicts.
+
+### Mock CRM (`@opensync/server-mock-crm`)
+
+Models a simple CRM with a `contacts` entity. Auth is a static Bearer API key. Supports webhook
+subscriptions: subscribers receive a full `{ event, id, name, email, updatedAt, ... }` payload
+on every create and update.
+
+Entity: `contacts` — `id`, `name`, `email`, `updatedAt`
+
+Connector (`connectors/mock-crm`): covers API-key auth, watermark reads, insert/update, webhook
+registration (`onEnable`/`onDisable`), and both thick and thin webhook modes.
+
+### Mock ERP (`@opensync/server-mock-erp`)
+
+Models a personnel/HR system with an `employees` entity. Implements three auth patterns in one
+server to exercise all `prepareRequest` variants without needing three separate servers:
+
+| Auth pattern | Endpoints | Connector variant |
+|---|---|---|
+| OAuth2 client_credentials | `/employees`, `/employees/:id`, `POST /employees`, `PUT /employees/:id` | default export |
+| Session token | `/session/login`, `/employees/legacy` | `sessionConnector` |
+| HMAC-SHA256 signing | `/signed/employees` | `hmacConnector` |
+
+The ERP server also implements ETag-based optimistic locking: `GET /employees/:id` returns an
+`ETag` header; `PUT /employees/:id` validates `If-Match` and returns `412 Precondition Failed`
+when the record has changed since the client last read it.
+
+Entity: `employees` — `id`, `name`, `email`, `department`, `updatedAt`
+
+Connector (`connectors/mock-erp`): covers OAuth2 token lifecycle, `prepareRequest` session and
+HMAC patterns, `lookup()` with ETag threading, and conditional writes with `If-Match`.
+
+---
+
 ## Example Connectors
 
 Three connectors ship with the project for development and testing:
 
 ### mock-crm (relational)
-- Entities: `contact` (firstName, lastName, email, phone, companyId), `company` (name, domain, industry)
-- In-memory Map storage with `updatedAt` tracking
-- Implements: `insert`, `update`, `delete`
+- Entity: `contacts` (`id`, `name`, `email`, `updatedAt`)
+- In-memory HTTP server (`@opensync/server-mock-crm`) on an ephemeral port
+- Auth: Bearer API key injected by `ctx.http`
+- Implements: `read` (with `since` watermark), `insert`, `update`, `onEnable`/`onDisable` (webhook subscription), `handleWebhook` (thick and thin modes)
 
-### mock-erp (flat)
-- Entity: `customer` (fullName, emailAddress, phoneNumber, organizationName)
-- Deliberately different field names to exercise transforms
-- Implements: `insert` only (append-only log)
+### mock-erp (multi-auth)
+- Entity: `employees` (`id`, `name`, `email`, `department`, `updatedAt`)
+- In-memory HTTP server (`@opensync/server-mock-erp`) on an ephemeral port
+- Three connector variants in the same file (default OAuth2, `sessionConnector`, `hmacConnector`)
+- Implements: `read` (with `since` watermark), `lookup` (ETag as `version`), `insert`, `update` (with `If-Match`), `prepareRequest` (session token and HMAC signing)
 
 ### jsonfiles (hello world)
-The simplest possible connector — reads and writes a JSON array file. Intended as the starting point for anyone learning the SDK.
+The simplest possible connector — reads and writes a JSON array file. Intended as the
+starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
-- Storage: a `.json` file on disk (path from `ctx.config.filePath`)
+- Storage: a `.json` file on disk (path from `ctx.config.filePaths`)
 - `read()` reads the file, returns all objects (or filters by a `updatedAt` field if `since` is provided)
 - `insert()` appends, `update()` replaces by ID, `delete()` removes by ID — all write back to the file
-- Implements: `insert`, `update`, `delete`
+- Does not use `ctx.http` — demonstrates that connectors are not limited to REST APIs
 
 Example data file:
 ```json
 [
-  { "id": "1", "name": "Ola Nordmann", "email": "ola@test.no", "updatedAt": "2026-04-01T10:00:00Z" },
-  { "id": "2", "name": "Kari Hansen", "email": "kari@test.no", "updatedAt": "2026-04-01T11:00:00Z" }
+  { "_id": "1", "name": "Ola Nordmann", "email": "ola@test.no", "_updatedAt": "2026-04-01T10:00:00Z" },
+  { "_id": "2", "name": "Kari Hansen", "email": "kari@test.no", "_updatedAt": "2026-04-01T11:00:00Z" }
 ]
 ```
-
-This connector doesn't use `ctx.http` (no HTTP calls), demonstrating that connectors aren't limited to REST APIs.

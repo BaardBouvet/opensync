@@ -6,5 +6,8 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@opensync/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@opensync/server-mock-crm": "workspace:*"
   }
 }

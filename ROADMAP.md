@@ -43,8 +43,8 @@ Spec: [specs/connector-sdk.md](specs/connector-sdk.md) - [specs/sdk-helpers.md](
 | ConnectorContext (http, state, logger, auth) | [specs/connector-sdk.md](specs/connector-sdk.md) | done |
 | Auth patterns (API key, OAuth2, prepareRequest) | [specs/auth.md](specs/auth.md) | done |
 | Webhook hooks (handleWebhook, onEnable, onDisable) | [specs/connector-sdk.md](specs/connector-sdk.md) | done |
-| Mock CRM server — standalone servers/mock-crm/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | not started |
-| Mock ERP server — standalone servers/mock-erp/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | not started |
+| Mock CRM server — standalone servers/mock-crm/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
+| Mock ERP server — standalone servers/mock-erp/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
 | SDK helpers (pagination, mapping, batching, state) | [plans/connectors/PLAN_SDK_HELPERS.md](plans/connectors/PLAN_SDK_HELPERS.md) | deferred to M3 |
 | Connector cleanup - migrate all connectors to SDK helpers | [plans/connectors/PLAN_CONNECTOR_CLEANUP.md](plans/connectors/PLAN_CONNECTOR_CLEANUP.md) | deferred to M3 |
 | Connector isolation contract | [specs/connector-isolation.md](specs/connector-isolation.md) | not started |
