@@ -344,7 +344,8 @@ async *insert(records: AsyncIterable<InsertRecord>, ctx: ConnectorContext) {
 
 ## Database Connectors
 
-Your connector doesn't have to use HTTP. It can talk to databases directly:
+Connectors that talk to a database over the network (e.g. PostgreSQL) work the same way
+as HTTP connectors. Use a driver that speaks the database's wire protocol:
 
 ```typescript
 import { Pool } from 'pg';
@@ -385,4 +386,6 @@ export default {
 } satisfies Connector;
 ```
 
-Same pattern works for any database driver — SQLite, MySQL, Redis, etc.
+**Note:** Connectors must connect over the network. Embedded databases like SQLite run
+inside the engine process and are not accessible from a connector. Use network-accessible
+databases (PostgreSQL, MySQL, Redis, etc.).

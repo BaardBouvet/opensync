@@ -2,16 +2,14 @@
 
 ## Why Build Here?
 
-You could write a one-off integration script. But OpenSync is different:
+A connector is a thin adapter: read records from a system, write records to a system. The engine handles everything else.
 
-- **You write once, sync to everything.** Your connector works with Salesforce, NetSuite, HubSpot, any system on the network. No point-to-point integrations.
-- **The engine handles the hard part.** Diffing, conflict resolution, undo, audit logs, retry logic — you don't touch any of it. You just map data.
-- **Webhooks for free.** Users can configure instant sync instead of polling. You just declare your webhook signature.
-- **Circuit breakers and safety.** Your API goes down? The engine gracefully pauses, doesn't spam retries, notifies the user. No manual babysitting.
-- **Field-level granularity.** Different systems can be masters for different fields. Sync email from your CRM but phone from your ERP? Handled.
-- **Full undo.** Any sync can be rolled back. Field, batch, or entire sync cycle. Users get their data back if something goes wrong.
-
-**Real impact**: If you build a Salesforce connector, someone can immediately use it to sync with their custom ERP, their accounting software, *and* their warehouse system — all at the same time, without you writing any bridge code.
+- **One connector, any system.** Once built, your connector works with any other connector on the network. No point-to-point integration code.
+- **Engine handles the hard part.** Diffing, conflict resolution, undo, audit logs, retry logic, field mapping — none of that is in the connector.
+- **Webhooks.** Declare `handleWebhook()` and the engine routes inbound events automatically.
+- **Circuit breakers and safety.** If your API goes down the engine pauses gracefully, backs off, and notifies the user.
+- **Field-level master assignment.** Different systems can own different fields. The engine resolves conflicts at the field level, not the record level.
+- **Full undo.** Any sync can be rolled back — a single field, a batch, or an entire sync cycle.
 
 ## The 15-Minute Version
 
@@ -147,7 +145,7 @@ Compare that to:
 - Custom sync scripts? Years of maintenance.
 - Point-to-point bridges? Exponential complexity.
 
-With OpenSync, you offload the infrastructure. You focus on mapping your API's schema. The engine handles the hard distributed systems problems.
+With OpenSync, you offload the infrastructure. You expose your API's schema. The engine handles field mapping, conflict resolution, and all distributed systems concerns.
 
 ## Next Steps
 
@@ -157,4 +155,4 @@ With OpenSync, you offload the infrastructure. You focus on mapping your API's s
 
 ---
 
-**Ready?** Start with a new npm project and `npm install @opensync/sdk`. You've got this. 🚀
+Start with a new npm project and `npm install @opensync/sdk`.
