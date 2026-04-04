@@ -11,7 +11,7 @@ import { SyncEngine, makeConnectorInstance } from "./engine.js";
 import mockCrm from "../../connectors/mock-crm/src/index.js";
 import mockErp from "../../connectors/mock-erp/src/index.js";
 import { join, dirname } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +40,10 @@ async function main() {
   // ── Open DB ─────────────────────────────────────────────────────────────────
 
   const dbPath = join(dataDir, "opensync.db");
+  // Always start fresh — mock servers generate new IDs and tokens each run
+  for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(f)) rmSync(f);
+  }
   const db = openDb(dbPath);
   console.log(`SQLite state: ${dbPath}`);
 
