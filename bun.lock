@@ -4,13 +4,6 @@
   "workspaces": {
     "": {
       "name": "opensync",
-      "dependencies": {
-        "js-yaml": "^4.1.1",
-        "zod": "^4.3.6",
-      },
-      "devDependencies": {
-        "@types/js-yaml": "^4.0.9",
-      },
     },
     "connectors/hubspot": {
       "name": "@opensync/connector-hubspot",
@@ -104,6 +97,13 @@
         "@types/node": "^25.5.0",
       },
     },
+    "demo": {
+      "name": "@opensync/demo",
+      "version": "0.0.1",
+      "dependencies": {
+        "@opensync/engine": "workspace:*",
+      },
+    },
     "packages/engine": {
       "name": "@opensync/engine",
       "version": "0.1.0",
@@ -114,6 +114,7 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
+        "@opensync/connector-jsonfiles": "workspace:*",
         "@opensync/connector-mock-crm": "workspace:*",
         "@opensync/connector-mock-erp": "workspace:*",
         "@opensync/server-mock-crm": "workspace:*",
@@ -158,6 +159,8 @@
     "@opensync/connector-tripletex": ["@opensync/connector-tripletex@workspace:connectors/tripletex"],
 
     "@opensync/connector-waveapps": ["@opensync/connector-waveapps@workspace:connectors/waveapps"],
+
+    "@opensync/demo": ["@opensync/demo@workspace:demo"],
 
     "@opensync/engine": ["@opensync/engine@workspace:packages/engine"],
 

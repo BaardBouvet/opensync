@@ -1,0 +1,16 @@
+{
+  "connectors": {
+    "system-a": {
+      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": ["demo/data/two-system/system-a/contacts.json"]
+      }
+    },
+    "system-b": {
+      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": ["demo/data/two-system/system-b/contacts.json"]
+      }
+    }
+  }
+}

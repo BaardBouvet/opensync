@@ -1,0 +1,22 @@
+{
+  "connectors": {
+    "system-a": {
+      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": ["demo/data/three-system/system-a/contacts.json"]
+      }
+    },
+    "system-b": {
+      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": ["demo/data/three-system/system-b/contacts.json"]
+      }
+    },
+    "system-c": {
+      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": ["demo/data/three-system/system-c/contacts.json"]
+      }
+    }
+  }
+}

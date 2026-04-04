@@ -1,0 +1,15 @@
+channels:
+  - id: contacts
+    identityFields:
+      - email
+
+mappings:
+  - connector: system-a
+    entity: contacts
+    channel: contacts
+  - connector: system-b
+    entity: contacts
+    channel: contacts
+  - connector: system-c
+    entity: contacts
+    channel: contacts

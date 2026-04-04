@@ -1,0 +1,12 @@
+channels:
+  - id: people
+    identityFields:
+      - email
+
+mappings:
+  - connector: crm
+    entity: contacts
+    channel: people
+  - connector: erp
+    entity: employees
+    channel: people
