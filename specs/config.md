@@ -66,7 +66,32 @@ a relative path to a local TypeScript file is also accepted:
 
 Connector-specific config object — passed verbatim to the connector's `ConnectorContext.config`.
 The shape is defined by each connector. Environment variable interpolation (`${VAR}`) is resolved
-at load time.
+at load time for **string** values.
+
+Nested objects are also valid config values. This is intentional but not user-friendly — reserved
+for cases where a whole JSON document must be supplied, such as a GCP service account key file or
+an Azure service principal:
+
+```json
+{
+  "connectors": {
+    "azure-storage": {
+      "plugin": "@opensync/connector-azure-storage",
+      "config": {
+        "containerName": "my-container",
+        "servicePrincipal": {
+          "clientId": "...",
+          "clientSecret": "...",
+          "tenantId": "..."
+        }
+      }
+    }
+  }
+}
+```
+
+Note: `${VAR}` interpolation is **not** applied inside nested objects. To source a credential from
+an environment variable use a top-level string field instead.
 
 ---
 
@@ -82,15 +107,22 @@ channels:
   - id: invoices
 ```
 
-Future metadata candidates per channel:
+Optional channel metadata:
 
 ```yaml
 channels:
   - id: contacts
+    # identityFields: canonical field names used to match records across connectors
+    # by shared field value (e.g. same email address = same real-world entity).
+    # See identity.md for full semantics and trade-offs.
+    identityFields:
+      - email
     conflict_resolution: lww        # last-write-wins (future)
     circuit_breaker:                # future
       volume_threshold: 100
 ```
+
+`identityFields` is the primary configuration point for field-value-based record matching. When set, the engine queries shadow state for existing records with matching canonical field values before allocating a new UUID for an incoming record. This prevents duplicates during initial onboarding and catches connectors that don't preserve each other's external IDs across restarts.
 
 ---
 
@@ -139,14 +171,17 @@ is a convenience for connectors that already speak the canonical field names.
 | `direction`       | Inbound (source → canonical) | Outbound (canonical → target) |
 |-------------------|------------------------------|-------------------------------|
 | `bidirectional`   | ✓ (default)                  | ✓                             |
-| `read_only`       | ✓                            | ✗                             |
-| `write_only`      | ✗                            | ✓                             |
+| `reverse_only`    | ✓                            | ✗                             |
+| `forward_only`    | ✗                            | ✓                             |
+
+- `reverse_only` — read from this connector but never write back to it (e.g. a read-only audit source)
+- `forward_only` — injected when writing to this connector but ignored when reading back (e.g. a constant or computed field the connector provides itself)
 
 ```yaml
 fields:
   - source: internalNotes
     target: notes
-    direction: read_only    # never write back to source
+    direction: reverse_only    # never write back to source
 ```
 
 ### Associations
@@ -185,4 +220,22 @@ All config is validated at load time before any sync runs:
 - Plugin load failures (missing package, no `metadata` export) are hard errors.
 
 Invalid config fails fast with a clear message before touching any external system.
+
+---
+
+## Design Rationale: Why Three-Section Config
+
+The `openlink.json` + `mappings/` structure separates three orthogonal concerns:
+
+1. **Connector instances** (`openlink.json`) — which systems exist and how to connect (credentials, base URL, plugin name). One entry per instance. Edited when adding or removing a system.
+
+2. **Channels** (`mappings/channels.yaml`) — what syncs (groups of members, identity fields, future conflict rules). Edited when adding a new sync ring or changing channel metadata.
+
+3. **Field mappings** (`mappings/*.yaml`) — how fields flow between each connector and each channel. One entry per connector×channel pair. Edited when a field is added, renamed, or a new connector joins an existing channel.
+
+**Why not a single flat file?** Channel-centric flat config (`ChannelMember` inline) means adding a connector requires editing every channel block — the diff is scattered. Connector-centric grouping means adding a channel requires editing every connector block — same problem inverted. A three-section file confines each operation to its own section: adding a connector adds entries to `connectors` and `mappings` only; adding a channel adds an entry to `channels` and `mappings` only. Code review diffs are cleanly scoped.
+
+**File splitting is opt-in.** The engine merges all `mappings/*.yaml` files alphabetically. A single file is fine for small projects; larger teams can split by entity, by team, or by connector without any schema changes. Each file must have at least one of a top-level `channels` or `mappings` key.
+
+**One document in version control.** The config describes wiring, not runtime state. Everything in `openlink.json` and `mappings/` should be committed and code-reviewed. Generated runtime state goes in `data/` which is gitignored.
 

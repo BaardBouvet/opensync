@@ -37,24 +37,50 @@ interface ActionConnector {
   getActions(ctx: SyncContext): ActionDefinition[];
 }
 
+/** A single action payload decorated with an engine-assigned idempotency key. */
+interface ActionPayload {
+  /** Deterministic key stable across retries: sha256(triggerRuleId + eventId + payloadIndex).
+   *  Forward to the target API as a per-message dedup key where supported. */
+  idempotencyKey: string;
+  data: Record<string, unknown>;
+}
+
 interface ActionDefinition {
   name: string;                               // e.g. 'send-email', 'post-message'
   description?: string;
-  payloadSchema?: Record<string, ConfigField>; // optional input schema for validation/UI prompts
-  execute(payload: Record<string, unknown>, ctx: SyncContext): Promise<ActionResult>;
+  schema?: Record<string, FieldDescriptor>;   // optional input schema for validation/UI prompts
+  scopes?: string[];                          // OAuth scopes required
+
+  /** Execute one or more action payloads.
+   *
+   *  Receives an AsyncIterable<ActionPayload> and yields one ActionResult per input in the
+   *  same positional order. Mirrors the insert/update/delete write-method contract exactly.
+   *
+   *  Serial connectors iterate and call their API once per item.
+   *  Bulk connectors use chunk() to accumulate and call a batch endpoint.
+   *  Throw to abort the entire run; yield ActionResult with error set for per-item failures. */
+  execute(
+    payloads: AsyncIterable<ActionPayload>,
+    ctx: ConnectorContext,
+  ): AsyncIterable<ActionResult>;
 }
 
 interface ActionResult {
-  status: 'success' | 'failed';
+  /** Raw response from the external system, if any. */
   data?: Record<string, unknown>;
+  /** Present means this action invocation failed. Absent means success.
+   *  Yield with error set for per-item failures; throw only to abort the entire run. */
+  error?: string;
 }
 ```
+
+There is no `id` field on `ActionResult` — actions do not produce a record that the engine needs to track in the identity map.
 
 This allows one connector to implement multiple actions (e.g. Slack: `post-message`, `open-dm`, `create-channel`) instead of creating a separate connector for each operation.
 
 Examples: email sender, SMS gateway, Slack poster, invoice generator.
 
-Action connectors get the same `SyncContext` as regular connectors — `ctx.http` for auto-logged HTTP calls, `ctx.state` for persistent state, `ctx.config` for credentials.
+Action connectors get the same `ConnectorContext` as regular connectors — `ctx.http` for auto-logged HTTP calls, `ctx.state` for persistent state, `ctx.config` for credentials.
 
 ## Trigger Rules
 
@@ -122,18 +148,23 @@ class TriggerEngine {
 
 Listens on the event bus. When an event matches a rule's event type + entity type + condition, it:
 1. Resolves the payload template (replace `{{field}}` with actual values)
-2. Generates an idempotency key (prevents double-sends on retry)
+2. Generates an idempotency key (prevents double-sends on retry): `sha256(triggerRuleId + entityId + eventTimestamp)`
 3. Resolves `actionName` to an `ActionDefinition` from `actionConnector.getActions(ctx)`
-4. Validates payload against the selected action's `payloadSchema` if provided
-5. Calls the selected action's `execute(payload, ctx)` method
+4. Validates payload against the selected action's `schema` if provided
+5. Accumulates all pending payloads for the same `(actionConnector, actionName)` pair in this cycle into a single `AsyncIterable<ActionPayload>` and passes it to `execute()`
+6. Consumes results as they are yielded — no buffering of the full output
+7. On per-item failure (`error` present), retries that item (same `idempotencyKey`) on the next cycle
+8. On connector throw, aborts the entire action run for that `(connector, action)` pair; all pending items retry next cycle
 
 ## Idempotency for Actions
 
-Actions use the same idempotency store as the sync pipeline. The dedup key is:
+Actions use the same idempotency store as the sync pipeline. The dedup key is built into each `ActionPayload.idempotencyKey`:
 
 ```
-sha256(triggerRuleId + entityId + eventTimestamp)
+sha256(triggerRuleId + eventId + payloadIndex)
 ```
+
+This key is stable across retries — if the engine crashes between generating the payload and receiving the result, the same key will be generated on retry. Connectors should forward it to the target API as a per-message dedup token where supported (e.g. `customArgs` in a SendGrid personalization, `StatusCallback` tag in Twilio). For APIs with no native dedup mechanism, the connector can check `ctx.state` keyed by `idempotencyKey` before sending.
 
 If a webhook is delivered twice, or a sync job retries, the action only fires once.
 

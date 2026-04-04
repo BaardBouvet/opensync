@@ -260,3 +260,120 @@ CREATE TABLE webhook_queue (
   for now, make it configurable as part of the real engine.
 - **In-process vs separate process for webhook server**: Same process for the POC (simplest).
   Production: same process is fine unless horizontal scaling is needed.
+
+---
+
+## Addendum: `trigger` column on `request_journal`
+
+**Resolved during implementation.**
+
+### Problem
+
+After the first run, the `request_journal` table contained rows with `batch_id = null` for
+lifecycle calls (`onEnable`, `onDisable`). There was no way to tell why an HTTP call was made
+without reading the URL — a `POST /webhooks/subscribe` looked identical to a `POST /contacts`
+if you squinted.
+
+### Decision: add a `trigger` column
+
+```sql
+ALTER TABLE request_journal ADD COLUMN trigger TEXT;
+-- values: 'poll' | 'webhook' | 'on_enable' | 'on_disable'
+```
+
+A nullable `TEXT` discriminator. Exactly one of `batch_id` or `trigger` tends to be the
+primary correlation handle for any given row:
+
+| Context                | `trigger`    | `batch_id`       |
+|------------------------|-------------|------------------|
+| `ingest()` poll cycle  | `poll`      | set (links to tx_log writes) |
+| `processWebhookQueue()`| `webhook`   | set (one per webhook row)    |
+| `onEnable()`           | `on_enable` | null             |
+| `onDisable()`          | `on_disable`| null             |
+
+This is a purely additive, non-breaking schema change. All existing rows receive `NULL`,
+which is correct — they pre-date the column.
+
+### Implementation
+
+`makeTrackedFetch()` accepts a `triggerRef: { current: JournalTrigger | undefined }` alongside
+the existing `batchIdRef`. `ConnectorInstance` carries both refs. The engine sets them before
+each operation and (for lifecycle calls) clears them in a `finally` block:
+
+```typescript
+// ingest()
+source.batchIdRef.current = opts.batchId;
+source.triggerRef.current = "poll";
+
+// onEnable()
+instance.triggerRef.current = "on_enable";
+try { await instance.connector.onEnable(instance.ctx); }
+finally { instance.triggerRef.current = undefined; }
+
+// processWebhookQueue()
+instance.batchIdRef.current = batchId;       // one UUID per webhook row
+instance.triggerRef.current = "webhook";
+```
+
+### Why not reuse `batch_id` for lifecycle events?
+
+`batch_id` is semantically tied to a set of writes that atomically advanced the state. A
+lifecycle event (`onEnable`) makes HTTP calls but produces no `transaction_log` rows — there is
+nothing to group. Overloading `batch_id` with a sentinel string like `"lifecycle:on_enable"`
+would break the FK intent of the column. A separate `trigger` column keeps the semantics clean.
+
+---
+
+## Addendum: `batch_id` on `webhook_queue`
+
+**Resolved during implementation.**
+
+### Problem
+
+After processing, a `webhook_queue` row had no `batch_id`. The `request_journal` rows produced
+by `handleWebhook` carried a `batch_id` (written at processing time), but there was no way to
+navigate *from* the queue row *to* those journal rows — or to the `sync_runs` and
+`transaction_log` rows that share the same UUID.
+
+### Decision: add `batch_id TEXT` to `webhook_queue`
+
+```sql
+ALTER TABLE webhook_queue ADD COLUMN batch_id TEXT;
+```
+
+The UUID is generated *before* `dbMarkWebhookProcessing()` and written to the queue row at the
+same moment it is propagated into `batchIdRef`. This gives a single join key across all four
+observability tables for any webhook-triggered operation:
+
+```sql
+-- "what did processing this webhook cause?"
+SELECT r.*
+FROM   webhook_queue w
+JOIN   request_journal r  ON r.batch_id = w.batch_id
+WHERE  w.id = '<webhook-uuid>';
+
+-- or via sync_runs / transaction_log
+SELECT t.*
+FROM   webhook_queue w
+JOIN   transaction_log t ON t.batch_id = w.batch_id
+WHERE  w.id = '<webhook-uuid>';
+```
+
+### Why not also add `webhook_id` to `sync_runs`?
+
+`sync_runs.batch_id` already equals `webhook_queue.batch_id` for webhook-triggered runs — the
+join is implicit. Adding a redundant `webhook_id` FK would duplicate information without adding
+expressive power.
+
+### Implementation
+
+`processWebhookQueue()` now generates `batchId` before marking the row as processing:
+
+```typescript
+const batchId = crypto.randomUUID();
+dbMarkWebhookProcessing(this.db, row.id, batchId);   // writes batch_id to queue row
+if (instance.batchIdRef) instance.batchIdRef.current = batchId;  // propagates to ctx.http
+```
+
+`dbMarkWebhookProcessing` signature changed to `(db, id, batchId)`.
+

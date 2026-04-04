@@ -1,4 +1,6 @@
-# Declarative Connectors (Future)
+# Declarative Connectors
+
+> **Status: aspirational** — not designed or implemented. Documents a possible future extension.
 
 For simple REST APIs, writing a full TypeScript connector may be overkill. A future extension could support YAML-only connector definitions.
 

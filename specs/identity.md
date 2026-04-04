@@ -57,7 +57,7 @@ class IdentityMap {
 
 ## Associations Between Objects
 
-When a connector reports associations (e.g. contact belongs_to company), the engine resolves them through the identity map.
+When a connector reports associations (e.g. contact belongs_to company), the engine resolves them through the identity map. See [sync-engine.md — Association Propagation Rules](sync-engine.md) for the four rules that govern how association changes are handled (empty-array removal, null targetId tombstones, unknown entity errors, and predicate deduplication).
 
 ### Deferred Associations
 
@@ -74,4 +74,26 @@ The connector never decides whether to split or combine — that's the engine's 
 
 ## First-Time Linking (Discovery)
 
-See `discovery.md` for how existing records across systems are matched and linked during onboarding.
+See [discovery.md](discovery.md) for how existing records across systems are matched and linked during onboarding.
+
+## Field-Value-Based Matching (`identityFields`)
+
+Beyond tracking IDs that the engine itself inserts, the engine can match records across connectors using shared field values — for example, recognising that a HubSpot contact and a Fiken customer with the same email address are the same real-world person.
+
+This is configured per channel with the `identityFields` list:
+
+```yaml
+channels:
+  - id: contacts
+    identityFields:
+      - email
+```
+
+When `identityFields` is set on a channel, the engine queries `shadow_state` for any existing row in another connector whose stored canonical values for those fields match the incoming record, before allocating a new canonical UUID. If a match is found, the incoming record is linked to the existing entity rather than creating a duplicate.
+
+`identityFields` is also the primary mechanism for linking records during initial onboarding (when running `opensync match` and `opensync link`). After onboarding, the engine relies on identity map lookups by external ID and only falls back to field matching if a record arrives that has never been seen before.
+
+**Trade-offs:**
+- Fields used for matching must be stable and trustworthy across systems. Email is a good candidate; names and phone numbers are not (formatting differences cause false misses).
+- Multi-field identity (`email` + `organizationId`) reduces false positives but means both fields must match — a contact that has one but not the other will not be linked.
+- Transitive closure (A matches B via email, B matches C via tax ID, therefore A=C) is not currently supported. Each incoming record is matched against existing shadow state directly.

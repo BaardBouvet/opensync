@@ -365,6 +365,23 @@ Fields marked `secret: true` are:
 - Never shown in `opensync status` or `opensync inspect` output
 - Stored encrypted in `connector_instances.config` (at-rest encryption)
 
+Object fields are declared with `type: 'object'`. The engine presents them as a multi-line JSON textarea in the CLI and passes the parsed value through to `ctx.config` as a plain object. Useful for structured credentials that arrive as a single JSON document (e.g. a GCP service account key file or an Azure service principal):
+```typescript
+configSchema: {
+  servicePrincipal: {
+    type: 'object',
+    description: 'Azure service principal JSON (paste the full document).',
+    required: true,
+    properties: {
+      clientId:     { type: 'string', description: 'Application (client) ID' },
+      clientSecret: { type: 'string', description: 'Client secret value' },
+      tenantId:     { type: 'string', description: 'Directory (tenant) ID' },
+    },
+  },
+}
+```
+The `properties` map is informational — it drives hints in CLI/agent output but is not enforced at runtime. Individual string values *inside* an object field do **not** receive `${VAR}` interpolation; use a dedicated string field for values you want to source from environment variables.
+
 #### Relationship to JSON Schema
 
 `ConfigField` borrows JSON Schema vocabulary (`type`, `description`, `default`, `enum`, `items`) but is **not a strict JSON Schema subset**. Two intentional deviations:
@@ -671,6 +688,34 @@ All three write methods are optional. The engine only calls a method if the enti
 - The engine dispatches inserts, updates, and deletes in separate calls — no branching needed inside the connector.
 - Idempotent: `not_found` on delete or update is a valid terminal state, not an error.
 
+### Patch semantics for `update()` — a load-bearing contract
+
+**`update()` must be a patch**, not a full replace. The engine sends only the fields that changed, not the record's complete current state. A connector that performs a full replace (e.g. HTTP PUT with only the incoming fields) will silently destroy fields owned by other connectors in the same channel.
+
+Correct implementation: merge incoming fields into the existing record and leave all other fields untouched. The jsonfiles and postgres connectors both do this — spread existing record first, incoming fields on top.
+
+**If the target API only supports full replacement (e.g. HTTP PUT)**, the connector must call `lookup()` to fetch the current record and merge locally before submitting the PUT. This is the connector's responsibility, not the engine's.
+
+```typescript
+// Correct: merge before writing
+async *update(records, ctx) {
+  for await (const record of records) {
+    const [current] = await this.lookup([record.id], ctx);  // fetch existing
+    const merged = { ...current?.data, ...record.data };    // patch merge
+    await api.put(`/contacts/${record.id}`, merged);
+    yield { id: record.id };
+  }
+}
+```
+
+This contract is not advisory — a connector that full-replaces will corrupt multi-field-owner scenarios in ways that are silent and difficult to diagnose.
+
+### Naming: `update` vs `patch`
+
+The method is named `update` in the current SDK. In retrospect, `patch` would be a more accurate name — it signals the merge semantics above without requiring a prose explanation. HTTP's `PATCH` verb carries exactly this meaning and is already familiar to connector authors who work with REST APIs.
+
+Renaming `update` → `patch` across the SDK would be a breaking change for all existing connectors, so it is deferred. Consider it for a future major version. If the rename does happen, the migration path is mechanical: rename the method, update the `UpdateRecord` / `UpdateResult` types accordingly, and provide a codemod.
+
 ## HTTP Customization
 
 Connectors can implement optional methods on `Connector` for custom HTTP behavior:
@@ -725,23 +770,34 @@ Connectors that don't need custom auth or webhooks simply omit these methods.
 Connectors that trigger side effects expose named actions via `getActions()`.
 
 ```typescript
+interface ActionPayload {
+  /** Engine-assigned deterministic key for this action invocation. Stable across retries.
+   *  Forward to the target API as a per-message dedup key where supported. */
+  idempotencyKey: string;
+  data: Record<string, unknown>;
+}
+
 interface ActionDefinition {
   name: string;                                        // e.g. 'send-email', 'post-message'
   description?: string;
   schema?: Record<string, FieldDescriptor>; // optional — required fields validated before execute() is called
   scopes?: string[];                                   // OAuth scopes required to execute this action
-  execute(payload: Record<string, unknown>, ctx: ConnectorContext): Promise<ActionResult>;
+
+  /** Streaming batch execute — mirrors insert/update/delete contract.
+   *  Yields one ActionResult per input payload in the same positional order.
+   *  Serial connectors iterate one-at-a-time; bulk connectors chunk and batch. */
+  execute(payloads: AsyncIterable<ActionPayload>, ctx: ConnectorContext): AsyncIterable<ActionResult>;
 }
 
 interface ActionResult {
-  status: 'success' | 'failed';
-  data?: Record<string, unknown>;              // response from the external system, if any
+  data?: Record<string, unknown>;  // response from the external system, if any
+  error?: string;                  // present = this item failed; absent = success
 }
 ```
 
 Actions get the same `ConnectorContext` as streams — `ctx.http`, `ctx.state`, `ctx.config`, and `ctx.logger` all work identically.
 
-`schema` uses the same `FieldDescriptor` type as entity fields. If provided, the engine validates that all `required: true` fields are present in the payload before calling `execute()`. CLI/UI tooling can also use it to prompt for action inputs without reading documentation.
+`schema` uses the same `FieldDescriptor` type as entity fields. If provided, the engine validates that all `required: true` fields are present in each payload before calling `execute()`. CLI/UI tooling can also use it to prompt for action inputs without reading documentation.
 
 A connector that only sends data (an email gateway, a Slack poster) implements just `getActions` and omits `getEntities`. A connector that can both read and write (Slack reading messages and posting them) implements both.
 

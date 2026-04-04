@@ -232,6 +232,8 @@ CREATE TABLE oauth_tokens (
 
 Per-instance persistent key-value store. Powers `ctx.state` in connectors.
 
+> **Also known as `connector_state`** in the v4 POC. The production schema uses `instance_meta` to avoid ambiguity with `connector_instances`.
+
 ```sql
 CREATE TABLE instance_meta (
   connector_instance_id TEXT NOT NULL,
@@ -265,6 +267,47 @@ CREATE TABLE idempotency_keys (
   key TEXT PRIMARY KEY,
   processed_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
+);
+```
+
+### sync_runs
+
+Per-cycle summary metrics. One row per `(batch_id, channel_id, connector_id)` pass, recording how many records were inserted, updated, skipped, deferred, and errored. Used by `opensync status` and pipeline logs.
+
+```sql
+CREATE TABLE sync_runs (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  connector_id TEXT NOT NULL,
+  inserted INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  deferred INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL
+);
+```
+
+### dead_letter
+
+Records that have exhausted all retry attempts and are parked for manual inspection and replay. See [safety.md — Dead Letter Queue](safety.md) for the retry policy and CLI commands.
+
+```sql
+CREATE TABLE dead_letter (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  entity_name TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  canonical_id TEXT,
+  action TEXT NOT NULL,       -- 'insert', 'update', 'delete'
+  payload TEXT NOT NULL,      -- JSONB: the record or ID that failed
+  error TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_failed_at TEXT NOT NULL,
+  last_failed_at TEXT NOT NULL
 );
 ```
 

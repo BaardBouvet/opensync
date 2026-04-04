@@ -1,5 +1,7 @@
 # Semantic & Graph-Structured Sources
 
+> **Status: aspirational** — the connector SDK and shadow state are designed to accommodate this, but the graph/triple backend is not implemented.
+
 ## The Challenge
 
 The current connector model assumes **well-defined entity types with structured records**: a contact has `id`, `name`, `email`. But real-world sources are messier:

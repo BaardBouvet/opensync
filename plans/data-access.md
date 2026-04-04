@@ -1,5 +1,7 @@
 # Data Access Layer
 
+> **Status: aspirational** — the shadow state and identity map provide the raw material described here, but the query API and agent integration surface are not yet designed.
+
 The sync engine isn't just a pipe between systems — it's a unified, clean, always-current data layer. This makes it the ideal backend for AI agents and analytics.
 
 ## The Problem for Agents Today

@@ -1,5 +1,7 @@
 # Agent-Assisted Development
 
+> **Status: aspirational** — describes intended design direction, not current implementation. Nothing here is blocked on a code decision; it is deferred for prioritization.
+
 The architecture is designed so AI coding agents can generate connectors and mappings. This isn't a future feature — it's a core design principle that shapes every interface decision.
 
 ## Why TypeScript Over Declarative Config

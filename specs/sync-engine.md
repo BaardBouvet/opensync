@@ -7,13 +7,67 @@ The core pipeline that processes data changes and propagates them across systems
 Every sync cycle (poll or webhook-triggered) runs through these steps in order:
 
 1. **Ingest** — fetch changes from source connector
-2. **Transform** — apply user-defined TypeScript mapping functions
+2. **Transform** — apply field mappings to produce canonical form
 3. **Reconcile** — diff incoming data against shadow state
 4. **Resolve** — apply conflict rules
 5. **Dispatch** — fan-out accepted changes to all other channel members
-6. **Update** — store new shadow state with previous values preserved
+6. **Update** — store new shadow state with previous values preserved; advance watermark in the same transaction
 
 The actual implementation details of steps 3–6 (reconciliation, resolution, storage) are backend-specific — see **Backend Architecture** below.
+
+## Ingest Loop
+
+Each source connector is read **once per cycle**, not once per target. The results are diffed against shadow state and fanned out to all other channel members in a single pass. This is the hub-and-spoke model applied to polling — reading a source twice would waste API quota and create race conditions between the two reads.
+
+```
+for each channel:
+  for each member connector (in dependency order):
+    records = connector.read(ctx, watermark)      // one read per source
+    for each record:
+      canonical = applyInbound(record, mappings)  // transform to canonical form
+      shadow = getShadow(connectorId, recordId)
+      if shadowMatchesIncoming(shadow, canonical): skip  // echo detection
+      diff = computeDiff(canonical, shadow)
+      resolved = resolveConflicts(diff, shadow, config)
+      for each OTHER member in the channel:
+        localRecord = applyOutbound(resolved, member.mappings)
+        result = member.connector.insert/update(localRecord)
+        updateShadow(member.connectorId, result.id, canonical)
+    advanceWatermark(connectorId, entity, newSince)  // same DB transaction as shadow update
+```
+
+The watermark advance is **atomic with the shadow state update** — both happen in the same SQLite transaction. A crash between reading and writing cannot produce a watermark that is ahead of the actual written state. On restart, the engine re-reads from the last committed watermark and the shadow state comparison suppresses any records that were already dispatched.
+
+## Association Propagation Rules
+
+Associations (`Association[]` on a `ReadRecord`) represent foreign-key style links between entities. The engine resolves them through the identity map and applies the following rules — all four are unconditional.
+
+### Rule 1: Empty associations propagate as removal
+
+`associations: []` (an explicit empty array) is distinct from `associations: undefined` (field absent from this record).
+
+- `undefined` → field was not included in this read; treat as a sparse update — leave associations untouched on the target.
+- `[]` → source explicitly carries zero associations; propagate the removal so the target clears its association list.
+
+Passing `undefined` when a source has removed all associations silently drops the removal and the target retains stale associations indefinitely.
+
+### Rule 2: Null or falsy `targetId` is a removal tombstone
+
+When an association carries a falsy `targetId` (null, empty string, undefined), the engine treats this as an explicit disassociation — not as a missing dependency. It does **not** defer the record.
+
+The engine passes `{ ...assoc, targetId: null }` to the target (or omits the association entirely, depending on the connector contract) rather than suspending the record in the defer queue.
+
+### Rule 3: Unknown `targetEntity` surfaces as an error
+
+If an association references an entity name that has never appeared in the identity map for this channel (e.g. a typo like `"custmers"`), the engine surfaces this as a record-level `error` action and logs it. It does **not** defer — deferral means "wait for the target to arrive"; an unknown entity name is a configuration error that will never self-resolve.
+
+Distinguishing these cases:
+- `targetId` not yet in identity map → legitimate defer (target record hasn't synced yet)
+- `targetEntity` name unknown → configuration error → `"error"` action
+
+### Rule 4: Duplicate predicates are deduplicated
+
+If a source record carries two `Association` entries with the same `predicate` value, the engine deduplicates them before remapping. Last-wins within the incoming array. Duplicates that survive into the target create referential ambiguity and are rejected upstream if the connector enforces uniqueness.
 
 ## Backend Architecture
 
@@ -387,7 +441,7 @@ channels:
 
 ### Watermark Tracking
 
-The engine tracks how far each stream has been read in `stream_state`:
+The engine tracks how far each entity has been read **per source connector** in `stream_state`. Watermarks are keyed `(connector_instance_id, entity_type)` — one entry per connector per entity, shared across all targets that consume from that source.
 
 | connector_instance_id | entity_type | cursor | last_fetched_at |
 |----------------------|-------------|--------|-----------------|
@@ -395,7 +449,11 @@ The engine tracks how far each stream has been read in `stream_state`:
 | hubspot-prod | company | `{"since": "2026-04-01T09:30:00Z"}` | 2026-04-01T09:35:00Z |
 | fiken-prod | invoice | `{"since": "2026-03-31T02:00:00Z"}` | 2026-03-31T02:05:00Z |
 
-After a successful fetch cycle, the engine updates the cursor. On the next poll, the cursor is passed as `since` to the stream's `read()`.
+**Note on key scheme**: Earlier POC versions keyed watermarks per directed pair (`"fromId→toId:entity"`), which allowed each target to advance its own cursor independently. The current architecture reads each source once and fans out to all targets, so a single per-source watermark is correct — the hub-and-spoke ingest loop processes all targets in one pass before advancing the cursor.
+
+After a successful fetch cycle, the engine updates the cursor **in the same database transaction** as the shadow state writes for that cycle (see Ingest Loop above). A crash cannot produce a cursor that is ahead of the written data.
+
+On the next poll, the cursor is passed as `since` to the stream's `read()`.
 
 The cursor is JSONB rather than a plain timestamp because some APIs use opaque cursors, page tokens, or sequence numbers instead of timestamps. The connector decides what goes in the cursor — the engine just stores and passes it back.
 

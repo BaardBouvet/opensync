@@ -27,7 +27,36 @@ Every outbound HTTP call made via `ctx.http` is automatically logged.
 
 ### Privacy / GDPR
 
-The journal stores response bodies which may contain personal data. Configurable retention policy (e.g. 30 days). Connectors can flag fields as sensitive for masking.
+The journal stores response bodies which may contain personal data.
+
+**Retention policy**: Configurable per deployment (default: 30 days). Rows older than the retention window are deleted by a background pruning job.
+
+**Body storage policy**: Request and response bodies are stored by default, truncated to 64 KB each. Connectors can opt out per-request by returning a special header in the response (future). The raw body is the primary way to reproduce an API error offline, so truncation is preferable to omission.
+
+**Credential masking**: The `Authorization` header and any field listed as `secret: true` in the connector's `configSchema` are replaced with `[REDACTED]` before the row is written. Fields are masked in both `request_body` and `response_body`.
+
+### Correlating Journal Rows to Transaction Log
+
+Each `request_journal` row carries a `batch_id` that is shared with the `transaction_log` rows produced in the same sync cycle. To see all mutations that a specific API call caused:
+
+```sql
+SELECT tl.*
+FROM transaction_log tl
+JOIN request_journal rj ON tl.batch_id = rj.batch_id
+WHERE rj.id = '<journal-row-id>';
+```
+
+To go the other direction — find the API calls that produced a specific transaction:
+
+```sql
+SELECT rj.*
+FROM request_journal rj
+WHERE rj.batch_id = (
+  SELECT batch_id FROM transaction_log WHERE id = '<transaction-id>'
+);
+```
+
+The `batch_id` is a UUID generated at the start of each sync cycle and stamped on every `sync_runs`, `transaction_log`, and `request_journal` row produced in that cycle.
 
 ## Pipeline Logs
 

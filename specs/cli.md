@@ -183,6 +183,49 @@ Cleaning up identity links and shadow state…
 Done.
 ```
 
+### opensync dlq list
+
+List records in the dead letter queue — records that failed after all retry attempts.
+
+```
+$ opensync dlq list
+connector       entity     external_id    action    attempts  last_error                         last_failed_at
+fiken-prod      invoice    inv_9912       insert    3         ValidationError: missing vat_no    2026-04-03T10:12:00Z
+hubspot-prod    contact    hs_contact_7   update    3         ConnectorError: 500 Internal …     2026-04-03T09:45:00Z
+
+$ opensync dlq list --connector fiken-prod
+$ opensync dlq list --channel contacts
+```
+
+### opensync dlq retry
+
+Retry one or all dead-lettered records. Moves matching entries back into the job queue for the next sync cycle.
+
+```
+$ opensync dlq retry inv_9912
+Queued 1 record for retry.
+
+$ opensync dlq retry --all
+Queued 2 records for retry.
+
+$ opensync dlq retry --connector fiken-prod
+Queued 1 record for retry.
+```
+
+### opensync dlq discard
+
+Permanently discard dead-lettered records (removes from the queue without retrying).
+
+```
+$ opensync dlq discard inv_9912
+Discarded 1 record.
+
+$ opensync dlq discard --all --connector fiken-prod
+WARNING: 1 record will be permanently discarded.
+Continue? [y/N] y
+Done.
+```
+
 ---
 
 ## Packaging

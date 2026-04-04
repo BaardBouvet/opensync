@@ -12,19 +12,7 @@ doc hygiene. Everything runs from a single `check` script and is auto-fixable wh
 ## Problem
 
 There are no automated quality gates beyond `tsc --build`. That leaves style drift,
-dead code, misused APIs, inconsistent formatting, and stale comments all invisible
-until code review. The SDK's embedded JSDoc has a few known inaccuracies (see below)
-that tooling would have caught at authoring time.
-
-Known JSDoc issues in `packages/sdk/src/`:
-
-- `ValidationError` class comment still says *"Use `status: 'error'` on write results"* — the
-  write-result types use `error?: string`, not a `status` discriminant. The comment predates the
-  field rename and is now stale.
-- `InsertRecord.data` comment is circular: *"only meaningful on creation, not insert (which IS
-  creation)"* — should just state what fields are omitted and why.
-- Inline field comments (`/** ... */` trailing same line) are intermixed with block-style
-  multi-line JSDoc on sibling fields in the same interface, inconsistent within a single type.
+dead code, misused APIs, and inconsistent formatting all invisible until code review.
 
 ---
 
@@ -34,122 +22,64 @@ Known JSDoc issues in `packages/sdk/src/`:
 
 | Package | Purpose |
 |---------|---------|
-| `prettier` | Opinionated formatter — eliminates all style debates |
-| `eslint` | Linter |
-| `typescript-eslint` | TS parser + type-aware lint rules |
-| `eslint-config-prettier` | Disables ESLint rules that conflict with Prettier |
-| `eslint-plugin-jsdoc` | JSDoc/TSDoc quality rules |
-| `typedoc` | API reference site from source comments |
+| `@biomejs/biome` | Formatter + linter in one tool |
 
-All packages installed as `devDependencies` at the repo root.
+Single `devDependency` at the repo root. Biome handles both formatting and linting
+with no configuration overlap issues and no separate parser package needed.
 
-Prettier handles **formatting**. ESLint handles **correctness and doc quality**.
-They do not overlap thanks to `eslint-config-prettier`.
+### Biome
 
-### Prettier
-
-One `.prettierrc` at the repo root, applied to all `.ts` and `.js` files.
-Suggested baseline (adjust to taste before committing):
+One `biome.json` at the repo root:
 
 ```json
 {
-  "semi": true,
-  "singleQuote": false,
-  "trailingComma": "all",
-  "printWidth": 100,
-  "tabWidth": 2
+  "$schema": "https://biomejs.dev/schemas/1.x.x/schema.json",
+  "organizeImports": { "enabled": true },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        "noExplicitAny": "warn"
+      }
+    }
+  },
+  "files": {
+    "ignore": ["dist/", "node_modules/", "*.js"]
+  }
 }
 ```
 
-Add `.prettierignore` excluding `dist/`, `node_modules/`, and generated files.
-
-### ESLint flat config
-
-One `eslint.config.js` at the root. Two rule tiers:
-
-1. **All TS files** — syntax and basic TS rules (no type-aware rules, fast).
-2. **`packages/sdk/src/**` only** — stricter type-aware checks and JSDoc enforcement,
-   because the SDK is public API surface. Connectors are internal; doc requirements
-   are omitted there.
-
-**All TS files:**
-- `@typescript-eslint/no-unused-vars` — catch dead variables the compiler permits
-- `@typescript-eslint/no-explicit-any` — warn on `any` escapes
-- `@typescript-eslint/consistent-type-imports` — `import type` where applicable
-
-**SDK only (type-aware):**
-- `@typescript-eslint/no-floating-promises` — unhandled async in connector hooks
-- `@typescript-eslint/no-unnecessary-type-assertion` — dead casts
-- `jsdoc/require-description` — every exported symbol needs a description
-- `jsdoc/check-param-names` — param names must match the signature
-- `jsdoc/no-undefined-types` — type references in JSDoc must resolve
-
-### TypeDoc
-
-Generate an API reference site from the SDK source comments. TypeDoc renders prose descriptions as-is, but TSDoc tags (`@param`, `@returns`, `@example`) produce richer output — parameter tables, return-value docs, and runnable examples. Since this plan already touches every SDK comment for the fixes below, add the tags in the same pass.
-
-Config at `typedoc.json` in the repo root:
-
-```json
-{
-  "entryPointStrategy": "packages",
-  "entryPoints": ["packages/sdk"],
-  "out": "docs/api",
-  "readme": "none",
-  "excludePrivate": true,
-  "excludeInternal": true
-}
-```
-
-Output goes into `docs/api/` (add to `.gitignore` — built in CI, not committed).
-A GitHub Actions job can publish to GitHub Pages on every merge to `main`.
-
-Add to root `package.json`:
-```json
-"docs": "typedoc"
-```
-
-The `check` script does not need to run TypeDoc — it is a separate publish step.
-TypeDoc failing (e.g. unresolved type reference in a comment) should be a CI warning,
-not a blocking gate, until the output stabilises.
+`recommended` covers the most valuable rules including `noUnusedVariables`,
+`useImportType` (consistent type imports), and common correctness checks.
+`noExplicitAny` is a warning rather than an error to allow gradual cleanup.
 
 ### Scripts
 
 Root `package.json`:
 ```json
-"format":    "prettier --write .",
-"format:check": "prettier --check .",
-"lint":      "eslint .",
-"lint:fix":  "eslint . --fix",
-"docs":      "typedoc",
-"check":     "npm run format:check && npm run lint && npm run typecheck"
+"format":  "biome format --write .",
+"lint":    "biome lint --write .",
+"fix":     "biome check --write .",
+"check":   "biome check . && npm run typecheck"
 ```
 
-`check` is the canonical CI target. `format` + `lint:fix` together constitute the
-auto-fix pass a developer runs locally.
-
-### SDK doc fixes (prerequisite)
-
-Do this pass before enabling `jsdoc/require-description` so the first lint run is clean.
-Since every comment is being touched anyway, add TSDoc tags in the same pass to get
-richer TypeDoc output.
-
-1. Rewrite `ValidationError` class comment — drop the stale `status: 'error'` reference;
-   replace with the actual `error?: string` field name.
-2. Rewrite `InsertRecord.data` comment — remove the circular parenthetical and replace
-   with *"Immutable fields (schema.immutable: true) are stripped before this reaches the connector."*
-3. Normalise comment style throughout `types.ts` and `errors.ts` — block JSDoc on its own
-   line(s) everywhere; eliminate trailing same-line `/** ... */` on interface fields.
-4. Add TSDoc tags to all exported symbols in `packages/sdk/src/`:
-   - `@param` + `@returns` on functions and constructor signatures
-   - `@example` on types and interfaces where a short usage snippet aids understanding
-     (priority: `FieldType`, `ReadBatch`, `ActionPayload`)
-   - `@remarks` for implementation notes that don't belong in the main description
+`check` is the canonical CI target (read-only, exits non-zero on any violation).
+`fix` is the local auto-fix pass — runs format + lint fixes in one command.
 
 ---
 
 ## Out of Scope
 
-- Enforcing JSDoc on connector internals — connectors are ecosystem implementations,
-  not public API; `jsdoc/require-description` applies to `packages/sdk` only
+- JSDoc enforcement — the connector SDK surface is small enough that comment
+  quality is handled in review, not by tooling
+- Type-aware lint rules (`no-floating-promises` etc.) — `tsc --build` already
+  gates the serious type mistakes; the marginal value doesn't justify carrying
+  a full ESLint + typescript-eslint stack
 - CSS / markdown linting

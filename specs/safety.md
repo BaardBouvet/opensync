@@ -52,30 +52,43 @@ The breaker is checked before processing each batch (pre-flight) and after dispa
 
 The most common source of infinite loops: System A updates System B → B sends a webhook → engine sees "change" in B → pushes to A → A sends webhook → repeat forever.
 
-### The Echo Guard
+### How Echo Detection Works
 
-Maintains a short-lived log of outbound pushes. When an inbound change arrives, compares against recent outbound data.
+The engine uses **shadow-state comparison** rather than a short-lived hash log. After every successful write to a target connector, the engine stores the canonical form of what it wrote in `shadow_state`. On the next read from that same connector, the engine compares the incoming canonical record against the stored shadow. If they match, the record is the engine's own write bouncing back — it is suppressed as an echo.
 
-```typescript
-class EchoGuard {
-  isEcho(entityLinkId: string, incomingData: Record<string, unknown>, sourceInstanceId: string): boolean;
-  recordOutbound(entityLinkId: string, data: Record<string, unknown>, targetInstanceId: string): void;
-}
+```
+Engine writes { customerName: "Alice Smith" } to connector B
+  → shadow_state for (B, customers, aliceBId) updated with those values
+
+[next poll of B]
+B.read() returns { customerName: "Alice Smith" }
+  → canonical after inbound mappings: { customerName: "Alice Smith" }
+  → matches shadow_state → skip (echo)
+
+[user edits customerName in B to "Alicia Smith"]
+B.read() returns { customerName: "Alicia Smith" }
+  → canonical: { customerName: "Alicia Smith" }
+  → does not match shadow_state → propagate (genuine change)
 ```
 
-**Algorithm**:
-1. After every successful push, hash the written field values and store: `{ entityLinkId, targetInstanceId, hash, timestamp }`
-2. When a change arrives from a system, hash the incoming values
-3. If the hash matches a recent outbound push to that same system (within TTL window, default 5 min) → it's an echo, suppress it
-4. Additionally: compare incoming values against shadow state. If `incoming.val === shadow.val`, nothing actually changed → suppress
+**Why shadow-state comparison is better than TTL hashes:**
+
+The earlier design stored `{ entityId, targetInstanceId, hash, timestamp }` entries with a 5-minute TTL window. This had two failure modes:
+
+1. **False negatives on slow cycles**: If the reverse pass ran more than 5 minutes after the forward pass (slow API, large batch, scheduled delay), the TTL entry expired and the echo was propagated as a genuine change — causing a loop.
+2. **False positives on identical legitimate edits**: If a user made the identical change to what the engine had already written (e.g. correcting a typo to the same value the engine set), the hash still matched and the genuine change was suppressed.
+
+Shadow-state comparison has neither problem: entries never expire (they are overwritten on the next write), and comparison is against the full canonical record — so a user reverting a field to the engine's value is correctly detected as "no change from canonical" and suppressed, which is the correct outcome (the canonical record already has the right value).
 
 ### Three Layers of Protection
 
 | Layer | What it catches |
 |-------|----------------|
-| L1: Echo filter | Changes the engine just pushed (own footprint) |
-| L2: Hash lock | Identical payloads arriving in rapid succession (duplicate webhooks) |
-| L3: State compare | Incoming value equals shadow state value (no actual change) |
+| L1: Shadow-state match | Engine's own writes bouncing back (any delay, any number of cycles) |
+| L2: State-equality check | Incoming value equals current shadow value, regardless of source (no actual change) |
+| L3: Idempotency key | Duplicate processing of the same webhook or job within TTL window |
+
+L1 is the primary echo guard. L2 and L3 are independent safety nets that also suppress unnecessary writes even when L1 doesn't apply.
 
 ## Idempotency
 
@@ -151,10 +164,28 @@ With enough history, the engine can detect patterns in external changes:
 
 When a record fails processing repeatedly (e.g. validation error in the target system, malformed data), it gets "parked" so it doesn't block the rest of the batch.
 
-Failed records are moved to a dead letter state after exhausting retry attempts:
-- The sync job for that record is marked `failed` with the error message
-- Other records in the same batch continue processing
-- Dead-lettered records can be inspected via `opensync inspect` and retried manually
+After exhausting retry attempts (default: 3, configurable per connector instance), the record is moved to the `dead_letter` table:
+
+```sql
+CREATE TABLE dead_letter (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  entity_name TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  canonical_id TEXT,
+  action TEXT NOT NULL,     -- 'insert', 'update', 'delete'
+  payload TEXT NOT NULL,    -- JSONB: the record or ID that failed
+  error TEXT NOT NULL,      -- last error message
+  attempts INTEGER NOT NULL DEFAULT 0,
+  first_failed_at TEXT NOT NULL,
+  last_failed_at TEXT NOT NULL
+);
+```
+
+- The sync job for the batch continues processing remaining records — one bad record does not stall the channel.
+- Dead-lettered records can be inspected via `opensync dlq list` and retried manually via `opensync dlq retry`.
+- See [cli.md](cli.md) for the full DLQ command reference.
 
 This prevents one bad record (e.g. a contact with an invalid email format that the target API rejects) from stalling the entire sync channel.
 
