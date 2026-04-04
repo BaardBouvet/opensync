@@ -130,36 +130,43 @@ function check(cond: boolean, passed: string, failed: string): void {
   if (cond) ok(passed); else bad(failed);
 }
 
-function dumpDb(dbPath: string, outPath: string): void {
+function dumpDb(dbPath: string, tablesDir: string): void {
   const db = openDb(dbPath);
+  mkdirSync(tablesDir, { recursive: true });
 
-  const identityMap = db.query<{
-    canonical_id: string; connector_id: string; external_id: string;
-  }, []>("SELECT canonical_id, connector_id, external_id FROM identity_map ORDER BY canonical_id, connector_id").all();
+  const JSON_COLS: Record<string, string[]> = {
+    shadow_state:    ["canonical_data"],
+    transaction_log: ["data_before", "data_after"],
+    request_journal: ["request_headers"],
+  };
 
-  const shadowState = db.query<{
-    connector_id: string; entity_name: string; external_id: string;
-    canonical_id: string; canonical_data: string; deleted_at: string | null; updated_at: string;
-  }, []>("SELECT connector_id, entity_name, external_id, canonical_id, canonical_data, deleted_at, updated_at FROM shadow_state ORDER BY connector_id, external_id").all().map((r) => ({
-    ...r,
-    canonical_data: JSON.parse(r.canonical_data),
-  }));
+  const DUMP_TABLES = [
+    "identity_map",
+    "watermarks",
+    "shadow_state",
+    "channel_onboarding_status",
+    "onboarding_log",
+    "transaction_log",
+    "sync_runs",
+  ] as const;
 
-  const onboardingLog = db.query<Record<string, unknown>, []>(
-    "SELECT * FROM onboarding_log ORDER BY started_at",
-  ).all();
-
-  const channelStatus = db.query<Record<string, unknown>, []>(
-    "SELECT * FROM channel_onboarding_status ORDER BY channel_id",
-  ).all();
-
-  const txLog = db.query<Record<string, unknown>, []>(
-    "SELECT id, batch_id, connector_id, entity_name, external_id, canonical_id, action, synced_at FROM transaction_log ORDER BY synced_at",
-  ).all();
-
-  const dump = { identityMap, shadowState, channelStatus, onboardingLog, txLog };
-  writeFileSync(outPath, JSON.stringify(dump, null, 2), "utf8");
-  console.log(`  [db dump] → ${outPath}`);
+  console.log(`  [db dump] → ${tablesDir}/`);
+  for (const table of DUMP_TABLES) {
+    const rows = db.query(`SELECT * FROM ${table}`).all() as Record<string, unknown>[];
+    const parsed = JSON_COLS[table]
+      ? rows.map((row) => {
+          const out = { ...row };
+          for (const col of JSON_COLS[table]) {
+            if (typeof out[col] === "string") {
+              try { out[col] = JSON.parse(out[col] as string); } catch { /* leave as-is */ }
+            }
+          }
+          return out;
+        })
+      : rows;
+    writeFileSync(join(tablesDir, `${table}.json`), JSON.stringify(parsed, null, 2));
+    console.log(`    ${table}.json (${rows.length} rows)`);
+  }
 }
 
 // ─── Scenario 1 — Collect → Discover → Onboard → Sync ────────────────────────
@@ -217,7 +224,7 @@ async function scenario1(): Promise<void> {
   check(writes === 0, "zero writes — shadow state was pre-seeded during collect", `expected 0, got ${writes}`);
   console.log();
 
-  dumpDb(dbPath, join(dataDir, "v9-s1", "db-dump.json"));
+  dumpDb(dbPath, join(dataDir, "v9-s1", "tables"));
   console.log();
 }
 
@@ -264,7 +271,7 @@ async function scenario2(): Promise<void> {
   check(imAfter === 6, `identity_map still has 6 rows (provisionals merged, no extras)`, `expected 6, got ${imAfter}`);
   console.log();
 
-  dumpDb(dbPath, join(dataDir, "v9-s2", "db-dump.json"));
+  dumpDb(dbPath, join(dataDir, "v9-s2", "tables"));
   console.log();
 }
 
@@ -345,7 +352,7 @@ async function scenario3(): Promise<void> {
   check(writes === 0, "0 writes across all 3 connectors", `expected 0, got ${writes}`);
   console.log();
 
-  dumpDb(dbPath, join(dataDir, "v9-s3", "db-dump.json"));
+  dumpDb(dbPath, join(dataDir, "v9-s3", "tables"));
   console.log();
 }
 
@@ -397,7 +404,7 @@ async function scenario4(): Promise<void> {
   check(bLen2 === 3, "system-b: exactly 3 records", `expected 3, got ${bLen2}`);
   console.log();
 
-  dumpDb(dbPath2, join(dataDir, "v9-s4b", "db-dump.json"));
+  dumpDb(dbPath2, join(dataDir, "v9-s4b", "tables"));
   console.log();
 }
 
