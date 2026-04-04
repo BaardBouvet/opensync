@@ -87,9 +87,9 @@ Circular dependencies are detected at config validation time and rejected.
 
 ### Example Connectors
 
-Real connector implementations are in `connectors/`. See `connectors/mock-crm` for a
+Real connector implementations are in `connectors/` (distributable) and `dev/connectors/` (local fixtures). See `dev/connectors/mock-crm` for a
 relational example (API-key auth, watermark reads, webhook registration) and
-`connectors/mock-erp` for a multi-auth example (OAuth2, session tokens, HMAC signing, ETag
+`dev/connectors/mock-erp` for a multi-auth example (OAuth2, session tokens, HMAC signing, ETag
 conditional writes).
 
 ## Metadata
@@ -725,10 +725,10 @@ npm packages; the engine resolves them at runtime from `opensync.json`.
 
 ---
 
-## Mock servers (`servers/`)
+## Mock servers (`dev/servers/`)
 
-`servers/mock-crm` and `servers/mock-erp` are standalone HTTP services used exclusively by
-connector tests and integration tests. They live in `servers/` (not `connectors/`) because
+`dev/servers/mock-crm` and `dev/servers/mock-erp` are standalone HTTP services used exclusively by
+connector tests and integration tests. They live in `dev/servers/` (not `connectors/`) because
 they are infrastructure, not SDK implementations.
 
 ### Why they exist
@@ -765,7 +765,7 @@ on every create and update.
 
 Entity: `contacts` — `id`, `name`, `email`, `updatedAt`
 
-Connector (`connectors/mock-crm`): covers API-key auth, watermark reads, insert/update, webhook
+Connector (`dev/connectors/mock-crm`): covers API-key auth, watermark reads, insert/update, webhook
 registration (`onEnable`/`onDisable`), and both thick and thin webhook modes.
 
 ### Mock ERP (`@opensync/server-mock-erp`)
@@ -785,7 +785,7 @@ when the record has changed since the client last read it.
 
 Entity: `employees` — `id`, `name`, `email`, `department`, `updatedAt`
 
-Connector (`connectors/mock-erp`): covers OAuth2 token lifecycle, `prepareRequest` session and
+Connector (`dev/connectors/mock-erp`): covers OAuth2 token lifecycle, `prepareRequest` session and
 HMAC patterns, `lookup()` with ETag threading, and conditional writes with `If-Match`.
 
 ---

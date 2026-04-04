@@ -13,10 +13,10 @@ Open two terminal tabs and run one server in each:
 
 ```sh
 # Terminal 1 — Mock CRM (port 4001)
-MOCK_CRM_API_KEY=test-api-key-secret bun run --cwd servers/mock-crm start
+MOCK_CRM_API_KEY=test-api-key-secret bun run --cwd dev/servers/mock-crm start
 
 # Terminal 2 — Mock ERP (port 4002)
-bun run --cwd servers/mock-erp start
+bun run --cwd dev/servers/mock-erp start
 ```
 
 The CRM server accepts `Bearer test-api-key-secret` as the API key. The ERP uses OAuth2

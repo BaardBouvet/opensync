@@ -15,16 +15,6 @@
         "@types/node": "^25.5.0",
       },
     },
-    "connectors/jsonfiles": {
-      "name": "@opensync/connector-jsonfiles",
-      "version": "0.1.0",
-      "dependencies": {
-        "@opensync/sdk": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/node": "^25.5.0",
-      },
-    },
     "connectors/kafka": {
       "name": "@opensync/connector-kafka",
       "version": "0.1.0",
@@ -34,26 +24,6 @@
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
-      },
-    },
-    "connectors/mock-crm": {
-      "name": "@opensync/connector-mock-crm",
-      "version": "0.1.0",
-      "dependencies": {
-        "@opensync/sdk": "workspace:*",
-      },
-      "devDependencies": {
-        "@opensync/server-mock-crm": "workspace:*",
-      },
-    },
-    "connectors/mock-erp": {
-      "name": "@opensync/connector-mock-erp",
-      "version": "0.0.1",
-      "dependencies": {
-        "@opensync/sdk": "workspace:*",
-      },
-      "devDependencies": {
-        "@opensync/server-mock-erp": "workspace:*",
       },
     },
     "connectors/postgres": {
@@ -104,6 +74,44 @@
         "@opensync/engine": "workspace:*",
       },
     },
+    "dev/connectors/jsonfiles": {
+      "name": "@opensync/connector-jsonfiles",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.5.0",
+      },
+    },
+    "dev/connectors/mock-crm": {
+      "name": "@opensync/connector-mock-crm",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@opensync/server-mock-crm": "workspace:*",
+      },
+    },
+    "dev/connectors/mock-erp": {
+      "name": "@opensync/connector-mock-erp",
+      "version": "0.0.1",
+      "dependencies": {
+        "@opensync/sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@opensync/server-mock-erp": "workspace:*",
+      },
+    },
+    "dev/servers/mock-crm": {
+      "name": "@opensync/server-mock-crm",
+      "version": "0.1.0",
+    },
+    "dev/servers/mock-erp": {
+      "name": "@opensync/server-mock-erp",
+      "version": "0.1.0",
+    },
     "packages/engine": {
       "name": "@opensync/engine",
       "version": "0.1.0",
@@ -132,25 +140,17 @@
         "@types/node": "^25.5.0",
       },
     },
-    "servers/mock-crm": {
-      "name": "@opensync/server-mock-crm",
-      "version": "0.1.0",
-    },
-    "servers/mock-erp": {
-      "name": "@opensync/server-mock-erp",
-      "version": "0.1.0",
-    },
   },
   "packages": {
     "@opensync/connector-hubspot": ["@opensync/connector-hubspot@workspace:connectors/hubspot"],
 
-    "@opensync/connector-jsonfiles": ["@opensync/connector-jsonfiles@workspace:connectors/jsonfiles"],
+    "@opensync/connector-jsonfiles": ["@opensync/connector-jsonfiles@workspace:dev/connectors/jsonfiles"],
 
     "@opensync/connector-kafka": ["@opensync/connector-kafka@workspace:connectors/kafka"],
 
-    "@opensync/connector-mock-crm": ["@opensync/connector-mock-crm@workspace:connectors/mock-crm"],
+    "@opensync/connector-mock-crm": ["@opensync/connector-mock-crm@workspace:dev/connectors/mock-crm"],
 
-    "@opensync/connector-mock-erp": ["@opensync/connector-mock-erp@workspace:connectors/mock-erp"],
+    "@opensync/connector-mock-erp": ["@opensync/connector-mock-erp@workspace:dev/connectors/mock-erp"],
 
     "@opensync/connector-postgres": ["@opensync/connector-postgres@workspace:connectors/postgres"],
 
@@ -166,9 +166,9 @@
 
     "@opensync/sdk": ["@opensync/sdk@workspace:packages/sdk"],
 
-    "@opensync/server-mock-crm": ["@opensync/server-mock-crm@workspace:servers/mock-crm"],
+    "@opensync/server-mock-crm": ["@opensync/server-mock-crm@workspace:dev/servers/mock-crm"],
 
-    "@opensync/server-mock-erp": ["@opensync/server-mock-erp@workspace:servers/mock-erp"],
+    "@opensync/server-mock-erp": ["@opensync/server-mock-erp@workspace:dev/servers/mock-erp"],
 
     "@types/better-sqlite3": ["@types/better-sqlite3@7.6.13", "", { "dependencies": { "@types/node": "*" } }, "sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA=="],
 

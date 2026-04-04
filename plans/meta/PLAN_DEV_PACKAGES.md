@@ -1,6 +1,6 @@
 # PLAN: Consolidate Dev-Only Packages Under `dev/`
 
-**Status:** Proposed  
+**Status:** complete  
 **Scope:** Repository layout — connectors/mock-crm, connectors/mock-erp, connectors/jsonfiles, servers/mock-crm, servers/mock-erp
 
 ---

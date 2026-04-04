@@ -1,6 +1,6 @@
 # Plan: JSON Files Sync POC
 
-**Status:** `backlog`
+**Status:** `complete — historical`
 
 ## Goal
 

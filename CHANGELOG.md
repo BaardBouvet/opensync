@@ -15,6 +15,14 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
+- `dev/` directory: dev-only packages consolidated under `dev/connectors/` and `dev/servers/`.
+  Moved from `connectors/` (jsonfiles, mock-crm, mock-erp) and `servers/` (mock-crm, mock-erp).
+  Distributable connectors in `connectors/` now contain only publishable packages.
+  `dev/connectors/jsonfiles/package.json` gains `"private": true`.
+- `ROADMAP.md`: new "Repository hygiene" section tracking meta/infra work.
+- `AGENTS.md`: "Plans discipline" rule — when a plan is completed, update its Status line,
+  `plans/INDEX.md`, and `ROADMAP.md`.
+
 - `specs/demo.md`: spec for the demo/ directory — example folder convention, `-d` flag,
   seed/ format, field-mapping showcase plan, runner architecture, path resolution.
 

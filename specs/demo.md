@@ -56,7 +56,7 @@ example directory. Data file paths in connector `config` are relative to the wor
 {
   "connectors": {
     "system-a": {
-      "plugin": "../../../connectors/jsonfiles/src/index.ts",
+      "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
         "filePaths": ["demo/data/two-system/system-a/contacts.json"]
       }
@@ -71,7 +71,7 @@ Auth credentials go under the `auth:` key (see `specs/auth.md §Credentials in o
 {
   "connectors": {
     "crm": {
-      "plugin": "../../../connectors/mock-crm/src/index.ts",
+      "plugin": "../../../dev/connectors/mock-crm/src/index.ts",
       "auth": { "apiKey": "${MOCK_CRM_API_KEY}" },
       "config": { "baseUrl": "http://localhost:4001" }
     }
@@ -200,7 +200,7 @@ Two types of relative paths coexist in example `opensync.json` files and resolve
 
 | Path type | Example | Resolved relative to |
 |-----------|---------|---------------------|
-| Plugin path | `../../../connectors/jsonfiles/src/index.ts` | Example directory (`loadConfig` root) |
+| Plugin path | `../../../dev/connectors/jsonfiles/src/index.ts` | Example directory (`loadConfig` root) |
 | Data file path | `demo/data/two-system/system-a/contacts.json` | `process.cwd()` (workspace root) |
 
 The runner calls `process.chdir(workspaceRoot)` before `loadConfig()` to ensure data paths

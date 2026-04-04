@@ -52,6 +52,11 @@ bun test packages/sdk/
 - Never create a new branch unless on `main` and the user asks for it
 - Never `git push` without explicit user instruction
 
+**Plans discipline:**
+- When a plan is completed, update its `Status:` line to `complete` in the plan file itself
+- Also update the row in `plans/INDEX.md` with the new status
+- If the plan has a corresponding row in `ROADMAP.md`, mark it `done` there too
+
 **Changelog discipline:**
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed
 - Format: `## [Unreleased]` section, then `### Added` / `### Fixed` / `### Changed`
@@ -149,9 +154,12 @@ preserve existing numbering and append new numbered items at the end of a sectio
 ```
 packages/sdk/       — connector SDK types and helpers (no bun:* imports)
 packages/engine/    — sync engine
-connectors/         — individual connector implementations
+connectors/         — distributable connector implementations (hubspot, kafka, postgres, …)
   <name>/src/index.ts   — the connector (read + write functions only)
   <name>/src/index.test.ts
+dev/                — local-only development and test fixtures (never published)
+  connectors/       — dev connector packages (jsonfiles, mock-crm, mock-erp)
+  servers/          — companion HTTP servers for mock connectors (mock-crm, mock-erp)
 demo/               — interactive demo runner and examples
 specs/              — canonical specifications (the authority)
 plans/              — gap analyses, research, historical rationale

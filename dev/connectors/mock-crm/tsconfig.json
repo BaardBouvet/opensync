@@ -14,6 +14,5 @@
     "composite": true
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts"],
-  "references": [{ "path": "../../packages/sdk" }]
+  "references": [{ "path": "../../../packages/sdk" }]
 }

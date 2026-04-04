@@ -1,5 +1,6 @@
 {
   "name": "@opensync/connector-jsonfiles",
+  "private": true,
   "description": "LOCAL-ONLY: development/test fixture using node:fs. Not for remote or sandboxed execution.",
   "version": "0.1.0",
   "type": "module",

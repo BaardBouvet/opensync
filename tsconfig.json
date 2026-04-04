@@ -3,7 +3,7 @@
   "references": [
     { "path": "packages/sdk" },
     { "path": "packages/engine" },
-    { "path": "connectors/jsonfiles" },
+    { "path": "dev/connectors/jsonfiles" },
     { "path": "connectors/hubspot" },
     { "path": "connectors/tripletex" },
     { "path": "connectors/postgres" },

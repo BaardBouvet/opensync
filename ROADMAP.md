@@ -26,7 +26,7 @@ Every POC version answers a specific question. Lessons feed back into specs.
 
 **Exit criteria:**
 - [x] All POC versions have a LESSONS.md
-- [ ] Every validated pattern has a corresponding section in specs/
+- [x] Every validated pattern has a corresponding section in specs/
 
 ---
 
@@ -35,7 +35,7 @@ Every POC version answers a specific question. Lessons feed back into specs.
 **Goal:** A stable, well-documented connector contract that external developers can build against.
 Connectors are dumb pipes - the SDK defines what that means precisely.
 
-Spec: [specs/connector-sdk.md](specs/connector-sdk.md) - [specs/sdk-helpers.md](specs/sdk-helpers.md) - [specs/connector-isolation.md](specs/connector-isolation.md)
+Spec: [specs/connector-sdk.md](specs/connector-sdk.md) - [specs/connector-helpers.md](specs/connector-helpers.md) - [specs/connector-isolation.md](specs/connector-isolation.md)
 
 | Item | Spec | Status |
 |------|------|--------|
@@ -43,8 +43,8 @@ Spec: [specs/connector-sdk.md](specs/connector-sdk.md) - [specs/sdk-helpers.md](
 | ConnectorContext (http, state, logger, auth) | [specs/connector-sdk.md](specs/connector-sdk.md) | done |
 | Auth patterns (API key, OAuth2, prepareRequest) | [specs/auth.md](specs/auth.md) | done |
 | Webhook hooks (handleWebhook, onEnable, onDisable) | [specs/connector-sdk.md](specs/connector-sdk.md) | done |
-| Mock CRM server — standalone servers/mock-crm/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
-| Mock ERP server — standalone servers/mock-erp/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
+| Mock CRM server — standalone dev/servers/mock-crm/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
+| Mock ERP server — standalone dev/servers/mock-erp/ package + connector tests | [plans/connectors/PLAN_MOCK_SERVERS.md](plans/connectors/PLAN_MOCK_SERVERS.md) | done |
 | SDK helpers (pagination, mapping, batching, state) | [plans/connectors/PLAN_SDK_HELPERS.md](plans/connectors/PLAN_SDK_HELPERS.md) | deferred to M3 |
 | Connector cleanup - migrate all connectors to SDK helpers | [plans/connectors/PLAN_CONNECTOR_CLEANUP.md](plans/connectors/PLAN_CONNECTOR_CLEANUP.md) | deferred to M3 |
 | Connector isolation contract | [specs/connector-isolation.md](specs/connector-isolation.md) | not started |
@@ -101,3 +101,16 @@ Covers: rollback, webhooks, addConnector, actions, CLI, YAML config, distributio
 SDK helpers (pagination, mapping, batching, state), connector cleanup.
 
 Spec references: [specs/rollback.md](specs/rollback.md) - [specs/webhooks.md](specs/webhooks.md) - [specs/discovery.md](specs/discovery.md) - [specs/actions.md](specs/actions.md) - [specs/cli.md](specs/cli.md) - [specs/config.md](specs/config.md)
+
+---
+
+## Repository hygiene (ongoing)
+
+Tracks structural and tooling improvements that are not milestone-gated.
+
+| Item | Plan | Status |
+|------|------|--------|
+| Demo runner with -d flag and built-in examples | [plans/meta/PLAN_DEMO.md](plans/meta/PLAN_DEMO.md) | done |
+| Move dev-only packages to dev/ | [plans/meta/PLAN_DEV_PACKAGES.md](plans/meta/PLAN_DEV_PACKAGES.md) | done |
+| Spec-driven migration (plans/ reorganisation) | [plans/meta/PLAN_SPEC_DRIVEN_MIGRATION.md](plans/meta/PLAN_SPEC_DRIVEN_MIGRATION.md) | done |
+| Remove poc/ directory | [plans/poc/PLAN_REMOVE_POC.md](plans/poc/PLAN_REMOVE_POC.md) | done |

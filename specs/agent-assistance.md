@@ -34,7 +34,7 @@ For a connector to be agent-writable without clarification:
 
 ### § 1.3 Evaluation Baseline
 
-`connectors/mock-crm` and `connectors/mock-erp` are the evaluation baseline: a generated
+`dev/connectors/mock-crm` and `dev/connectors/mock-erp` are the evaluation baseline: a generated
 connector for the same API (given only the mock server's source as documentation) should pass
 the same test suite as the hand-written connector.
 

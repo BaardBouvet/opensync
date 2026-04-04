@@ -1,7 +1,7 @@
 {
   "connectors": {
     "crm": {
-      "plugin": "../../../connectors/mock-crm/src/index.ts",
+      "plugin": "../../../dev/connectors/mock-crm/src/index.ts",
       "auth": {
         "apiKey": "${MOCK_CRM_API_KEY}"
       },
@@ -11,7 +11,7 @@
       }
     },
     "erp": {
-      "plugin": "../../../connectors/mock-erp/src/index.ts",
+      "plugin": "../../../dev/connectors/mock-erp/src/index.ts",
       "auth": {
         "clientId": "opensync-test",
         "clientSecret": "secret"
