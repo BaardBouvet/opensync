@@ -42,6 +42,13 @@ export interface ConnectorInstance {
   id: string;
   connector: Connector;
   config: Record<string, unknown>;
+  /**
+   * Auth credentials resolved from the `auth:` key in opensync.json.
+   * Kept separate from config so connector-specific config keys never
+   * collide with credential names. The engine auth layer reads from here;
+   * connectors never see credentials directly.
+   */
+  auth: Record<string, unknown>;
   /** Mutated by the engine to carry the current batch_id for request journal correlation. */
   batchIdRef: { current: string | undefined };
   /** Mutated to carry the current journal trigger. */
@@ -156,6 +163,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 
   for (const [connectorId, entry] of Object.entries(openSyncJson.connectors)) {
     const resolvedConfig = resolveEnvVars(entry.config, root);
+    const resolvedAuth = entry.auth ? resolveEnvVars(entry.auth, root) : {};
 
     // Load the plugin
     let connector: Connector;
@@ -176,6 +184,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       id: connectorId,
       connector,
       config: resolvedConfig,
+      auth: resolvedAuth,
       batchIdRef: { current: undefined },
       triggerRef: { current: undefined },
     });

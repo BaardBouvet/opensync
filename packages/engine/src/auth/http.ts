@@ -157,12 +157,15 @@ export class OAuthTokenManager {
 // ─── makeTrackedFetch ─────────────────────────────────────────────────────────
 
 // Spec: specs/sync-engine.md § Context & Auth — auth priority order
+// Spec: specs/auth.md §Credentials in opensync.json — credentials live in auth, not config
 function resolveStaticAuthHeader(
   auth: AuthConfig | undefined,
+  credentials: Record<string, unknown>,
   config: Record<string, unknown>,
 ): { header: string; value: string } | undefined {
   if (!auth || auth.type !== "api-key") return undefined;
-  const key = config["apiKey"] ?? config["api_key"] ?? config["accessToken"];
+  // credentials (from auth: key) are the sole source for credential lookup
+  const key = credentials["apiKey"] ?? credentials["api_key"] ?? credentials["accessToken"];
   if (typeof key !== "string") return undefined;
   const header = auth.header ?? "Authorization";
   return { header, value: `Bearer ${key}` };
@@ -177,6 +180,7 @@ export interface TrackedFetchOptions {
 export function makeTrackedFetch(
   connectorId: string,
   auth: AuthConfig | undefined,
+  credentials: Record<string, unknown>,
   config: Record<string, unknown>,
   db: Db,
   batchIdRef: { current: string | undefined },
@@ -232,7 +236,7 @@ export function makeTrackedFetch(
       req.headers.set("Authorization", `Bearer ${token}`);
     } else {
       // 3. API key / none
-      const injected = resolveStaticAuthHeader(auth, config);
+      const injected = resolveStaticAuthHeader(auth, credentials, config);
       if (injected) req.headers.set(injected.header, injected.value);
     }
 

@@ -23,7 +23,7 @@ export function makeWiredInstance(
   db: Db,
   webhookBaseUrl: string,
 ): WiredConnectorInstance {
-  const { id, connector, config } = instance;
+  const { id, connector, config, auth } = instance;
 
   const batchIdRef: { current: string | undefined } = { current: undefined };
   const triggerRef: { current: JournalTrigger | undefined } = { current: undefined };
@@ -53,12 +53,13 @@ export function makeWiredInstance(
   };
 
   // Build OAuthTokenManager if needed
+  // Spec: specs/auth.md §Credentials in opensync.json — credentials live in auth, not config
   let oauthManager: OAuthTokenManager | undefined;
   if (connector.metadata.auth.type === "oauth2" && connector.getOAuthConfig) {
     const oauthCfg = connector.getOAuthConfig(config);
     const scopes = connector.metadata.auth.scopes ?? [];
-    const clientId = (config["clientId"] ?? config["client_id"]) as string;
-    const clientSecret = (config["clientSecret"] ?? config["client_secret"]) as string;
+    const clientId = (auth["clientId"] ?? auth["client_id"]) as string;
+    const clientSecret = (auth["clientSecret"] ?? auth["client_secret"]) as string;
     oauthManager = new OAuthTokenManager(
       id,
       oauthCfg,
@@ -73,6 +74,7 @@ export function makeWiredInstance(
   const http = makeTrackedFetch(
     id,
     connector.metadata.auth,
+    auth,
     config,
     db,
     batchIdRef,

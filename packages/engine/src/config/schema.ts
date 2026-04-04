@@ -8,6 +8,12 @@ export const ConnectorEntrySchema = z.object({
   plugin: z.string(),
   /** Connector-specific config. ${VAR} interpolation applied to string values. */
   config: z.record(z.string(), z.unknown()).default({}),
+  /**
+   * Auth credentials. Merged into config before being passed to the engine so the engine
+   * auth layer can find apiKey / clientId / clientSecret at the top level of config.
+   * Kept separate in opensync.json for clarity.
+   */
+  auth: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const OpenSyncJsonSchema = z.object({

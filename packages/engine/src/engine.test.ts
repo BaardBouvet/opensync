@@ -57,15 +57,16 @@ function makeConfig(crmUrl: string, erpUrl: string): ResolvedConfig {
       {
         id: "crm",
         connector: mockCrmConnector,
-        config: { baseUrl: crmUrl, apiKey: DEFAULT_API_KEY },
+        config: { baseUrl: crmUrl },
+        auth: { apiKey: DEFAULT_API_KEY },
         batchIdRef: { current: undefined },
         triggerRef: { current: undefined },
       },
       {
         id: "erp",
         connector: mockErpConnector,
-        config: {
-          baseUrl: erpUrl,
+        config: { baseUrl: erpUrl },
+        auth: {
           clientId: DEFAULT_CLIENT_ID,
           clientSecret: DEFAULT_CLIENT_SECRET,
         },
