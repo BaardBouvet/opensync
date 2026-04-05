@@ -1,7 +1,8 @@
 # PLAN: Deferred Association Retry
 
-**Status:** draft  
-**Domain:** packages/engine
+> **Status:** complete
+> **Date:** 2026-04-05
+> **Domain:** packages/engine
 
 ---
 

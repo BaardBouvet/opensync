@@ -1,6 +1,7 @@
 # PLAN_DEMO_ENHANCEMENTS.md
 
-Status: complete (see addendum below for follow-on changes)
+> **Status:** complete (see addendum below for follow-on changes)
+> **Date:** 2026-04-05
 
 Four targeted improvements to the demo experience and the jsonfiles dev connector:
 

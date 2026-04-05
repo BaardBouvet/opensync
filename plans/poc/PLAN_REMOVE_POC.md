@@ -1,8 +1,8 @@
 # PLAN: Remove POC Code
 
-> **Type**: Plan
-> **Status**: ✅ Complete — `poc/` removed
-> **Gate**: Execute when the exit criteria below are met
+> **Status:** complete — `poc/` removed
+> **Date:** 2026-04-04
+> **Gate:** Execute when the exit criteria below are met
 
 ---
 

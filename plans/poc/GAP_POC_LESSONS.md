@@ -1,5 +1,8 @@
 # Gap Report: POC Series — Lessons Learned & Open Gaps (v0–v9)
 
+> **Status:** reference
+> **Date:** 2026-04-04
+
 Combined lessons from all POC phases. Each section identifies what worked and what did
 not. Items marked **[OPEN GAP]** are unresolved and tracked in
 `plans/poc/PLAN_CLOSE_POC_GAPS.md`.

@@ -1,8 +1,9 @@
 # Gap Report: OpenSync vs grove/in-and-out
 
-**Reviewed:** https://github.com/grove/in-and-out  
-**Date:** April 2026  
-**Scope:** Feature parity review — things in-and-out has that OpenSync is missing or underspecified.
+> **Status:** reference
+> **Date:** 2026-04-03
+> **Reviewed:** https://github.com/grove/in-and-out
+> **Scope:** feature parity review — things in-and-out has that OpenSync is missing or underspecified
 
 ---
 

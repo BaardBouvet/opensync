@@ -1,9 +1,9 @@
 # GAP: Connector SDK — Spec vs. Package
 
-> **Type**: Gap report
-> **Scope**: `specs/connector-sdk.md` vs. `packages/sdk/src/types.ts`
-> **Date**: 2025
-> **Status**: Closed — all items resolved or explicitly dismissed
+> **Status:** Closed — all items resolved or explicitly dismissed
+> **Date:** 2026-04-04
+> **Type:** gap report
+> **Scope:** `specs/connector-sdk.md` vs. `packages/sdk/src/types.ts`
 
 This report documents deviations found between the `connector-sdk.md` spec and the
 authoritative `packages/sdk/src/types.ts` package. The package is the source of truth

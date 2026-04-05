@@ -1,7 +1,8 @@
 # PLAN: Config Validation in loadConfig()
 
-**Status:** Proposed  
-**Scope:** `packages/engine/src/config/loader.ts` + `schema.ts`
+> **Status:** proposed
+> **Date:** 2026-04-04
+> **Scope:** `packages/engine/src/config/loader.ts` + `schema.ts`
 
 ---
 
