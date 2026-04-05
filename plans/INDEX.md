@@ -26,7 +26,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_CONFIG_VALIDATION.md](engine/PLAN_CONFIG_VALIDATION.md) | Config cross-reference validation (channels, connectors, auth) | backlog |
 | [engine/PLAN_DB_MIGRATIONS.md](engine/PLAN_DB_MIGRATIONS.md) | Post-release database migration infrastructure plan | deferred — post-release |
 | [engine/PLAN_FULL_SYNC_SIGNAL.md](engine/PLAN_FULL_SYNC_SIGNAL.md) | First-class full-sync tracking: ReadBatch.complete + fullSyncOnly + sync_state table | draft |
-| [engine/PLAN_NOOP_UPDATE_SUPPRESSION.md](engine/PLAN_NOOP_UPDATE_SUPPRESSION.md) | Suppress target dispatches when resolved values already match target shadow (LWW always-fires bug) — always on | draft |
+| [engine/PLAN_NOOP_UPDATE_SUPPRESSION.md](engine/PLAN_NOOP_UPDATE_SUPPRESSION.md) | Suppress target dispatches when resolved values already match target shadow (LWW always-fires bug) — always on | complete |
 | [engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md](engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md) | Per-channel opt-out for noop update suppression (for channels with external target writers) | backlog |
 | [engine/PLAN_ECHO_DETECTION_SWITCH.md](engine/PLAN_ECHO_DETECTION_SWITCH.md) | Per-channel opt-out for echo detection (for channels needing unconditional target healing) | backlog |
 

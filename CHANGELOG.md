@@ -13,6 +13,17 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Noop update suppression.** The engine now skips dispatching to a target connector when
+  the resolved canonical values (and remapped associations) already match the target shadow.
+  Previously, `resolveConflicts` always returned all incoming fields (LWW `Date.now() >=`
+  stored ts is always true), causing a target write on every poll cycle even when nothing
+  had changed. The new `_resolvedMatchesTargetShadow` guard fires after conflict resolution
+  but before `_dispatchToTarget`. Also fixes: the target shadow now stores the remapped
+  association sentinel so the guard can correctly compare associations on subsequent polls.
+  Regression tests: T27–T30 in `packages/engine/src/onboarding.test.ts`.
+
 ### Added
 
 - **`jsonfiles` connector: immutable log format.** New `logFormat: true` config option
