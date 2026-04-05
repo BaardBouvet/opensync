@@ -33,14 +33,18 @@ import type {
 // Field names are configurable via connector config (idField, dataField,
 // watermarkField, associationsField) but the defaults cover the common case.
 //
-// ── Log format (logFormat: true) ──────────────────────────────────────────────
-// When logFormat is enabled, every mutation is also appended to a companion
+// ── Audit log (auditLog: true) ──────────────────────────────────────────────
+// When auditLog is enabled, every mutation is also appended to a companion
 // <basename>.log.json file in the same directory. The main data file remains
-// the mutable latest-state view and continues to work exactly as without logFormat.
+// the mutable latest-state view and continues to work exactly as without auditLog.
 // The log file is purely observational — the connector never reads from it.
 //
-// Log entry shape:  { op, id, data?, associations?, updated }
-//   op   — "insert" | "update" | "delete"
+// Log entry shapes:
+//   insert: { op: "insert", id, data, associations?, updated }
+//   update: { op: "update", id, before, after, associations?, updated }
+//     before — fields whose value changed, showing the old value
+//     after  — fields whose value changed, showing the new value
+//   delete: { op: "delete", id, updated }
 //
 // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md
 
@@ -60,7 +64,7 @@ interface FieldConfig {
 }
 
 interface LogConfig {
-  logFormat: boolean;
+  auditLog: boolean;
 }
 
 function readFile(filePath: string): FileRecord[] {
@@ -89,7 +93,7 @@ function fieldConfig(ctx: ConnectorContext): FieldConfig {
 
 function logConfig(ctx: ConnectorContext): LogConfig {
   return {
-    logFormat: (ctx.config["logFormat"] as boolean | undefined) ?? false,
+    auditLog: (ctx.config["auditLog"] as boolean | undefined) ?? false,
   };
 }
 
@@ -139,7 +143,9 @@ function nextWatermark(existing: FileRecord[], watermarkField: string): string |
 interface LogEntry {
   op: "insert" | "update" | "delete";
   id: string;
-  data?: Record<string, unknown>;
+  data?: Record<string, unknown>;          // insert only
+  before?: Record<string, unknown>;        // update only — changed fields, old values
+  after?: Record<string, unknown>;         // update only — changed fields, new values
   associations?: unknown;
   updated: unknown;
 }
@@ -175,7 +181,7 @@ function makeRecordEntity(
   entityName: string,
   entityFilePath: string,
   { idField, dataField, watermarkField, associationsField }: FieldConfig,
-  { logFormat }: LogConfig
+  { auditLog }: LogConfig
 ): EntityDefinition {
   function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
@@ -259,7 +265,7 @@ function makeRecordEntity(
         };
         writeFile(entityFilePath, [...existing, newRecord]);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.4
-        if (logFormat) {
+        if (auditLog) {
           appendLogEntry(logFilePath(entityFilePath), {
             op: "insert", id, data: record.data,
             ...(record.associations ? { associations: record.associations } : {}),
@@ -292,9 +298,20 @@ function makeRecordEntity(
         existing[idx] = updated;
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.5
-        if (logFormat) {
+        if (auditLog) {
+          // Compute a field-level diff: only emit keys that actually changed.
+          const changedKeys = Object.keys(record.data).filter(
+            (k) => JSON.stringify(prev[k]) !== JSON.stringify(record.data[k])
+          );
+          const before: Record<string, unknown> = {};
+          const after: Record<string, unknown> = {};
+          for (const k of changedKeys) {
+            before[k] = prev[k];
+            after[k] = record.data[k];
+          }
           appendLogEntry(logFilePath(entityFilePath), {
-            op: "update", id: record.id, data: merged,
+            op: "update", id: record.id,
+            ...(changedKeys.length > 0 ? { before, after } : {}),
             ...(record.associations !== undefined ? { associations: record.associations } : {}),
             updated: wm,
           });
@@ -315,7 +332,7 @@ function makeRecordEntity(
         existing.splice(idx, 1);
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.6
-        if (logFormat) {
+        if (auditLog) {
           appendLogEntry(logFilePath(entityFilePath), { op: "delete", id, updated: wm });
         }
         yield { id };
@@ -362,9 +379,9 @@ const connector: Connector = {
         required: false,
         default: DEFAULT_ASSOCIATIONS_FIELD,
       },
-      logFormat: {
+      auditLog: {
         type: "boolean",
-        description: "Write a companion <basename>.log.json file recording every mutation as { op, id, data?, associations?, updated }. The main data file stays a mutable latest-state view.",
+        description: "Write a companion <basename>.log.json file recording every mutation. Insert entries carry the full data; update entries carry a before/after diff of only the changed fields; delete entries carry the id.",
         required: false,
         default: false,
       },

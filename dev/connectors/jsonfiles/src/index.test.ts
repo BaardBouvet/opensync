@@ -422,12 +422,12 @@ describe("jsonfiles connector", () => {
     let logFp: string;
 
     beforeEach(() => {
-      logCtx = makeCtx([fp], { logFormat: true });
+      logCtx = makeCtx([fp], { auditLog: true });
       logEntity = connector.getEntities!(logCtx)[0];
       logFp = fp.replace(/\.json$/, ".log.json");
     });
 
-    it("without logFormat, no .log.json file is written", async () => {
+    it("without auditLog, no .log.json file is written", async () => {
       await collect(entity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       expect(existsSync(logFp)).toBe(false);
     });
@@ -448,12 +448,15 @@ describe("jsonfiles connector", () => {
       expect(batch.records).toHaveLength(2);
     });
 
-    it("update writes a log entry with op: update and merged data", async () => {
+    it("update writes a log entry with op: update and a before/after diff", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice", age: 30 } }] satisfies InsertRecord[])));
       await collect(logEntity.update!(from([{ id: ins.id, data: { age: 31 } }] satisfies UpdateRecord[])));
-      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; data: Record<string, unknown> }>;
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; before?: Record<string, unknown>; after?: Record<string, unknown> }>;
       expect(log).toHaveLength(2);
-      expect(log[1]).toMatchObject({ op: "update", id: ins.id, data: { name: "Alice", age: 31 } });
+      expect(log[1]).toMatchObject({ op: "update", id: ins.id, before: { age: 30 }, after: { age: 31 } });
+      // unchanged field "name" not present in diff
+      expect(log[1].before).not.toHaveProperty("name");
+      expect(log[1].after).not.toHaveProperty("name");
     });
 
     it("update mutates main file in-place (not append)", async () => {
