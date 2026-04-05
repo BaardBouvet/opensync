@@ -1,4 +1,4 @@
 node_modules/
 dist/
-demo/*/data/
-tsconfig.tsbuildinfo
+*.tsbuildinfo
+demo/data/
