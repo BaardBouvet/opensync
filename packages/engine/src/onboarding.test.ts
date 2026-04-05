@@ -22,6 +22,7 @@
  * T23  addConnector reads joiner shadow_state and returns correct linked/new/missing counts
  * T24  addConnector merges joiner canonicals and backfills missing records both ways
  * T25  full ingest of all 3 connectors after addConnector produces 0 writes
+ * T26  collectOnly with integer watermarks stores integer since, not ISO timestamp
  */
 import { describe, it, expect } from "bun:test";
 import { tmpdir } from "node:os";
@@ -633,3 +634,77 @@ describe("T25: full ingest of all 3 connectors after addConnector produces 0 wri
     expect(writes).toBe(0);
   });
 });
+
+// ─── T26: collectOnly with integer watermarks stores integer since ─────────────
+// Regression for bug: collectOnly always stored new Date(snapshotAt).toISOString()
+// regardless of watermark type. Integer-mode connectors received an ISO `since` on
+// the first incremental poll, causing isNewerThan(2, "2026-...") → NaN → false →
+// nothing ever picked up.
+
+describe("T26: integer watermarks stored correctly after collectOnly", () => {
+  it("stores the connector's integer since, not an ISO timestamp", async () => {
+    const db = openDb(":memory:");
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    // Seed with explicit integer watermarks
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+      { id: "a2", data: { name: "Bob",   email: "bob@example.com"   }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const engine = new SyncEngine(
+      makeConfig([iA, iB], [
+        { connectorId: "system-a", entity: "contacts" },
+        { connectorId: "system-b", entity: "contacts" },
+      ]),
+      db,
+    );
+
+    // Run collectOnly for both connectors
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+
+    // Watermarks must be exactly what the connector returned in batch.since — opaque,
+    // no fabrication. jsonfiles returns the integer max ("1") for these seeds.
+    const rows = db
+      .prepare<{ connector_id: string; since: string }>("SELECT connector_id, since FROM watermarks ORDER BY connector_id")
+      .all();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.since).toBe("1");
+    expect(rows[1]!.since).toBe("1");
+
+    // Onboard, then bump a record to updated: 2
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    // onboard must not have touched the watermarks
+    const rowsAfterOnboard = db
+      .prepare<{ connector_id: string; since: string }>("SELECT connector_id, since FROM watermarks ORDER BY connector_id")
+      .all();
+    expect(rowsAfterOnboard[0]!.since).toBe("1");
+    expect(rowsAfterOnboard[1]!.since).toBe("1");
+
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice Smith", email: "alice@example.com" }, updated: 2 },
+      { id: "a2", data: { name: "Bob",         email: "bob@example.com"   }, updated: 1 },
+    ]);
+
+    // Normal ingest must pick up the bumped record and fan-out to system-b
+    const result = await engine.ingest("ch", "system-a");
+    const updates = result.records.filter((r) => r.action === "update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.targetConnectorId).toBe("system-b");
+
+    // system-b contacts.json should have Alice's new name
+    const bRecords = readJson(join(dirB, "contacts.json")) as Array<{ data: { name: string } }>;
+    const alice = bRecords.find((r) => r.data.name === "Alice Smith");
+    expect(alice).toBeDefined();
+  });
+});
+

@@ -220,7 +220,6 @@ export class SyncEngine {
 
     // ── collectOnly fast path ─────────────────────────────────────────────
     // Spec: specs/sync-engine.md § collectOnly mode
-    // Gap 1: record snapshot_at = Date.now() at the START of reading (not at commit).
     if (opts?.collectOnly) {
       const snapshotAt = Date.now();
       const ts = snapshotAt;
@@ -229,6 +228,7 @@ export class SyncEngine {
         : dbGetWatermark(this.db, connectorId, sourceMember.entity);
 
       if (source.batchIdRef) source.batchIdRef.current = batchId;
+      let connectorWatermark: string | undefined;
       try {
         for await (const batch of sourceRead(source.ctx, since)) {
           for (const record of batch.records) {
@@ -242,18 +242,18 @@ export class SyncEngine {
             const fd = buildFieldData(existing, canonical, connectorId, ts, undefined);
             dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
           }
+          if (batch.since) connectorWatermark = batch.since;
         }
       } finally {
         if (source.batchIdRef) source.batchIdRef.current = undefined;
       }
 
-      // Advance watermark to snapshotAt — Gap 1 fix: use start-of-read, not now
-      dbSetWatermark(
-        this.db,
-        connectorId,
-        sourceMember.entity,
-        new Date(snapshotAt).toISOString(),
-      );
+      // Store the connector's watermark exactly as returned — watermarks are opaque.
+      // If the connector returned no batch.since (e.g. empty read), store nothing:
+      // the next poll will pass since=undefined (full sync), which is correct.
+      if (connectorWatermark !== undefined) {
+        dbSetWatermark(this.db, connectorId, sourceMember.entity, connectorWatermark);
+      }
       return { channelId, connectorId, records: [], snapshotAt };
     }
 
@@ -533,14 +533,6 @@ export class SyncEngine {
       }
     }
 
-    // 3. Advance watermarks — Gap 1: use snapshotAt from report, not Date.now()
-    const watermark = report.snapshotAt
-      ? new Date(report.snapshotAt).toISOString()
-      : new Date().toISOString();
-    for (const member of channel.members) {
-      dbSetWatermark(this.db, member.connectorId, report.entity, watermark);
-    }
-
     // 4. Mark channel ready
     dbSetChannelReady(this.db, channelId, report.entity);
 
@@ -705,9 +697,7 @@ export class SyncEngine {
       }
     }
 
-    // 7. Advance watermark + mark ready
-    const watermark = new Date(ts).toISOString();
-    dbSetWatermark(this.db, connectorId, joinerMember.entity, watermark);
+    // 7. Mark ready — watermark for the joiner was already stored by its collectOnly run.
     dbSetChannelReady(this.db, channelId, joinerMember.entity);
 
     return report;

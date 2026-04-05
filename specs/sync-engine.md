@@ -101,6 +101,20 @@ performs **zero fan-out**. Every record gets a provisional self-only `identity_m
 provisionals are later merged into the shared canonical layer by `onboard()` or `addConnector()`.
 `collectOnly` never throws — it is safe to call at any time.
 
+#### Watermark anchoring after `collectOnly` and `onboard`
+
+Watermarks are **opaque strings** — the engine stores and passes them back to connectors
+without inspecting their format.
+
+After `collectOnly`, the engine stores `batch.since` **exactly as returned by the connector**.
+If the connector returns no `batch.since` (e.g. the source was empty), no watermark is stored.
+The next poll will pass `since = undefined`, which triggers a full sync — correct behaviour,
+since there was nothing to anchor to.
+
+`onboard` and `addConnector` do **not** write watermarks. Collection status ("has this
+connector been ingested") is tracked via `shadow_state` row presence and the `channel_status`
+table — not via watermarks. Watermarks are only set by connector reads.
+
 ---
 
 ## Field Mapping
