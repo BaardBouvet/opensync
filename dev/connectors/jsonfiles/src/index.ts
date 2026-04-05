@@ -40,11 +40,12 @@ import type {
 // The log file is purely observational — the connector never reads from it.
 //
 // Log entry shapes:
-//   insert: { op: "insert", id, data, associations?, updated }
-//   update: { op: "update", id, before, after, updated }
+//   insert: { op: "insert", id, data, associations?, updated, at }
+//   update: { op: "update", id, before, after, updated, at }
 //     before — changed data fields (old values) + old associations (if changed)
 //     after  — changed data fields (new values) + new associations (if changed)
-//   delete: { op: "delete", id, updated }
+//   delete: { op: "delete", id, updated, at }
+//   `at`  — ISO 8601 wall-clock timestamp of the mutation (always present)
 //
 // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md
 
@@ -148,6 +149,7 @@ interface LogEntry {
   after?: Record<string, unknown> & { associations?: unknown };  // update only — new values of changed fields
   associations?: unknown;                  // insert only
   updated: unknown;
+  at: string;                              // ISO 8601 wall-clock timestamp
 }
 
 function logFilePath(entityFilePath: string): string {
@@ -270,6 +272,7 @@ function makeRecordEntity(
             op: "insert", id, data: record.data,
             ...(record.associations ? { associations: record.associations } : {}),
             updated: wm,
+            at: new Date().toISOString(),
           });
         }
         yield { id, data: record.data };
@@ -322,6 +325,7 @@ function makeRecordEntity(
             op: "update", id: record.id,
             ...(hasDiff ? { before, after } : {}),
             updated: wm,
+            at: new Date().toISOString(),
           });
         }
         yield { id: record.id, data: merged };
@@ -341,7 +345,7 @@ function makeRecordEntity(
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.6
         if (auditLog) {
-          appendLogEntry(logFilePath(entityFilePath), { op: "delete", id, updated: wm });
+          appendLogEntry(logFilePath(entityFilePath), { op: "delete", id, updated: wm, at: new Date().toISOString() });
         }
         yield { id };
       }

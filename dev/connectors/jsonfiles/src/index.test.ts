@@ -434,9 +434,11 @@ describe("jsonfiles connector", () => {
 
     it("insert writes a log entry with op: insert", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; data: Record<string, unknown> }>;
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; data: Record<string, unknown>; at: string }>;
       expect(log).toHaveLength(1);
       expect(log[0]).toMatchObject({ op: "insert", id: ins.id, data: { name: "Alice" } });
+      expect(typeof log[0].at).toBe("string");
+      expect(() => new Date(log[0].at)).not.toThrow();
     });
 
     it("insert does not make main file append-only", async () => {
@@ -480,10 +482,11 @@ describe("jsonfiles connector", () => {
     it("delete writes a log entry with op: delete", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.delete!(from([ins.id])));
-      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string }>;
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; at: string }>;
       expect(log).toHaveLength(2);
       expect(log[1]).toMatchObject({ op: "delete", id: ins.id });
       expect((log[1] as Record<string, unknown>)["data"]).toBeUndefined();
+      expect(typeof log[1].at).toBe("string");
     });
 
     it("delete still removes record from main file", async () => {
