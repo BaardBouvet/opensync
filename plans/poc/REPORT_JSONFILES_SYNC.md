@@ -1,7 +1,7 @@
 # Plan: JSON Files Sync POC
 
-> **Status:** complete — historical
-> **Date:** 2026-04-03
+**Status:** complete — historical  
+**Date:** 2026-04-03  
 
 ## Goal
 

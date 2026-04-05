@@ -1,7 +1,7 @@
 # Plan: OpenSync POC Series — All Versions
 
-> **Status:** complete — historical
-> **Date:** 2026-04-04
+**Status:** complete — historical  
+**Date:** 2026-04-04  
 
 Historical record of all Proof-of-Concept iterations that validated the engine design.
 Each phase answers a specific question. Together they form the design history behind the

@@ -1,11 +1,11 @@
 # PLAN: Non-Local Entity Associations
 
-> **Status:** draft
-> **Date:** 2026-04-05
-> **Domain:** packages/engine, packages/sdk
-> **Scope:** Association resolution across channel boundaries
-> **Spec:** specs/associations.md, specs/connector-sdk.md
-> **Depends on:** PLAN_EAGER_ASSOCIATION_MODE.md (complete)
+**Status:** draft  
+**Date:** 2026-04-05  
+**Domain:** packages/engine, packages/sdk  
+**Scope:** Association resolution across channel boundaries  
+**Spec:** specs/associations.md, specs/connector-sdk.md  
+**Depends on:** PLAN_EAGER_ASSOCIATION_MODE.md (complete)  
 
 ---
 

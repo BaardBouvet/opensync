@@ -1,9 +1,9 @@
 # PLAN: Strict Association Mode + Deadlock Detection
 
-> **Status:** backlog
-> **Date:** 2026-04-05
-> **Domain:** packages/engine
-> **Prerequisite:** `PLAN_EAGER_ASSOCIATION_MODE.md` must be complete. Strict mode is an opt-in overlay on top of the eager default.
+**Status:** backlog  
+**Date:** 2026-04-05  
+**Domain:** packages/engine  
+**Prerequisite:** `PLAN_EAGER_ASSOCIATION_MODE.md` must be complete. Strict mode is an opt-in overlay on top of the eager default.  
 
 ---
 

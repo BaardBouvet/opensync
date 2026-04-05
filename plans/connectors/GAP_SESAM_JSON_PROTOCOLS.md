@@ -1,7 +1,7 @@
 # GAP_SESAM_JSON_PROTOCOLS — Sesam JSON Pull & Push Protocol Alignment
 
-> **Status:** draft
-> **Date:** 2026-04-05
+**Status:** draft  
+**Date:** 2026-04-05  
 
 Reference docs:
 - https://docs.sesam.io/hub/json-pull.html

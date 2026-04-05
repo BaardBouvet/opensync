@@ -1,8 +1,8 @@
 # PLAN: demo/ Directory
 
-> **Status:** largely complete — generic runner + all three examples implemented
-> **Date:** 2026-04-04
-> **Scope:** `demo/` top-level directory
+**Status:** largely complete — generic runner + all three examples implemented  
+**Date:** 2026-04-04  
+**Scope:** `demo/` top-level directory  
 
 ---
 

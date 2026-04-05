@@ -1,9 +1,9 @@
 # PLAN: Per-channel opt-out for noop update suppression
 
-> **Status:** backlog
-> **Date:** 2026-04-05
-> **Domain:** packages/engine
-> **Depends on:** `PLAN_NOOP_UPDATE_SUPPRESSION.md` (must be implemented first)
+**Status:** backlog  
+**Date:** 2026-04-05  
+**Domain:** packages/engine  
+**Depends on:** `PLAN_NOOP_UPDATE_SUPPRESSION.md` (must be implemented first)  
 
 ---
 

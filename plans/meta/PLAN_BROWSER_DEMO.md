@@ -1,7 +1,7 @@
 # PLAN_BROWSER_DEMO.md
 
-> **Status:** draft
-> **Date:** 2026-04-05
+**Status:** draft  
+**Date:** 2026-04-05  
 
 Run the OpenSync demo entirely in a browser — no install, no terminal, just a URL.
 A visitor clicks a link, sees two (or three) virtual systems syncing contacts in real time,

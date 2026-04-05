@@ -1,8 +1,8 @@
 # PLAN: Noop Update Suppression
 
-> **Status:** complete
-> **Date:** 2026-04-05
-> **Domain:** packages/engine
+**Status:** complete  
+**Date:** 2026-04-05  
+**Domain:** packages/engine  
 
 **Observed via:** `demo/data/associations-demo/**/*.log.json` audit entries showing
 `{ "op": "update", "id": "...", "updated": N }` with no `before`/`after` diff — meaning

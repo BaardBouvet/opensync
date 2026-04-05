@@ -1,7 +1,7 @@
 # Semantic & Graph-Structured Sources
 
-> **Status:** aspirational — connector SDK and shadow state accommodate this, but the graph/triple backend is not implemented.
-> **Date:** 2026-04-02
+**Status:** aspirational — connector SDK and shadow state accommodate this, but the graph/triple backend is not implemented.  
+**Date:** 2026-04-02  
 
 ## The Challenge
 
