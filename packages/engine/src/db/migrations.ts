@@ -122,4 +122,17 @@ export function createSchema(db: Db): void {
       marked_ready_at  TEXT NOT NULL
     )
   `);
+
+  // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.1
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS deferred_associations (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_connector     TEXT    NOT NULL,
+      entity_name          TEXT    NOT NULL,
+      source_external_id   TEXT    NOT NULL,
+      target_connector     TEXT    NOT NULL,
+      deferred_at          INTEGER NOT NULL,
+      UNIQUE (source_connector, entity_name, source_external_id, target_connector)
+    )
+  `);
 }
