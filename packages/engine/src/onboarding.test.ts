@@ -708,3 +708,199 @@ describe("T26: integer watermarks stored correctly after collectOnly", () => {
   });
 });
 
+// ─── T27–T30: Noop update suppression ────────────────────────────────────────
+// Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md
+//
+// Echo detection on the source side fires when existingShadow !== undefined AND
+// the canonical matches. The noop guard fires when echo detection is bypassed
+// (existingShadow === undefined) but the target shadow already contains the same
+// values — i.e. no actual write is needed.
+//
+// We simulate the missing-source-shadow case by deleting it from the DB directly
+// after the first successful ingest. On the next ingest, existingShadow === undefined
+// → echo detection is skipped → resolveConflicts runs → guard should suppress.
+
+describe("T27: second poll with no source shadow → noop suppressed", () => {
+  it("suppresses dispatch when target shadow already matches resolved values", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const db = openDb(":memory:");
+    const engine = new SyncEngine(makeConfig([iA, iB], [
+      { connectorId: "system-a", entity: "contacts" },
+      { connectorId: "system-b", entity: "contacts" },
+    ]), db);
+
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    // Settle: first incremental so target shadow is up to date
+    await engine.ingest("ch", "system-a");
+
+    // Simulate missing source shadow (resurrection / cleared shadow scenario):
+    // delete system-a's shadow so echo detection is bypassed on the next ingest.
+    // Bump updated so the connector returns the record again.
+    db.prepare("DELETE FROM shadow_state WHERE connector_id = 'system-a'").run();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 2 },
+    ]);
+    // Reset watermark so the connector returns updated:2
+    db.prepare("DELETE FROM watermarks WHERE connector_id = 'system-a'").run();
+
+    // Without the noop guard: _dispatchToTarget would fire → noop write to system-b.
+    // With the guard: target shadow matches resolved → skip.
+    const result = await engine.ingest("ch", "system-a");
+    const updates = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "system-b");
+    expect(updates).toHaveLength(0);
+  });
+});
+
+describe("T28: poll after real change → update (not suppressed)", () => {
+  it("does not suppress when a field value actually changed", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const db = openDb(":memory:");
+    const engine = new SyncEngine(makeConfig([iA, iB], [
+      { connectorId: "system-a", entity: "contacts" },
+      { connectorId: "system-b", entity: "contacts" },
+    ]), db);
+
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+    await engine.ingest("ch", "system-a");
+
+    // Delete source shadow and reset watermark, then write a REAL change
+    db.prepare("DELETE FROM shadow_state WHERE connector_id = 'system-a'").run();
+    db.prepare("DELETE FROM watermarks WHERE connector_id = 'system-a'").run();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice Smith", email: "alice@example.com" }, updated: 2 },
+    ]);
+
+    const result = await engine.ingest("ch", "system-a");
+    const updates = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "system-b");
+    expect(updates).toHaveLength(1);
+  });
+});
+
+describe("T29: first propagation of association → update (not suppressed)", () => {
+  it("does not suppress when an association appears that wasn't in target shadow", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const db = openDb(":memory:");
+    const engine = new SyncEngine(makeConfig([iA, iB], [
+      { connectorId: "system-a", entity: "contacts" },
+      { connectorId: "system-b", entity: "contacts" },
+    ]), db);
+
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+    await engine.ingest("ch", "system-a");
+
+    // Delete source shadow, reset watermark, add a new association (no targetId → passes through)
+    db.prepare("DELETE FROM shadow_state WHERE connector_id = 'system-a'").run();
+    db.prepare("DELETE FROM watermarks WHERE connector_id = 'system-a'").run();
+    writeJson(join(dirA, "contacts.json"), [
+      {
+        id: "a1",
+        data: { name: "Alice", email: "alice@example.com" },
+        updated: 2,
+        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
+      },
+    ]);
+
+    // Association is new on the target → must NOT suppress
+    const result = await engine.ingest("ch", "system-a");
+    const updates = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "system-b");
+    expect(updates).toHaveLength(1);
+  });
+});
+
+describe("T30: second poll with unchanged association → noop suppressed", () => {
+  it("suppresses when both fields and association already match target shadow", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" }, updated: 1 },
+    ]);
+
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const db = openDb(":memory:");
+    const engine = new SyncEngine(makeConfig([iA, iB], [
+      { connectorId: "system-a", entity: "contacts" },
+      { connectorId: "system-b", entity: "contacts" },
+    ]), db);
+
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    // First clear: delete source shadow + watermark, write updated:2 with association.
+    // This is the first time the association is dispatched → target shadow gets __assoc__.
+    db.prepare("DELETE FROM shadow_state WHERE connector_id = 'system-a'").run();
+    db.prepare("DELETE FROM watermarks WHERE connector_id = 'system-a'").run();
+    writeJson(join(dirA, "contacts.json"), [
+      {
+        id: "a1",
+        data: { name: "Alice", email: "alice@example.com" },
+        updated: 2,
+        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
+      },
+    ]);
+    await engine.ingest("ch", "system-a"); // dispatches association → target shadow stores __assoc__
+
+    // Second clear: same data + same association, updated:3.
+    // Target shadow now has __assoc__ → guard should suppress.
+    db.prepare("DELETE FROM shadow_state WHERE connector_id = 'system-a'").run();
+    db.prepare("DELETE FROM watermarks WHERE connector_id = 'system-a'").run();
+    writeJson(join(dirA, "contacts.json"), [
+      {
+        id: "a1",
+        data: { name: "Alice", email: "alice@example.com" },
+        updated: 3,
+        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
+      },
+    ]);
+
+    const result = await engine.ingest("ch", "system-a");
+    const updates = result.records.filter((r) => r.action === "update");
+    expect(updates).toHaveLength(0);
+  });
+});
+

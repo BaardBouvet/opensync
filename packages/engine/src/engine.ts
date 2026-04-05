@@ -870,7 +870,12 @@ export class SyncEngine {
       return { type: "error", error: "Unexpected state after write" };
     }
 
-    const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, undefined);
+    // Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md — store remapped assoc sentinel
+    // so _resolvedMatchesTargetShadow can compare it on the next poll.
+    const remappedSentinel = associations?.length
+      ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+      : undefined;
+    const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, remappedSentinel);
     return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData };
   }
 
@@ -951,6 +956,19 @@ export class SyncEngine {
           continue;
         }
 
+        // Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md
+        // Suppress dispatch when resolved values already match the target shadow.
+        // Echo detection handles the source side; this guard handles the target side
+        // for cases where the source shadow is absent (resurrection / cleared shadow).
+        const remappedForCheck = remap.length ? remap : undefined;
+        if (
+          targetShadow !== undefined &&
+          this._resolvedMatchesTargetShadow(resolved, targetShadow, remappedForCheck)
+        ) {
+          results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId ?? "" });
+          continue;
+        }
+
         const dispatchResult = await this._dispatchToTarget(
           targetMember, tw, resolved, remap.length ? remap : undefined,
           existingTargetId, targetShadow, canonId, ingestTs, batchId, sourceMember, record.id,
@@ -986,6 +1004,30 @@ export class SyncEngine {
 
     breaker.recordResult(hadErrors);
     return results;
+  }
+
+  // Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md
+  private _resolvedMatchesTargetShadow(
+    resolved: Record<string, unknown>,
+    targetShadow: FieldData,
+    remappedAssoc: Association[] | undefined,
+  ): boolean {
+    for (const [k, v] of Object.entries(resolved)) {
+      const e = targetShadow[k];
+      if (!e) return false;
+      if (JSON.stringify(e.val) !== JSON.stringify(v)) return false;
+    }
+    if (remappedAssoc !== undefined) {
+      const newSentinel = JSON.stringify(
+        [...remappedAssoc].sort((a, b) => a.predicate.localeCompare(b.predicate)),
+      );
+      const existingSentinel = targetShadow["__assoc__"]?.val;
+      if (newSentinel !== existingSentinel) return false;
+    } else {
+      // No associations on incoming → target shadow must also have none
+      if (targetShadow["__assoc__"] !== undefined) return false;
+    }
+    return true;
   }
 
   private _shadowMatchesIncoming(
