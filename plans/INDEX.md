@@ -45,6 +45,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/GAP_CONNECTOR_SDK_SPEC.md](connectors/GAP_CONNECTOR_SDK_SPEC.md) | Gap analysis: connector SDK spec completeness | reference |
 | [connectors/PLAN_JSONFILES_LOG_FORMAT.md](connectors/PLAN_JSONFILES_LOG_FORMAT.md) | jsonfiles immutable log format: append-only writes, deduplicated reads | complete |
 | [connectors/GAP_SESAM_JSON_PROTOCOLS.md](connectors/GAP_SESAM_JSON_PROTOCOLS.md) | Gap analysis: Sesam JSON Pull + Push protocol alignment with OpenSync connector SDK | draft |
+| [connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md](connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md) | Association targets outside the source connector's own channel — semantic type URIs, cross-channel entity name translation, stable URI passthrough | draft |
 
 ## meta/ — Project meta documents
 
