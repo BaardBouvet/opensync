@@ -65,6 +65,11 @@ bun test packages/sdk/
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed
 - Format: `## [Unreleased]` section, then `### Added` / `### Fixed` / `### Changed`
 
+**Bug-fix discipline (TDD):**
+- Before fixing a bug, write a failing test that reproduces it exactly
+- Commit the fix only after the test passes
+- The test must remain in the suite permanently as a regression guard
+
 **Documentation rules:**
 - Docs are informative, not promotional. No superlatives, no sales language.
 - Connectors expose raw records. They never perform field mapping, renaming, or
