@@ -53,13 +53,14 @@ bun test packages/sdk/
 - Never `git push` without explicit user instruction
 
 **Plans discipline:**
-- Every plan file must open with a blockquote block immediately after the heading containing
+- Every plan file must open with a metadata block immediately after the heading containing
   `**Status:**` on the first line and `**Date:** YYYY-MM-DD` on the second line, e.g.:
   ```
-  > **Status:** backlog
-  > **Date:** 2026-04-05
+  **Status:** backlog  
+  **Date:** 2026-04-05  
   ```
-  Additional metadata lines (Domain, Scope, Spec, Depends on, …) may follow in the same blockquote.
+  Each line must end with two trailing spaces (Markdown hard break) so they render on separate
+  lines in GitHub preview. Additional metadata lines (Domain, Scope, Spec, Depends on, …) may follow.
 - When a plan is completed, update its `Status:` line to `complete` in the plan file itself
 - Also update the row in `plans/INDEX.md` with the new status
 - If the plan has a corresponding row in `ROADMAP.md`, mark it `done` there too

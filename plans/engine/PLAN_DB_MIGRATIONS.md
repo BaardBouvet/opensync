@@ -1,8 +1,8 @@
 # PLAN: Database Migrations
 
-> **Status:** pre-implementation — no migrations infrastructure exists yet
-> **Date:** 2026-04-04
-> **Prerequisite:** First public release shipped
+**Status:** pre-implementation — no migrations infrastructure exists yet  
+**Date:** 2026-04-04  
+**Prerequisite:** First public release shipped  
 
 ---
 

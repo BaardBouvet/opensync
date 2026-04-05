@@ -1,8 +1,8 @@
 # Plan: Code Quality (Linting, Formatting, Type Hygiene)
 
-> **Status:** backlog
-> **Date:** 2026-04-04
-> **Spec:** none yet — this plan precedes the spec
+**Status:** backlog  
+**Date:** 2026-04-04  
+**Spec:** none yet — this plan precedes the spec  
 
 ## Goal
 

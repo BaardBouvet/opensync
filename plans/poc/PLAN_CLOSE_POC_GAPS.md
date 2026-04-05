@@ -1,8 +1,8 @@
 # Plan: Close Open POC Gaps
 
-> **Status:** backlog — to be scheduled against engine milestones
-> **Date:** 2026-04-04
-> **Source:** `plans/poc/GAP_POC_LESSONS.md`
+**Status:** backlog — to be scheduled against engine milestones  
+**Date:** 2026-04-04  
+**Source:** `plans/poc/GAP_POC_LESSONS.md`  
 
 Each item below identifies an open gap from the POC series, its origin version,
 the spec section it belongs to, and the acceptance criterion for closure.

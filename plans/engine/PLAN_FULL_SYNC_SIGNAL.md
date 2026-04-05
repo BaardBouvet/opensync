@@ -1,7 +1,7 @@
 # PLAN_FULL_SYNC_SIGNAL — First-class full-sync tracking
 
-> **Status:** draft
-> **Date:** 2026-04-05
+**Status:** draft  
+**Date:** 2026-04-05  
 
 Spec changes planned:
 - `specs/connector-sdk.md` § Entities — add `ReadBatch.complete` field

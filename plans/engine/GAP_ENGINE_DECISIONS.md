@@ -1,9 +1,9 @@
 # GAP: Engine Decisions Missing from Specs
 
-> **Status:** Open — items listed below need spec coverage or explicit documentation
-> **Date:** 2026-04-04
-> **Type:** gap report
-> **Scope:** `packages/engine/` (M2 implementation) vs. all `specs/`
+**Status:** Open — items listed below need spec coverage or explicit documentation  
+**Date:** 2026-04-04  
+**Type:** gap report  
+**Scope:** `packages/engine/` (M2 implementation) vs. all `specs/`  
 
 This report captures major architectural decisions made during the M2 engine implementation
 that are not (or were not) reflected in any spec. The goal is to ensure the spec set fully
