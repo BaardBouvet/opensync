@@ -53,6 +53,13 @@ bun test packages/sdk/
 - Never `git push` without explicit user instruction
 
 **Plans discipline:**
+- Every plan file must open with a blockquote block immediately after the heading containing
+  `**Status:**` on the first line and `**Date:** YYYY-MM-DD` on the second line, e.g.:
+  ```
+  > **Status:** backlog
+  > **Date:** 2026-04-05
+  ```
+  Additional metadata lines (Domain, Scope, Spec, Depends on, …) may follow in the same blockquote.
 - When a plan is completed, update its `Status:` line to `complete` in the plan file itself
 - Also update the row in `plans/INDEX.md` with the new status
 - If the plan has a corresponding row in `ROADMAP.md`, mark it `done` there too
@@ -64,6 +71,10 @@ bun test packages/sdk/
 **Changelog discipline:**
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed
 - Format: `## [Unreleased]` section, then `### Added` / `### Fixed` / `### Changed`
+
+**Spec discipline:**
+- After any code change, ask: does a spec in `specs/` need updating to reflect the new behaviour?
+- If yes, update the spec in the same working session — never leave the spec stale
 
 **Bug-fix discipline (TDD):**
 - Before fixing a bug, write a failing test that reproduces it exactly

@@ -1,5 +1,8 @@
 # Plan: Minimal Production Engine (Milestone 2)
 
+> **Status:** complete
+> **Date:** 2026-04-04
+
 **Scope:** `packages/engine/` — the `@opensync/engine` npm package.
 **Spec authority:** `specs/sync-engine.md`, `specs/database.md`, `specs/config.md`,
 `specs/identity.md`, `specs/safety.md`, `specs/auth.md`, `specs/observability.md`,

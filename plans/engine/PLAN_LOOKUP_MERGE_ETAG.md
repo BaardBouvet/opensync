@@ -1,8 +1,8 @@
 # Plan: Engine-Side Lookup-Merge and ETag Threading
 
-**Status:** `backlog`
-**Date:** 2026-04-04
-**Spec:** [specs/sync-engine.md](../../specs/sync-engine.md) · [specs/safety.md](../../specs/safety.md)
+> **Status:** backlog
+> **Date:** 2026-04-04
+> **Spec:** [specs/sync-engine.md](../../specs/sync-engine.md) · [specs/safety.md](../../specs/safety.md)
 
 ## Problem
 

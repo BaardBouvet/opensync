@@ -1,8 +1,8 @@
 # Plan: Batch Actions & Action Idempotency
 
-**Status:** `backlog`
-**Date:** 2026-04-04
-**Spec:** [specs/actions.md](../../specs/actions.md)
+> **Status:** backlog
+> **Date:** 2026-04-04
+> **Spec:** [specs/actions.md](../../specs/actions.md)
 
 ## Goal
 

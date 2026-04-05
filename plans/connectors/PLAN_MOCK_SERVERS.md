@@ -1,7 +1,8 @@
 # PLAN — Mock System Servers
 
-> Status: done
-> Relevant milestone: Milestone 1 (connector tests), Milestone 2 (integration tests)
+> **Status:** done
+> **Date:** 2026-04-04
+> **Relevant milestone:** Milestone 1 (connector tests), Milestone 2 (integration tests)
 
 ---
 

@@ -1,5 +1,8 @@
 # OSI-Mapping Primitive Coverage
 
+> **Status:** reference
+> **Date:** 2026-04-03
+
 This spec catalogs every primitive from the [OSI-mapping schema](https://github.com/BaardBouvet/OSI-mapping) and assesses whether OpenSync has the architectural foundation to support it. The goal is not to implement them today, but to validate that nothing in the current design forecloses any primitive, and to record where gaps exist.
 
 OSI-mapping is a declarative schema for defining how fields from multiple source systems map to a shared target model, including conflict resolution, entity linking, FK resolution, nested structures, and change detection. OpenSync wants to support all of these primitives.

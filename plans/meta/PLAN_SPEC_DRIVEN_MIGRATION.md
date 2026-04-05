@@ -1,6 +1,7 @@
 # Spec-Driven Development: Migration Plan
 
-**Status:** `complete — historical`
+> **Status:** complete — historical
+> **Date:** 2026-04-04
 
 > Based on analysis of https://github.com/grove/pg-trickle — a project built
 > entirely through spec-driven agent development. Sections marked **[pg-trickle]**

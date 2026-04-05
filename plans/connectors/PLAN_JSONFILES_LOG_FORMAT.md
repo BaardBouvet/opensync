@@ -1,7 +1,9 @@
 # PLAN: jsonfiles Immutable Log Format
 
-**Status:** complete  
-**Domain:** dev/connectors/jsonfiles  
+> **Status:** complete
+> **Date:** 2026-04-05
+> **Domain:** dev/connectors/jsonfiles
+
 **Spec changes planned:** none — jsonfiles is a dev/testing fixture; its format is defined by
 code comments in `dev/connectors/jsonfiles/src/index.ts`, not in `specs/`.
 
