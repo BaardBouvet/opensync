@@ -35,6 +35,9 @@ import {
   dbLogSyncRun,
   dbGetChannelStatus,
   dbSetChannelReady,
+  dbInsertDeferred,
+  dbGetDeferred,
+  dbRemoveDeferred,
 } from "./db/queries.js";
 import { applyMapping } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
@@ -307,6 +310,41 @@ export class SyncEngine {
         ingestTs,
       );
 
+      // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.3
+      // Retry any previously-deferred records via lookup() so associations that
+      // couldn't be remapped at fan-out time are propagated once the identity
+      // link is established (typically the cycle after onboard).
+      const deferred = dbGetDeferred(this.db, connectorId, sourceMember.entity);
+      if (deferred.length > 0) {
+        const sourceEntityDef = source.entities.find((e) => e.name === sourceMember.entity);
+        if (sourceEntityDef?.lookup) {
+          const uniqueIds = [...new Set(deferred.map((d) => d.source_external_id))];
+          const alreadyProcessed = new Set(allRecords.map((r) => r.id));
+          const idsToLookup = uniqueIds.filter((id) => !alreadyProcessed.has(id));
+          if (idsToLookup.length > 0) {
+            const lookedUp = await sourceEntityDef.lookup(idsToLookup, source.ctx);
+            if (lookedUp.length > 0) {
+              // Pass the looked-up IDs as skipEchoFor so echo detection is bypassed for
+              // records whose source shadow was already written on the first deferred pass.
+              const retryIds = new Set(lookedUp.map((r) => r.id));
+              const retryResults = await this._processRecords(
+                channelId, sourceMember, lookedUp, batchId, ingestTs, retryIds,
+              );
+              results.push(...retryResults);
+            }
+            // Records that lookup returned nothing for → remove deferred rows (source deleted)
+            const returnedIds = new Set(lookedUp.map((r) => r.id));
+            for (const id of idsToLookup) {
+              if (!returnedIds.has(id)) {
+                for (const row of deferred.filter((d) => d.source_external_id === id)) {
+                  dbRemoveDeferred(this.db, connectorId, sourceMember.entity, id, row.target_connector);
+                }
+              }
+            }
+          }
+        }
+      }
+
       if (newWatermark && !opts?.fullSync) {
         dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
       }
@@ -481,6 +519,21 @@ export class SyncEngine {
     // The Gap 8 fix routes through a dedicated propagation path that checks the circuit
     // breaker and logs to transaction_log, but does not re-diff (which would skip).
     const batchId = crypto.randomUUID();
+
+    // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.2
+    // For each unique source record, look up its full data (incl. associations) once per
+    // connector so we can attempt remap and write deferred rows where remap fails.
+    const sourceAssocCache = new Map<string, Association[] | undefined>();
+    for (const unique of report.uniquePerSide) {
+      const sourceWired = this.wired.get(unique.connectorId);
+      const sourceEntityDef = sourceWired?.entities.find((e) => e.name === report.entity);
+      if (sourceEntityDef?.lookup && !sourceAssocCache.has(unique.externalId)) {
+        const records = await sourceEntityDef.lookup([unique.externalId], sourceWired!.ctx);
+        const rec = records.find((r) => r.id === unique.externalId);
+        sourceAssocCache.set(unique.externalId, rec?.associations);
+      }
+    }
+
     for (const unique of report.uniquePerSide) {
       const sourceCanonId = dbGetCanonicalId(this.db, unique.connectorId, unique.externalId);
       if (!sourceCanonId) continue;
@@ -500,8 +553,18 @@ export class SyncEngine {
         // Gap 8: circuit breaker pre-flight
         if (breaker.evaluate() === "OPEN") break;
 
+        // Attempt to remap associations before inserting so we can include them
+        const sourceAssoc = sourceAssocCache.get(unique.externalId);
+        const remappedAssoc = sourceAssoc?.length
+          ? this._remapAssociations(sourceAssoc, unique.connectorId, targetMember.connectorId)
+          : [];
+
+        const assocToInsert = (remappedAssoc !== null && !("error" in remappedAssoc) && remappedAssoc.length > 0)
+          ? remappedAssoc
+          : undefined;
+
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData, associations: assocToInsert }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -509,7 +572,10 @@ export class SyncEngine {
         }
 
         if (newId) {
-          const fd = buildFieldData(undefined, unique.rawData, targetMember.connectorId, ts, undefined);
+          const remappedSentinel = assocToInsert?.length
+            ? JSON.stringify([...assocToInsert].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+            : undefined;
+          const fd = buildFieldData(undefined, unique.rawData, targetMember.connectorId, ts, remappedSentinel);
           this.db.transaction(() => {
             dbLinkIdentity(this.db, sourceCanonId, targetMember.connectorId, newId!);
             dbSetShadow(this.db, targetMember.connectorId, targetMember.entity, newId!, sourceCanonId, fd);
@@ -524,6 +590,12 @@ export class SyncEngine {
               dataBefore: undefined,
               dataAfter: fd,
             });
+            // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.2
+            // If remap returned null (identity link missing), write a deferred row so
+            // the retry loop picks it up on the next ingest cycle.
+            if (remappedAssoc === null) {
+              dbInsertDeferred(this.db, unique.connectorId, report.entity, unique.externalId, targetMember.connectorId);
+            }
           })();
           uniqueQueued++;
           breaker.recordResult(false);
@@ -746,7 +818,54 @@ export class SyncEngine {
     return this._getOrCreateCanonical(connectorId, externalId);
   }
 
+  // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md — translate entity name from source
+  // connector namespace to target connector namespace when remapping associations.
+  // Finds the channel that has fromConnectorId with entity `entityName`, then returns the
+  // entity name used by toConnectorId in that same channel. Returns entityName unchanged
+  // when no translation is found (safe fallback).
+  // Spec: plans/engine/PLAN_EAGER_ASSOCIATION_MODE.md §3.2
+  // Like _remapAssociations but never returns null. Entries whose target is not yet in the
+  // identity map are silently dropped rather than blocking the whole record. Returns { error }
+  // only for unknown targetEntity — that is always a config mistake, not a timing issue.
+  private _remapAssociationsPartial(
+    associations: Association[] | undefined,
+    fromId: string,
+    toId: string,
+  ): Association[] | { error: string } {
+    if (!associations?.length) return [];
+    const deduped = new Map<string, Association>();
+    for (const a of associations) deduped.set(a.predicate, a);
+    const out: Association[] = [];
+    for (const assoc of deduped.values()) {
+      if (!assoc.targetId) { out.push({ ...assoc }); continue; }
+      if (!this._entityKnownInShadow(assoc.targetEntity)) return { error: `Unknown targetEntity "${assoc.targetEntity}"` };
+      const canonId = dbGetCanonicalId(this.db, fromId, assoc.targetId);
+      if (!canonId) continue; // not yet in identity map — drop for now, deferred row handles the update
+      const mapped = dbGetExternalId(this.db, canonId, toId);
+      if (mapped === undefined) continue; // not yet in target — drop
+      const translatedEntity = this._translateTargetEntity(assoc.targetEntity, fromId, toId);
+      out.push({ ...assoc, targetEntity: translatedEntity, targetId: mapped });
+    }
+    return out;
+  }
+
+  private _translateTargetEntity(entityName: string, fromConnectorId: string, toConnectorId: string): string {
+    for (const ch of this.channels.values()) {
+      const fromMember = ch.members.find((m) => m.connectorId === fromConnectorId && m.entity === entityName);
+      if (!fromMember) continue;
+      const toMember = ch.members.find((m) => m.connectorId === toConnectorId);
+      if (toMember) return toMember.entity;
+    }
+    return entityName;
+  }
+
   private _entityKnownInShadow(entityName: string): boolean {
+    // Accept entities configured in any channel even if not yet ingested (shadow empty).
+    // This prevents _remapAssociations from returning { error } for valid-but-not-yet-synced
+    // entities, which would suppress the deferred-association write.
+    for (const ch of this.channels.values()) {
+      if (ch.members.some((m) => m.entity === entityName)) return true;
+    }
     const row = this.db.prepare<{ n: number }>(
       "SELECT COUNT(*) as n FROM shadow_state WHERE entity_name = ?",
     ).get(entityName);
@@ -769,7 +888,8 @@ export class SyncEngine {
       if (!canonId) return null;
       const mapped = dbGetExternalId(this.db, canonId, toId);
       if (mapped === undefined) return null;
-      out.push({ ...assoc, targetId: mapped });
+      const translatedEntity = this._translateTargetEntity(assoc.targetEntity, fromId, toId);
+      out.push({ ...assoc, targetEntity: translatedEntity, targetId: mapped });
     }
     return out;
   }
@@ -886,6 +1006,9 @@ export class SyncEngine {
     records: ReadRecord[],
     batchId: string,
     ingestTs: number,
+    // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md — bypass echo detection when retrying
+    // deferred records whose source shadow was already written on the first (deferred) pass.
+    skipEchoFor?: Set<string>,
   ): Promise<RecordSyncResult[]> {
     const channel = this.channels.get(channelId)!;
     const breaker = this._breaker(channelId);
@@ -919,7 +1042,10 @@ export class SyncEngine {
       const isResurrection = shadowRow?.deletedAt != null;
 
       // Echo detection (Spec: specs/safety.md § Echo Prevention)
-      if (!isResurrection && existingShadow !== undefined) {
+      // Bypassed for records being retried from deferred_associations: their source shadow
+      // was already written on the first (deferred) pass, so the shadow matches even though
+      // no target ever received the data.
+      if (!isResurrection && existingShadow !== undefined && !skipEchoFor?.has(record.id)) {
         const same = this._shadowMatchesIncoming(existingShadow, canonical, assocSentinel);
         if (same) {
           results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: "", targetId: record.id });
@@ -931,20 +1057,34 @@ export class SyncEngine {
 
       type Outcome = { result: RecordSyncResult; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
       const outcomes: Outcome[] = [];
+      let droppedAssociation = false; // Spec: PLAN_EAGER_ASSOCIATION_MODE.md §3.4
+      const deferredTargets = new Set<string>(); // targets where a deferred row was just written
 
       for (const targetMember of targets) {
         const tw = this.wired.get(targetMember.connectorId);
         if (!tw) continue;
 
-        const remap = this._remapAssociations(record.associations, sourceMember.connectorId, targetMember.connectorId);
+        let remap = this._remapAssociations(record.associations, sourceMember.connectorId, targetMember.connectorId);
         if (remap !== null && "error" in remap) {
           results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: remap.error });
           hadErrors = true;
           continue;
         }
         if (remap === null) {
-          results.push({ entity: sourceMember.entity, action: "defer", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "" });
-          continue;
+          // Spec: plans/engine/PLAN_EAGER_ASSOCIATION_MODE.md §3.3
+          // Write deferred row so the retry loop can issue an update once the link exists.
+          dbInsertDeferred(this.db, sourceMember.connectorId, sourceMember.entity, record.id, targetMember.connectorId);
+          droppedAssociation = true;
+          deferredTargets.add(targetMember.connectorId);
+          // Fall through with partial remap — dispatch the record without the unresolvable
+          // association. The deferred retry will add it once the identity link is established.
+          const partial = this._remapAssociationsPartial(record.associations, sourceMember.connectorId, targetMember.connectorId);
+          if ("error" in partial) {
+            results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: partial.error });
+            hadErrors = true;
+            continue;
+          }
+          remap = partial;
         }
 
         const existingTargetId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
@@ -988,14 +1128,26 @@ export class SyncEngine {
         });
       }
 
-      // Atomic commit: source shadow + all target shadows + identity links + tx_log + watermark
+      // Atomic commit: source shadow + all target shadows + identity links + tx_log
+      // + clear any deferred rows that were resolved in this pass.
+      // Spec: PLAN_EAGER_ASSOCIATION_MODE.md §3.4 — when associations were partially dropped,
+      // write source shadow WITHOUT the assoc sentinel so echo detection doesn't suppress the
+      // deferred-retry update (which needs to see the association as "new" from the shadow's
+      // perspective).
+      const srcAssocSentinel = droppedAssociation ? undefined : assocSentinel;
       this.db.transaction(() => {
-        const srcFd = buildFieldData(existingShadow, canonical, sourceMember.connectorId, ingestTs, assocSentinel);
+        const srcFd = buildFieldData(existingShadow, canonical, sourceMember.connectorId, ingestTs, srcAssocSentinel);
         dbSetShadow(this.db, sourceMember.connectorId, sourceMember.entity, record.id, canonId, srcFd);
         for (const o of outcomes) {
           if (o.shadowData.action === "insert") dbLinkIdentity(this.db, o.shadowData.canonId, o.shadowData.connectorId, o.shadowData.externalId);
           dbSetShadow(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.externalId, o.shadowData.canonId, o.shadowData.fd);
           dbLogTransaction(this.db, o.txEntry);
+          // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.4
+          // Only clear a deferred row if no new one was just written for this (record, target)
+          // pair in this pass (eager dispatch writes deferred row and should not clear it).
+          if (!deferredTargets.has(o.shadowData.connectorId)) {
+            dbRemoveDeferred(this.db, sourceMember.connectorId, sourceMember.entity, record.id, o.shadowData.connectorId);
+          }
         }
       })();
 

@@ -904,3 +904,642 @@ describe("T30: second poll with unchanged association → noop suppressed", () =
   });
 });
 
+// ─── T31–T34: Deferred association retry ─────────────────────────────────────
+// Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md
+//
+// When _remapAssociations returns null (target entity not yet in identity map),
+// the engine must persist a deferred_associations row and retry via lookup() on
+// subsequent ingest calls so the association is not permanently lost once the
+// watermark advances.
+
+describe("T31: deferred association persisted and retried on next ingest", () => {
+  it("resolves Carol's company association on the next ingest after companies are linked", async () => {
+    const dirA = makeTempDir(); // system-a: contacts + companies
+    const dirB = makeTempDir(); // system-b: employees + accounts
+
+    // system-a: three contacts, three companies (including Initech)
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c3", data: { name: "Carol", email: "carol@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co3" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+      { id: "co3", data: { name: "Initech", domain: "initech.com" }, updated: 1 },
+    ]);
+
+    // system-b: one contact (Alice), one account (Acme) — NO Initech, NO Carol
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id,
+      connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const iA = makeInst("system-a", dirA, ["contacts", "companies"]);
+    const iB = makeInst("system-b", dirB, ["contacts", "accounts"]);
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [iA, iB],
+      channels: [
+        { id: "companies", members: [
+            { connectorId: "system-a", entity: "companies" },
+            { connectorId: "system-b", entity: "accounts" },
+          ], identityFields: ["domain"] },
+        { id: "contacts", members: [
+            { connectorId: "system-a", entity: "contacts" },
+            { connectorId: "system-b", entity: "contacts" },
+          ], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard contacts first — Initech not yet in identity map, Carol's association deferred
+    await engine.ingest("contacts", "system-a", { collectOnly: true });
+    await engine.ingest("contacts", "system-b", { collectOnly: true });
+    const contactsReport = await engine.discover("contacts");
+    await engine.onboard("contacts", contactsReport);
+
+    // Onboard companies — Initech identity link now established
+    await engine.ingest("companies", "system-a", { collectOnly: true });
+    await engine.ingest("companies", "system-b", { collectOnly: true });
+    const companiesReport = await engine.discover("companies");
+    await engine.onboard("companies", companiesReport);
+
+    // First incremental: Carol's watermark is "1", updated=1 → not returned by connector.
+    // But Carol's companyId→co3 association was deferred during onboard.
+    // The retry should call lookup("c3") and propagate the association.
+    const result = await engine.ingest("contacts", "system-a");
+    const carolUpdate = result.records.find(
+      (r) => r.action === "update" && r.targetConnectorId === "system-b",
+    );
+    expect(carolUpdate).toBeDefined();
+
+    // Carol's entry in system-b should now have a companyId association pointing to Initech
+    const bContacts = JSON.parse(
+      (await import("node:fs")).readFileSync(join(dirB, "contacts.json"), "utf8"),
+    ) as Array<{ id: string; data: { email: string }; associations?: unknown[] }>;
+    const carol = bContacts.find((r) => r.data.email === "carol@example.com");
+    expect(carol).toBeDefined();
+    expect(carol!.associations).toBeDefined();
+    expect((carol!.associations ?? []).length).toBeGreaterThan(0);
+  });
+});
+
+describe("T32: deferred row removed after successful retry", () => {
+  it("removes the deferred_associations row once the association is propagated", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+      { id: "co2", data: { name: "Initech", domain: "initech.com" }, updated: 1 },
+    ]);
+    // sb has Acme but not Initech; contacts has no one matching Alice so she is unique
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Bob", email: "bob@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard contacts first — Initech not yet in identity map, Alice's association deferred
+    await engine.ingest("contacts", "sa", { collectOnly: true });
+    await engine.ingest("contacts", "sb", { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Onboard companies — establishes Initech identity link
+    await engine.ingest("companies", "sa", { collectOnly: true });
+    await engine.ingest("companies", "sb", { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // After onboard, deferred row should exist for Alice's companyId
+    const deferredBefore = db.prepare("SELECT COUNT(*) as n FROM deferred_associations").get() as { n: number };
+    expect(deferredBefore.n).toBeGreaterThan(0);
+
+    // Retry: should propagate and clear the row
+    await engine.ingest("contacts", "sa");
+    const deferredAfter = db.prepare("SELECT COUNT(*) as n FROM deferred_associations").get() as { n: number };
+    expect(deferredAfter.n).toBe(0);
+  });
+});
+
+describe("T33: deferred row retained when source record deleted before retry", () => {
+  it("removes the deferred row (nothing to propagate) when lookup returns empty", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+      { id: "co2", data: { name: "Initech", domain: "initech.com" }, updated: 1 },
+    ]);
+    // sb has Bob and Acme, not Alice and not Initech — Alice is unique, her company deferred
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Bob", email: "bob@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard contacts first — Initech not yet in identity map, Alice's association deferred
+    await engine.ingest("contacts", "sa", { collectOnly: true });
+    await engine.ingest("contacts", "sb", { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Onboard companies — establishes Initech identity link
+    await engine.ingest("companies", "sa", { collectOnly: true });
+    await engine.ingest("companies", "sb", { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // Delete Alice from source before retry
+    writeJson(join(dirA, "contacts.json"), []);
+
+    // Retry: lookup returns nothing → row should be removed (no point retrying)
+    await engine.ingest("contacts", "sa");
+    const deferredAfter = db.prepare("SELECT COUNT(*) as n FROM deferred_associations").get() as { n: number };
+    expect(deferredAfter.n).toBe(0);
+  });
+});
+
+// ─── T34–T35: Association remap correctness ───────────────────────────────────
+// Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md
+
+describe("T34: deferred retry updates association for record inserted without it on first pass (echo bypass)", () => {
+  it("issues an update with the association on retry even though the source shadow was already written", async () => {
+    // Scenario: Dave is added to sa.contacts AFTER onboarding is complete. His company
+    // (Globex/co2) is also new — not yet synced to sb. On the first ingest Dave is returned
+    // by read(), all targets are deferred, and the source shadow is written (with assoc
+    // sentinel). After companies are synced the watermark has already passed Dave so the
+    // retry loop must bypass echo detection, otherwise the matching source shadow causes
+    // a SKIP and the association is never propagated.
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Full onboard — Alice/Acme linked across both systems
+    for (const ch of ["companies", "contacts"]) {
+      await engine.ingest(ch, "sa", { collectOnly: true });
+      await engine.ingest(ch, "sb", { collectOnly: true });
+      await engine.onboard(ch, await engine.discover(ch));
+    }
+
+    // Add Dave to sa + Globex company — but only ingest contacts first (Globex not yet synced)
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 2,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme",   domain: "acme.com"   }, updated: 1 },
+      { id: "co2", data: { name: "Globex", domain: "globex.com" }, updated: 2 },
+    ]);
+
+    // Ingest contacts: Dave returned. co2 not yet linked → eager: Dave inserted WITHOUT
+    // the companyId association; source shadow written WITHOUT assoc sentinel;
+    // deferred row written for the retry update.
+    const firstPass = await engine.ingest("contacts", "sa");
+    const daveInsert = firstPass.records.find(
+      (r) => r.action === "insert" && r.sourceId === "c2" && r.targetConnectorId === "sb",
+    );
+    expect(daveInsert).toBeDefined();
+
+    const deferredAfterFirst = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations WHERE source_external_id = 'c2'",
+    ).get() as { n: number };
+    expect(deferredAfterFirst.n).toBeGreaterThan(0);
+
+    // Sync companies: co2/Globex → sb creates acc_new, identity link established
+    await engine.ingest("companies", "sa");
+
+    // Second contacts ingest: c2 NOT in regular read (watermark already at "2").
+    // Retry loop must bypass echo detection and dispatch the association.
+    const secondPass = await engine.ingest("contacts", "sa");
+    const daveUpdate = secondPass.records.find(
+      (r) => (r.action === "insert" || r.action === "update") && r.targetConnectorId === "sb",
+    );
+    expect(daveUpdate).toBeDefined();
+
+    const deferredAfterRetry = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations WHERE source_external_id = 'c2'",
+    ).get() as { n: number };
+    expect(deferredAfterRetry.n).toBe(0);
+  });
+});
+
+describe("T35: targetEntity is translated to the target connector's entity name on remap", () => {
+  it("stores 'accounts' (not 'companies') as targetEntity in the ERP employee insert", async () => {
+    // When crm/contacts has associations pointing at crm/companies, and those are synced
+    // to erp/employees, the stored association's targetEntity must become 'accounts'
+    // (the erp-side entity name in the companies channel) — not 'companies'.
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e_dummy", data: { name: "Other Person", email: "other@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard companies first (Acme/co1 ↔ acc1 linked), then contacts.
+    // Alice is unique to sa and will be inserted into sb during contacts onboard.
+    for (const ch of ["companies", "contacts"]) {
+      await engine.ingest(ch, "sa", { collectOnly: true });
+      await engine.ingest(ch, "sb", { collectOnly: true });
+      await engine.onboard(ch, await engine.discover(ch));
+    }
+
+    // Alice should now exist in sb/contacts with her association remapped.
+    const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
+      id: string;
+      data: { email: string };
+      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+    }>;
+    const alice = sbContacts.find((r) => r.data.email === "alice@example.com");
+    expect(alice).toBeDefined();
+    expect(alice!.associations).toBeDefined();
+    expect(alice!.associations!.length).toBeGreaterThan(0);
+    // targetEntity must be the sb-side entity name ("accounts"), not the sa-side name ("companies")
+    expect(alice!.associations![0].targetEntity).toBe("accounts");
+    // targetId must be the sb-side ID (acc1)
+    expect(alice!.associations![0].targetId).toBe("acc1");
+  });
+});
+
+// ─── T36–T38: Eager association dispatch (default behaviour change) ────────────
+// Spec: plans/engine/PLAN_EAGER_ASSOCIATION_MODE.md
+//
+// When _remapAssociations returns null (association target not yet cross-linked),
+// the engine must insert/update the record immediately with the resolvable associations
+// only, and write a deferred row so the retry loop adds the missing association once
+// the identity link is established. No record is ever withheld.
+
+describe("T36: record with unresolvable association is inserted immediately without it", () => {
+  it("inserts the contact into sb on the first pass, without the company association", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    // Both systems start with Acme only. Globex exists only in sa.
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 2,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme",   domain: "acme.com"   }, updated: 1 },
+      { id: "co2", data: { name: "Globex", domain: "globex.com" }, updated: 2 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard companies first (Acme linked, Globex unique to sa → inserted into sb)
+    // then contacts (Alice matched, Dave unique to sa)
+    for (const ch of ["companies", "contacts"]) {
+      await engine.ingest(ch, "sa", { collectOnly: true });
+      await engine.ingest(ch, "sb", { collectOnly: true });
+      await engine.onboard(ch, await engine.discover(ch));
+    }
+
+    // Now add a new contact Eve pointing at Globex (co2), which IS linked (inserted during
+    // onboard above). This should just work — but let's use a contact pointing at a truly
+    // new company (co3/Hooli) that hasn't been synced yet to test eager dispatch.
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme",   domain: "acme.com"   }, updated: 1 },
+      { id: "co2", data: { name: "Globex", domain: "globex.com" }, updated: 1 },
+      { id: "co3", data: { name: "Hooli",  domain: "hooli.com"  }, updated: 3 },
+    ]);
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c3", data: { name: "Eve", email: "eve@example.com" }, updated: 3,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co3" }] },
+    ]);
+
+    // Ingest contacts only — Hooli (co3) has never been ingested into companies channel.
+    // Eve should be INSERTED into sb immediately (eager), without the companyId association.
+    const result = await engine.ingest("contacts", "sa");
+    const eveInsert = result.records.find(
+      (r) => r.action === "insert" && r.targetConnectorId === "sb",
+    );
+    expect(eveInsert).toBeDefined();
+
+    // A deferred row must exist so the retry loop will add the association later.
+    const deferred = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations WHERE source_external_id = 'c3'",
+    ).get() as { n: number };
+    expect(deferred.n).toBeGreaterThan(0);
+
+    // Eve exists in sb but without the companyId association.
+    const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
+      data: { email: string }; associations?: unknown[];
+    }>;
+    const eve = sbContacts.find((r) => r.data.email === "eve@example.com");
+    expect(eve).toBeDefined();
+    expect((eve!.associations ?? []).length).toBe(0);
+  });
+});
+
+describe("T37: deferred retry adds the association once the company is synced", () => {
+  it("updates Eve's sb record with the companyId association after Hooli is synced", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Eve", email: "eve@example.com" }, updated: 2,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme",  domain: "acme.com"  }, updated: 1 },
+      { id: "co2", data: { name: "Hooli", domain: "hooli.com" }, updated: 2 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Other", email: "other@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
+      channels: [
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard contacts before companies → Eve inserted without her companyId association
+    await engine.ingest("contacts", "sa", { collectOnly: true });
+    await engine.ingest("contacts", "sb", { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+    await engine.ingest("companies", "sa", { collectOnly: true });
+    await engine.ingest("companies", "sb", { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // Hooli now linked. Next contacts ingest should retry c1 and issue an update.
+    const retry = await engine.ingest("contacts", "sa");
+    const eveUpdate = retry.records.find(
+      (r) => r.action === "update" && r.targetConnectorId === "sb",
+    );
+    expect(eveUpdate).toBeDefined();
+
+    // Deferred row cleared.
+    const deferred = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations WHERE source_external_id = 'c1'",
+    ).get() as { n: number };
+    expect(deferred.n).toBe(0);
+
+    // Eve's sb record now has the companyId association pointing at the Hooli account.
+    const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
+      data: { email: string };
+      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+    }>;
+    const eve = sbContacts.find((r) => r.data.email === "eve@example.com");
+    expect(eve).toBeDefined();
+    expect((eve!.associations ?? []).length).toBeGreaterThan(0);
+  });
+});
+
+describe("T38: mutual reference — no permanent stall, both associations resolve within two passes", () => {
+  it("inserts both mutually-referencing new records eagerly then resolves associations on retry", async () => {
+    // c1 points to c2 and c2 points to c1 — both new incremental records (post-onboard).
+    // With strict mode both would stall forever. With eager, c1 (processed first) is
+    // inserted without its association and gets a deferred row; c2 (processed second,
+    // after c1 is committed) gets the full remap and is inserted WITH its association.
+    // The retry on the next ingest resolves c1's deferred row.
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    // Seed so both systems are cross-linked
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "seed1", data: { name: "Seed", email: "seed@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "seed2", data: { name: "Seed", email: "seed@example.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [makeInst("sa", dirA, ["contacts"]), makeInst("sb", dirB, ["contacts"])],
+      channels: [
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    await engine.ingest("contacts", "sa", { collectOnly: true });
+    await engine.ingest("contacts", "sb", { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Add c1 and c2 referencing each other — both new to sb
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "seed1", data: { name: "Seed", email: "seed@example.com" }, updated: 1 },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 2,
+        associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c2" }] },
+      { id: "c2", data: { name: "Bob", email: "bob@example.com" }, updated: 2,
+        associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c1" }] },
+    ]);
+
+    // First ingest: c1 processed first → partial remap, inserted without assoc, deferred.
+    //              c2 processed second → c1 now committed → full remap, inserted WITH assoc.
+    const firstIngest = await engine.ingest("contacts", "sa");
+    const inserts = firstIngest.records.filter(
+      (r) => r.action === "insert" && r.targetConnectorId === "sb",
+    );
+    expect(inserts.length).toBe(2);
+
+    const deferredAfterFirst = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations",
+    ).get() as { n: number };
+    expect(deferredAfterFirst.n).toBe(1); // c1 deferred; c2 resolved immediately
+
+    // Second ingest: regular read returns nothing new (watermark past c1/c2).
+    // Retry loop looks up c1 → c2 now in sb → update c1 with association.
+    const secondIngest = await engine.ingest("contacts", "sa");
+    const retryUpdate = secondIngest.records.find(
+      (r) => r.action === "update" && r.targetConnectorId === "sb",
+    );
+    expect(retryUpdate).toBeDefined();
+
+    // No permanent stall — all deferred rows cleared in two passes.
+    const deferredAfterRetry = db.prepare(
+      "SELECT COUNT(*) as n FROM deferred_associations",
+    ).get() as { n: number };
+    expect(deferredAfterRetry.n).toBe(0);
+
+    // Both sb contacts now have their managerId association
+    const sbFinal = readJson(join(dirB, "contacts.json")) as Array<{
+      data: { email: string };
+      associations?: Array<{ predicate: string }>;
+    }>;
+    const aliceFinal = sbFinal.find((r) => r.data.email === "alice@example.com");
+    const bobFinal   = sbFinal.find((r) => r.data.email === "bob@example.com");
+    expect((aliceFinal!.associations ?? []).some((a) => a.predicate === "managerId")).toBe(true);
+    expect((bobFinal!.associations   ?? []).some((a) => a.predicate === "managerId")).toBe(true);
+  });
+});
+
+

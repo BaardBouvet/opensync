@@ -482,3 +482,46 @@ export function dbGetRecentCircuitBreakerEvents(
     )
     .all(channelId, since);
 }
+
+// ─── Deferred associations ────────────────────────────────────────────────────
+// Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.1
+
+export function dbInsertDeferred(
+  db: Db,
+  sourceConnector: string,
+  entityName: string,
+  sourceExternalId: string,
+  targetConnector: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO deferred_associations
+       (source_connector, entity_name, source_external_id, target_connector, deferred_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(sourceConnector, entityName, sourceExternalId, targetConnector, Date.now());
+}
+
+export function dbGetDeferred(
+  db: Db,
+  sourceConnector: string,
+  entityName: string,
+): Array<{ source_external_id: string; target_connector: string }> {
+  return db
+    .prepare<{ source_external_id: string; target_connector: string }>(
+      `SELECT source_external_id, target_connector FROM deferred_associations
+       WHERE source_connector = ? AND entity_name = ?`,
+    )
+    .all(sourceConnector, entityName);
+}
+
+export function dbRemoveDeferred(
+  db: Db,
+  sourceConnector: string,
+  entityName: string,
+  sourceExternalId: string,
+  targetConnector: string,
+): void {
+  db.prepare(
+    `DELETE FROM deferred_associations
+     WHERE source_connector = ? AND entity_name = ? AND source_external_id = ? AND target_connector = ?`,
+  ).run(sourceConnector, entityName, sourceExternalId, targetConnector);
+}
