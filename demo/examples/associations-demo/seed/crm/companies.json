@@ -1,0 +1,26 @@
+[
+  {
+    "id": "co1",
+    "data": {
+      "name": "Acme Corp",
+      "domain": "acme.com"
+    },
+    "updated": 1
+  },
+  {
+    "id": "co2",
+    "data": {
+      "name": "Globex Inc",
+      "domain": "globex.com"
+    },
+    "updated": 1
+  },
+  {
+    "id": "co3",
+    "data": {
+      "name": "Initech",
+      "domain": "initech.com"
+    },
+    "updated": 1
+  }
+]

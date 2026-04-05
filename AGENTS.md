@@ -56,6 +56,10 @@ bun test packages/sdk/
 - When a plan is completed, update its `Status:` line to `complete` in the plan file itself
 - Also update the row in `plans/INDEX.md` with the new status
 - If the plan has a corresponding row in `ROADMAP.md`, mark it `done` there too
+- Every implementation plan must include a **"Spec changes planned"** section listing each
+  spec file and section that will be added or modified. If no spec changes are needed,
+  state that explicitly. No production code may be written for a feature whose spec changes
+  are not listed in the plan.
 
 **Changelog discipline:**
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed

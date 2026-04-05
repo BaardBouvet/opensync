@@ -1,0 +1,31 @@
+{
+  "connectors": {
+    "crm": {
+      "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "demo/data/associations-demo/crm/companies.json",
+          "demo/data/associations-demo/crm/contacts.json"
+        ]
+      }
+    },
+    "erp": {
+      "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "demo/data/associations-demo/erp/accounts.json",
+          "demo/data/associations-demo/erp/employees.json"
+        ]
+      }
+    },
+    "hr": {
+      "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
+      "config": {
+        "filePaths": [
+          "demo/data/associations-demo/hr/orgs.json",
+          "demo/data/associations-demo/hr/people.json"
+        ]
+      }
+    }
+  }
+}

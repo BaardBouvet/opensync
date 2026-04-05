@@ -88,22 +88,22 @@ function makeConfig(
 
 function seedAB(dirA: string, dirB: string): void {
   writeJson(join(dirA, "contacts.json"), [
-    { _id: "a1", name: "Alice Liddell", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "a2", name: "Bob Martin",    email: "bob@example.com",   _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "a3", name: "Carol White",   email: "carol@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
+    { id: "a1", data: { name: "Alice Liddell", email: "alice@example.com" } },
+    { id: "a2", data: { name: "Bob Martin",    email: "bob@example.com"   } },
+    { id: "a3", data: { name: "Carol White",   email: "carol@example.com" } },
   ]);
   writeJson(join(dirB, "contacts.json"), [
-    { _id: "b1", name: "Alice Liddell", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "b2", name: "Bob Martin",    email: "bob@example.com",   _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "b3", name: "Carol White",   email: "carol@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
+    { id: "b1", data: { name: "Alice Liddell", email: "alice@example.com" } },
+    { id: "b2", data: { name: "Bob Martin",    email: "bob@example.com"   } },
+    { id: "b3", data: { name: "Carol White",   email: "carol@example.com" } },
   ]);
 }
 
 function seedC(dirC: string): void {
   writeJson(join(dirC, "contacts.json"), [
-    { _id: "c1", name: "Alice Liddell", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "c2", name: "Bob Martin",    email: "bob@example.com",   _updatedAt: "2025-01-01T00:00:00.000Z" },
-    { _id: "c3", name: "Dave Spencer",  email: "dave@example.com",  _updatedAt: "2025-01-01T00:00:00.000Z" },
+    { id: "c1", data: { name: "Alice Liddell", email: "alice@example.com" } },
+    { id: "c2", data: { name: "Bob Martin",    email: "bob@example.com"   } },
+    { id: "c3", data: { name: "Dave Spencer",  email: "dave@example.com"  } },
   ]);
 }
 
@@ -190,7 +190,7 @@ describe("T10: collectOnly — shadow_state written, no fan-out", () => {
     await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
 
     // B's file is untouched — no records from A should appear
-    const bIds = (readJson(join(dirB, "contacts.json")) as Array<{ _id: string }>).map(r => r._id);
+    const bIds = (readJson(join(dirB, "contacts.json")) as Array<{ id: string }>).map(r => r.id);
     expect(bIds).toEqual(["b1", "b2", "b3"]);
     expect(bIds).not.toContain("a1");
   });
@@ -308,10 +308,10 @@ describe("T15: discover normalises identity fields (case-insensitive)", () => {
     const dirA = makeTempDir(); const dirB = makeTempDir();
 
     writeJson(join(dirA, "contacts.json"), [
-      { _id: "a1", name: "Alice", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" } },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { _id: "b1", name: "Alice", email: "ALICE@EXAMPLE.COM", _updatedAt: "2025-01-01T00:00:00.000Z" },
+      { id: "b1", data: { name: "Alice", email: "ALICE@EXAMPLE.COM" } },
     ]);
 
     const { report } = await collectAndDiscoverAB(db, dirA, dirB);
@@ -396,11 +396,11 @@ describe("T19: onboard propagates unique-per-side records to the other connector
     const dirA = makeTempDir(); const dirB = makeTempDir();
 
     writeJson(join(dirA, "contacts.json"), [
-      { _id: "a1", name: "Alice", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
-      { _id: "a2", name: "Carol", email: "carol@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" } },
+      { id: "a2", data: { name: "Carol", email: "carol@example.com" } },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { _id: "b1", name: "Alice", email: "alice@example.com", _updatedAt: "2025-01-01T00:00:00.000Z" },
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" } },
     ]);
 
     const { engine, report } = await collectAndDiscoverAB(db, dirA, dirB);
@@ -411,8 +411,8 @@ describe("T19: onboard propagates unique-per-side records to the other connector
     const result = await engine.onboard("ch", report);
     expect(result.uniqueQueued).toBe(1);
 
-    const bAfter = readJson(join(dirB, "contacts.json")) as Array<{ email: string }>;
-    expect(bAfter.some(r => r.email === "carol@example.com")).toBe(true);
+    const bAfter = readJson(join(dirB, "contacts.json")) as Array<{ data: { email: string } }>;
+    expect(bAfter.some(r => r.data.email === "carol@example.com")).toBe(true);
   });
 });
 
@@ -490,9 +490,9 @@ describe("T22: A+B ingest does not fan-out to collected-but-not-linked C", () =>
 
     // Update Alice in A
     const aContacts = readJson(join(dirA, "contacts.json")) as Array<Record<string, unknown>>;
-    const alice = aContacts.find(r => r["email"] === "alice@example.com")!;
-    alice["name"] = "Alice Updated";
-    alice["_updatedAt"] = new Date().toISOString();
+    const alice = aContacts.find(r => (r["data"] as Record<string, unknown>)?.["email"] === "alice@example.com")!;
+    (alice["data"] as Record<string, unknown>)["name"] = "Alice Updated";
+    alice["updatedAt"] = new Date().toISOString();
     writeJson(join(dirA, "contacts.json"), aContacts);
 
     const ingestResult = await engine3.ingest("ch", "system-a", {
@@ -511,8 +511,8 @@ describe("T22: A+B ingest does not fan-out to collected-but-not-linked C", () =>
 
     // C's file unchanged
     const cAfter = readJson(join(dirC, "contacts.json")) as Array<Record<string, unknown>>;
-    const aliceInC = cAfter.find(r => r["email"] === "alice@example.com");
-    expect(aliceInC?.["name"]).toBe("Alice Liddell");
+    const aliceInC = cAfter.find(r => (r["data"] as Record<string, unknown>)?.["email"] === "alice@example.com");
+    expect((aliceInC?.["data"] as Record<string, unknown> | undefined)?.["name"]).toBe("Alice Liddell");
   });
 });
 
@@ -593,9 +593,9 @@ describe("T24: addConnector merges joiner canonicals and backfills missing recor
     const engine = await onboardABCollectC(db, dirA, dirB, dirC);
     await engine.addConnector("ch", "system-c");
 
-    const cRecords = readJson(join(dirC, "contacts.json")) as Array<{ email: string }>;
+    const cRecords = readJson(join(dirC, "contacts.json")) as Array<{ data: { email: string } }>;
     expect(cRecords.length).toBe(4);
-    expect(cRecords.some(r => r.email === "carol@example.com")).toBe(true);
+    expect(cRecords.some(r => r.data.email === "carol@example.com")).toBe(true);
   });
 });
 

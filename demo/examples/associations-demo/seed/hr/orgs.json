@@ -1,0 +1,12 @@
+[
+  {
+    "id": "org1",
+    "data": { "orgName": "Globex Inc", "site": "globex.com" },
+    "updated": 1
+  },
+  {
+    "id": "org2",
+    "data": { "orgName": "Initech", "site": "initech.com" },
+    "updated": 1
+  }
+]

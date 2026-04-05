@@ -1,14 +1,16 @@
 [
   {
-    "_id": "a1",
-    "name": "Alice Liddell",
-    "email": "alice@example.com",
-    "_updatedAt": "2025-01-01T00:00:00.000Z"
+    "id": "a1",
+    "data": {
+      "name": "Alice Liddell",
+      "email": "alice@example.com"
+    }
   },
   {
-    "_id": "a2",
-    "name": "Bob Martin",
-    "email": "bob@example.com",
-    "_updatedAt": "2025-01-01T00:00:00.000Z"
+    "id": "a2",
+    "data": {
+      "name": "Bob Martin",
+      "email": "bob@example.com"
+    }
   }
 ]

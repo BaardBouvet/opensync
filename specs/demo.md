@@ -85,18 +85,25 @@ The `seed/` directory is copied verbatim to `demo/data/<name>/` on first run (wh
 channels are uninitialized). Once the runner has persisted state to `demo/data/<name>/state.db`,
 seed is not used again until the data directory is deleted.
 
-Seed files must be in the exact format the connector writes. For `connector-jsonfiles`:
+Seed files must be in the exact format the connector writes. For `connector-jsonfiles`, records use a nested envelope serialised with `JSON.stringify(records, null, 2)` — nested objects are fully expanded, never inlined:
 
 ```json
 [
   {
-    "_id": "a1",
-    "name": "Alice Liddell",
-    "email": "alice@example.com",
-    "_updatedAt": "2025-01-01T00:00:00.000Z"
+    "id": "a1",
+    "data": {
+      "name": "Alice Liddell",
+      "email": "alice@example.com"
+    }
   }
 ]
 ```
+
+Fields:
+- `id` — required; unique record identifier within the file.
+- `data` — required; the record payload passed to the engine.
+- `updated` — optional watermark. ISO 8601 timestamp or monotonically-increasing integer. Records without this field are always included in every read, regardless of `since`. Omit it in seed files unless incremental-sync behaviour is specifically being tested.
+- `associations` — optional; pre-declared edges in the SDK `Association` shape.
 
 ### § 2.3 First-run flow
 
@@ -150,6 +157,25 @@ channel with identity field `email`. Requires both mock servers running locally 
 Demonstrates: HTTP connectors, OAuth2 + API key auth, field name divergence (CRM calls
 them "contacts", ERP calls them "employees" — same channel bridges them).
 
+### § 3.4 `associations-demo`
+
+Three `connector-jsonfiles` instances (`crm`, `erp`, `hr`) syncing two channels (`companies`
+and `contacts`) with field renames and associations.
+
+Each connector uses different field names:
+
+| Canonical | crm | erp | hr |
+|-----------|-----|-----|----|
+| `name` (company) | `name` | `accountName` | `orgName` |
+| `domain` | `domain` | `website` | `site` |
+| `name` (contact) | `name` | `fullName` | `displayName` |
+| `companyId` | `companyId` | `orgId` | `orgRef` |
+
+Seed: crm has Acme, Globex, Initech + Alice, Bob, Carol; erp has Acme, Globex + Alice, Bob;
+hr has Globex, Initech + Bob, Carol. Three companies are matched across systems by `domain`;
+three contacts are matched by `email`. Demonstrates the full mapping pipeline in a realistic
+multi-system layout.
+
 ---
 
 ## § 4 Field Mapping Showcase (planned)
@@ -171,7 +197,45 @@ visible before/after data. This is the next example to add after the three curre
 
 ---
 
-## § 5 Runner Architecture
+## § 6 Engine State Inspector
+
+```sh
+bun run demo/inspect.ts -d <example-name> [table...]
+```
+
+`inspect.ts` opens `demo/data/<name>/state.db` and prints selected engine tables to stdout.
+Run it on demand in a second terminal while the demo runner is polling. No flags required on
+the demo runner itself — the two processes are independent.
+
+### § 6.1 Arguments
+
+If no table argument is given, all tables are printed.
+
+| Argument | SQLite table | Rows shown |
+|----------|-------------|------------|
+| `identity` | `identity_map` | All rows, ordered by `canonical_id` |
+| `shadow` | `shadow_state` | All rows, ordered by `connector_id`, `entity_name` |
+| `watermarks` | `watermarks` | All rows — the engine's incremental-sync cursor per connector/entity |
+| `log` | `transaction_log` | Last 40 rows, newest first |
+
+### § 6.2 Examples
+
+```sh
+# All tables for the two-system example
+bun run demo/inspect.ts -d two-system
+
+# Identity map only for associations-demo
+bun run demo/inspect.ts -d associations-demo identity
+
+# Watermarks only, refreshed every 2 s
+watch -n2 bun run demo/inspect.ts -d associations-demo watermarks
+```
+
+`canonical_id` values are shown truncated to 8 characters + `…` for readability.
+
+---
+
+## § 7 Runner Architecture
 
 `demo/run.ts` is a generic runner. It knows nothing about individual examples and contains
 no hardcoded list of example names:
@@ -194,7 +258,7 @@ default).
 
 ---
 
-## § 6 Path Resolution
+## § 8 Path Resolution
 
 Two types of relative paths coexist in example `opensync.json` files and resolve differently:
 
@@ -212,7 +276,7 @@ See `plans/engine/PLAN_CONFIG_VALIDATION.md` for related work.
 
 ---
 
-## § 7 What the Demo Is Not
+## § 9 What the Demo Is Not
 
 - Not a test suite. The demo is not run in CI.
 - Not a benchmark. Performance characteristics are validated in the engine test suite.

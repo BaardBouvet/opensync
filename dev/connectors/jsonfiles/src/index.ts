@@ -19,18 +19,31 @@ import type {
 } from "@opensync/sdk";
 
 // ─── File format ─────────────────────────────────────────────────────────────
-// Each JSON file is a flat array of objects. An id field (configurable via
-// `idField`) must be unique within the file. A watermark field (configurable
-// via `watermarkField`) drives incremental syncs. An optional associations
-// field (configurable via `associationsField`) carries pre-declared edges to
-// other entities in the same shape as the SDK's Association type.
+// Each JSON file is an array of objects with top-level envelope fields:
+//
+//   { id, data, updated?, associations? }
+//
+// `id`           — required; unique record identifier within the file.
+// `data`         — required; the record payload passed to the engine as-is.
+// `updated`      — optional watermark. Can be an ISO 8601 timestamp or a
+//                  monotonically-increasing integer. Records without this field
+//                  are always included in every read regardless of `since`.
+// `associations` — optional; pre-declared edges in the SDK Association shape.
+//
+// Field names are configurable via connector config (idField, dataField,
+// watermarkField, associationsField) but the defaults cover the common case.
 
 interface FileRecord {
+  id?: unknown;
+  data?: Record<string, unknown>;
+  updated?: unknown;
+  associations?: unknown;
   [key: string]: unknown;
 }
 
 interface FieldConfig {
   idField: string;
+  dataField: string;
   watermarkField: string;
   associationsField: string;
 }
@@ -45,16 +58,58 @@ function writeFile(filePath: string, records: FileRecord[]): void {
   writeFileSync(filePath, JSON.stringify(records, null, 2), "utf8");
 }
 
-const DEFAULT_ID_FIELD = "_id";
-const DEFAULT_WATERMARK_FIELD = "_updatedAt";
-const DEFAULT_ASSOCIATIONS_FIELD = "_associations";
+const DEFAULT_ID_FIELD = "id";
+const DEFAULT_DATA_FIELD = "data";
+const DEFAULT_WATERMARK_FIELD = "updated";
+const DEFAULT_ASSOCIATIONS_FIELD = "associations";
 
 function fieldConfig(ctx: ConnectorContext): FieldConfig {
   return {
     idField: (ctx.config["idField"] as string | undefined) ?? DEFAULT_ID_FIELD,
+    dataField: (ctx.config["dataField"] as string | undefined) ?? DEFAULT_DATA_FIELD,
     watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? DEFAULT_WATERMARK_FIELD,
     associationsField: (ctx.config["associationsField"] as string | undefined) ?? DEFAULT_ASSOCIATIONS_FIELD,
   };
+}
+
+// ─── Watermark comparison ─────────────────────────────────────────────────────
+// The engine stores watermarks as opaque strings. The connector receives `since`
+// as a string. File records may carry a string (ISO 8601) or number (integer
+// sequence) in `updatedAt`. We compare by coercing both sides to the same type:
+// if the raw value is a number, parse `since` as a number too; otherwise compare
+// as strings. This lets integer-sequence watermarks work alongside ISO timestamps.
+
+function isNewerThan(raw: unknown, since: string): boolean {
+  if (typeof raw === "number") {
+    const sinceNum = Number(since);
+    return !Number.isNaN(sinceNum) && raw > sinceNum;
+  }
+  if (typeof raw === "string") {
+    return raw > since;
+  }
+  return false; // unknown type → include record (safe default)
+}
+
+// Serialise a watermark value to a string for storage in the engine.
+function watermarkToString(raw: unknown): string | undefined {
+  if (typeof raw === "number") return String(raw);
+  if (typeof raw === "string") return raw;
+  return undefined;
+}
+
+// Compute the next watermark to write for a record being inserted or updated.
+// Mode is detected from the existing file contents:
+//   - If every present watermark value is a number → integer mode: write max + 1.
+//   - Otherwise (strings, mixed, or empty file) → ISO timestamp mode.
+function nextWatermark(existing: FileRecord[], watermarkField: string): string | number {
+  const values = existing
+    .map((r) => r[watermarkField])
+    .filter((v) => v !== undefined && v !== null);
+  if (values.length === 0) return 1; // empty file → start integer sequence at 1
+  if (values.every((v) => typeof v === "number")) {
+    return Math.max(...(values as number[])) + 1;
+  }
+  return new Date().toISOString();
 }
 
 /**
@@ -73,14 +128,11 @@ function parseFilePaths(ctx: ConnectorContext): Array<{ entityName: string; enti
 function makeRecordEntity(
   entityName: string,
   entityFilePath: string,
-  { idField, watermarkField, associationsField }: FieldConfig
+  { idField, dataField, watermarkField, associationsField }: FieldConfig
 ): EntityDefinition {
-  /** Strip the id (and associations, if configured) from a raw file record. */
   function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
-    const data = Object.fromEntries(
-      Object.entries(r).filter(([k]) => k !== idField && k !== associationsField)
-    );
+    const data = (r[dataField] as Record<string, unknown> | undefined) ?? {};
     const record: ReadRecord = { id, data };
     if (Array.isArray(r[associationsField])) {
       record.associations = r[associationsField] as Association[];
@@ -98,8 +150,13 @@ function makeRecordEntity(
         required: true,
         immutable: true,
       },
+      [dataField]: {
+        description: "Record payload. All sync fields live inside this object.",
+        type: "object",
+        required: true,
+      },
       [watermarkField]: {
-        description: "ISO 8601 timestamp of the last modification. Used as the sync watermark.",
+        description: "Sync watermark. ISO 8601 timestamp or monotonically-increasing integer. Optional — records without it are always included.",
         type: "string",
       },
       [associationsField]: {
@@ -111,17 +168,25 @@ function makeRecordEntity(
     async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
       const records = readFile(entityFilePath);
 
+      // Records without a watermark field are always included (treated as "always newer").
+      // Records with a watermark are included only when newer than `since`.
       const filtered = since
-        ? records.filter(
-            (r) =>
-              typeof r[watermarkField] === "string" &&
-              (r[watermarkField] as string) > since
-          )
+        ? records.filter((r) => {
+            const w = r[watermarkField];
+            if (w === undefined || w === null) return true; // no watermark → always include
+            return isNewerThan(w, since);
+          })
         : records;
 
       const maxWatermark = filtered.reduce<string | undefined>((max, r) => {
-        const w = r[watermarkField];
-        return typeof w === "string" && (!max || w > max) ? w : max;
+        const ws = watermarkToString(r[watermarkField]);
+        if (!ws) return max;
+        if (!max) return ws;
+        // Compare in the same domain (numeric if both parse as numbers, else string)
+        const wsNum = Number(ws);
+        const maxNum = Number(max);
+        if (!Number.isNaN(wsNum) && !Number.isNaN(maxNum)) return wsNum > maxNum ? ws : max;
+        return ws > max ? ws : max;
       }, undefined);
 
       yield { records: filtered.map(extractRecord), since: maxWatermark ?? since };
@@ -138,15 +203,15 @@ function makeRecordEntity(
       for await (const record of records) {
         const existing = readFile(entityFilePath);
         const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
-        const now = new Date().toISOString();
+        const wm = nextWatermark(existing, watermarkField);
         const newRecord: FileRecord = {
-          ...record.data,
           [idField]: id,
-          [watermarkField]: now,
+          [dataField]: record.data,
+          [watermarkField]: wm,
           ...(record.associations ? { [associationsField]: record.associations } : {}),
         };
         writeFile(entityFilePath, [...existing, newRecord]);
-        yield { id, data: newRecord as Record<string, unknown> };
+        yield { id, data: record.data };
       }
     },
 
@@ -158,19 +223,19 @@ function makeRecordEntity(
           yield { id: record.id, notFound: true as const };
           continue;
         }
-        const now = new Date().toISOString();
+        const wm = nextWatermark(existing, watermarkField);
+        const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
         const updated: FileRecord = {
           ...existing[idx],
-          ...record.data,
-          [idField]: record.id,
-          [watermarkField]: now,
+          [dataField]: { ...prev, ...record.data },
+          [watermarkField]: wm,
           ...(record.associations !== undefined
             ? { [associationsField]: record.associations }
             : {}),
         };
         existing[idx] = updated;
         writeFile(entityFilePath, existing);
-        yield { id: record.id, data: updated as Record<string, unknown> };
+        yield { id: record.id, data: { ...prev, ...record.data } };
       }
     },
 
@@ -206,19 +271,25 @@ const connector: Connector = {
       },
       idField: {
         type: "string",
-        description: "Field name used as the record identifier.",
+        description: "Top-level field name used as the record identifier.",
         required: false,
         default: DEFAULT_ID_FIELD,
       },
+      dataField: {
+        type: "string",
+        description: "Top-level field name containing the record payload.",
+        required: false,
+        default: DEFAULT_DATA_FIELD,
+      },
       watermarkField: {
         type: "string",
-        description: "Field name used as the incremental sync watermark (ISO 8601 timestamp).",
+        description: "Top-level field name used as the incremental sync watermark (ISO 8601 timestamp or integer sequence).",
         required: false,
         default: DEFAULT_WATERMARK_FIELD,
       },
       associationsField: {
         type: "string",
-        description: "Field name containing pre-declared associations to other entities.",
+        description: "Top-level field name containing pre-declared associations to other entities.",
         required: false,
         default: DEFAULT_ASSOCIATIONS_FIELD,
       },

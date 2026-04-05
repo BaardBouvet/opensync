@@ -18,6 +18,16 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 - `dev/` directory: dev-only packages consolidated under `dev/connectors/` and `dev/servers/`.
   Moved from `connectors/` (jsonfiles, mock-crm, mock-erp) and `servers/` (mock-crm, mock-erp).
   Distributable connectors in `connectors/` now contain only publishable packages.
+- `connector-jsonfiles` nested record format: records now use `{ id, data, updatedAt?, associations? }`
+  envelope instead of flat underscore-prefixed fields (`_id`, `_updatedAt`, `_associations`).
+  `updatedAt` is optional — records without it are always included in every read.
+  Integer sequence watermarks (e.g. `1`, `2`, `3`) are supported alongside ISO 8601 timestamps.
+- `demo/examples/associations-demo`: three-system demo (`crm`, `erp`, `hr`) with two channels
+  (`companies`, `contacts`), field renames across all three connectors, and associations linking
+  contacts to their company. Demonstrates the full mapping pipeline.
+- `demo/inspect.ts`: on-demand engine state inspector. Prints `identity_map`, `shadow_state`,
+  `watermarks`, and `transaction_log` from `demo/data/<name>/state.db` as ASCII tables.
+  Usage: `bun run demo/inspect.ts -d <example-name> [identity|shadow|watermarks|log]`.
   `dev/connectors/jsonfiles/package.json` gains `"private": true`.
 - `ROADMAP.md`: new "Repository hygiene" section tracking meta/infra work.
 - `AGENTS.md`: "Plans discipline" rule — when a plan is completed, update its Status line,

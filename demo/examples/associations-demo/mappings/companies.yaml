@@ -1,0 +1,24 @@
+channels:
+  - id: companies
+    identityFields:
+      - domain
+
+mappings:
+  - connector: crm
+    entity: companies
+    channel: companies
+    fields:
+      - { source: name,   target: name }
+      - { source: domain, target: domain }
+  - connector: erp
+    entity: accounts
+    channel: companies
+    fields:
+      - { source: accountName, target: name }
+      - { source: website,     target: domain }
+  - connector: hr
+    entity: orgs
+    channel: companies
+    fields:
+      - { source: orgName, target: name }
+      - { source: site,    target: domain }

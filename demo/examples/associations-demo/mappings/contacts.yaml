@@ -1,0 +1,27 @@
+channels:
+  - id: contacts
+    identityFields:
+      - email
+
+mappings:
+  - connector: crm
+    entity: contacts
+    channel: contacts
+    fields:
+      - { source: name,      target: name }
+      - { source: email,     target: email }
+      - { source: companyId, target: companyId }
+  - connector: erp
+    entity: employees
+    channel: contacts
+    fields:
+      - { source: fullName, target: name }
+      - { source: email,    target: email }
+      - { source: orgId,    target: companyId }
+  - connector: hr
+    entity: people
+    channel: contacts
+    fields:
+      - { source: displayName, target: name }
+      - { source: email,       target: email }
+      - { source: orgRef,      target: companyId }

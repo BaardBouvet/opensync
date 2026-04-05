@@ -1,0 +1,18 @@
+[
+  {
+    "id": "acc1",
+    "data": {
+      "accountName": "Acme Corp",
+      "website": "acme.com"
+    },
+    "updated": 1
+  },
+  {
+    "id": "acc2",
+    "data": {
+      "accountName": "Globex Inc",
+      "website": "globex.com"
+    },
+    "updated": 1
+  }
+]

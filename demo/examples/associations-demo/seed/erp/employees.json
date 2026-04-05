@@ -1,0 +1,34 @@
+[
+  {
+    "id": "e1",
+    "data": {
+      "fullName": "Alice Liddell",
+      "email": "alice@example.com",
+      "orgId": "acc1"
+    },
+    "updated": 1,
+    "associations": [
+      {
+        "predicate": "orgId",
+        "targetEntity": "accounts",
+        "targetId": "acc1"
+      }
+    ]
+  },
+  {
+    "id": "e2",
+    "data": {
+      "fullName": "Bob Martin",
+      "email": "bob@example.com",
+      "orgId": "acc2"
+    },
+    "updated": 1,
+    "associations": [
+      {
+        "predicate": "orgId",
+        "targetEntity": "accounts",
+        "targetId": "acc2"
+      }
+    ]
+  }
+]

@@ -44,3 +44,4 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_SPEC_DRIVEN_MIGRATION.md](meta/PLAN_SPEC_DRIVEN_MIGRATION.md) | The spec-driven migration plan for this project | complete — historical |
 | [meta/PLAN_DEMO.md](meta/PLAN_DEMO.md) | Plan: interactive demo runner with -d flag | complete |
 | [meta/PLAN_DEV_PACKAGES.md](meta/PLAN_DEV_PACKAGES.md) | Plan: move dev-only packages to dev/ | complete |
+| [meta/PLAN_DEMO_ENHANCEMENTS.md](meta/PLAN_DEMO_ENHANCEMENTS.md) | jsonfiles nested format + optional watermark, associations-demo example, table display | complete |
