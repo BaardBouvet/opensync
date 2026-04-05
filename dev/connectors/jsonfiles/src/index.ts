@@ -41,9 +41,9 @@ import type {
 //
 // Log entry shapes:
 //   insert: { op: "insert", id, data, associations?, updated }
-//   update: { op: "update", id, before, after, associations?, updated }
-//     before — fields whose value changed, showing the old value
-//     after  — fields whose value changed, showing the new value
+//   update: { op: "update", id, before, after, updated }
+//     before — changed data fields (old values) + old associations (if changed)
+//     after  — changed data fields (new values) + new associations (if changed)
 //   delete: { op: "delete", id, updated }
 //
 // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md
@@ -144,9 +144,9 @@ interface LogEntry {
   op: "insert" | "update" | "delete";
   id: string;
   data?: Record<string, unknown>;          // insert only
-  before?: Record<string, unknown>;        // update only — changed fields, old values
-  after?: Record<string, unknown>;         // update only — changed fields, new values
-  associations?: unknown;
+  before?: Record<string, unknown> & { associations?: unknown }; // update only — old values of changed fields
+  after?: Record<string, unknown> & { associations?: unknown };  // update only — new values of changed fields
+  associations?: unknown;                  // insert only
   updated: unknown;
 }
 
@@ -286,6 +286,7 @@ function makeRecordEntity(
         }
         const wm = nextWatermark(existing, watermarkField);
         const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
+        const prevAssoc = existing[idx]![associationsField]; // capture before overwrite
         const merged = { ...prev, ...record.data };
         const updated: FileRecord = {
           ...existing[idx],
@@ -309,10 +310,17 @@ function makeRecordEntity(
             before[k] = prev[k];
             after[k] = record.data[k];
           }
+          // Include associations in the diff when they changed.
+          if (record.associations !== undefined) {
+            if (JSON.stringify(prevAssoc) !== JSON.stringify(record.associations)) {
+              before["associations"] = prevAssoc;
+              after["associations"] = record.associations;
+            }
+          }
+          const hasDiff = Object.keys(before).length > 0;
           appendLogEntry(logFilePath(entityFilePath), {
             op: "update", id: record.id,
-            ...(changedKeys.length > 0 ? { before, after } : {}),
-            ...(record.associations !== undefined ? { associations: record.associations } : {}),
+            ...(hasDiff ? { before, after } : {}),
             updated: wm,
           });
         }

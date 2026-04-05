@@ -459,6 +459,16 @@ describe("jsonfiles connector", () => {
       expect(log[1].after).not.toHaveProperty("name");
     });
 
+    it("update diff includes associations when they change", async () => {
+      const assoc1 = [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org1" }];
+      const assoc2 = [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org2" }];
+      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" }, associations: assoc1 }] satisfies InsertRecord[])));
+      await collect(logEntity.update!(from([{ id: ins.id, data: {}, associations: assoc2 }] satisfies UpdateRecord[])));
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; before?: Record<string, unknown>; after?: Record<string, unknown> }>;
+      expect(log[1].before).toMatchObject({ associations: assoc1 });
+      expect(log[1].after).toMatchObject({ associations: assoc2 });
+    });
+
     it("update mutates main file in-place (not append)", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.update!(from([{ id: ins.id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
