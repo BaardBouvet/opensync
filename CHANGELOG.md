@@ -13,6 +13,30 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Added
+
+- **`specs/associations.md § 7` — Cross-System Association Remapping.** Documents how the
+  engine translates association `targetId` values across systems via the identity map, the
+  requirement that connectors use canonical entity type names in `targetEntity`, and why FK
+  injection into `UpdateRecord.data` is the target connector's responsibility (not the engine's).
+
+### Changed
+
+- **`demo/examples/associations-demo/mappings/contacts.yaml`**: removed `companyId`/`orgId`/`orgRef`
+  fields from all three connector mappings. These are association predicates and must not appear
+  in the field mapping list (see `specs/associations.md § 7.4`).
+- **Eager association dispatch (new default).** Records with unresolvable associations are
+  no longer withheld entirely. The engine now inserts/updates the record immediately with
+  only the associations that can be resolved, writes a `deferred_associations` row, and
+  issues an update with the missing association once the identity link is established on a
+  future ingest cycle. This eliminates both the latency issue (record visible before its
+  referenced entity is synced) and the circular-dependency stall (two records referencing
+  each other would previously block forever in strict mode). The `"defer"` action is no
+  longer emitted as a `RecordSyncResult`; the first-pass dispatch now produces `"insert"`
+  or `"update"`. Regression tests: T36–T38 in `packages/engine/src/onboarding.test.ts`.
+  The `skipEchoFor` bypass (T34) is updated to reflect that echo detection must still be
+  bypassed on retry since the source shadow was written without the association sentinel.
+
 ### Fixed
 
 - **Noop update suppression.** The engine now skips dispatching to a target connector when
@@ -24,6 +48,29 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
   association sentinel so the guard can correctly compare associations on subsequent polls.
   Regression tests: T27–T30 in `packages/engine/src/onboarding.test.ts`.
 
+- **Deferred association retry.** Associations that could not be remapped at fan-out time
+  (target entity not yet linked in the identity map) are now persisted in a new
+  `deferred_associations` table and retried via `lookup()` on subsequent ingest calls.
+  Previously the defer result was silently discarded, causing associations (e.g. a contact's
+  company link) to be permanently lost once the watermark advanced past the record.
+  Also fixes `_entityKnownInShadow`: it now accepts entities configured in any channel even
+  if they have no shadow rows yet, so a valid-but-not-yet-synced target entity no longer
+  triggers a spurious `{error}` response from `_remapAssociations`.
+  Regression tests: T31–T33 in `packages/engine/src/onboarding.test.ts`.
+- **Deferred retry blocked by echo detection.** When a record was first ingested with an
+  unresolvable association, the engine wrote its source shadow (with association sentinel)
+  even though no target received the data. On all subsequent retry attempts `_processRecords`
+  saw the matching source shadow and short-circuited via echo detection — the record was
+  permanently skipped and the deferred row never cleared. Fixed by passing a `skipEchoFor`
+  set to `_processRecords` when calling it from the retry loop, bypassing the echo check
+  for those specific record IDs only. Regression test: T34.
+
+- **`targetEntity` not translated on association remap.** When propagating a record from
+  one connector to another, `_remapAssociations` translated the association's `targetId` to
+  the target connector's ID space but left `targetEntity` unchanged (e.g. `"companies"` was
+  stored verbatim in ERP employee records instead of `"accounts"`). Fixed via a new
+  `_translateTargetEntity` helper that looks up the corresponding entity name in the same
+  channel. Regression test: T35.
 ### Added
 
 - **`jsonfiles` connector: immutable log format.** New `logFormat: true` config option
