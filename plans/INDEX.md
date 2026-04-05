@@ -29,6 +29,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_NOOP_UPDATE_SUPPRESSION.md](engine/PLAN_NOOP_UPDATE_SUPPRESSION.md) | Suppress target dispatches when resolved values already match target shadow (LWW always-fires bug) — always on | complete |
 | [engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md](engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md) | Per-channel opt-out for noop update suppression (for channels with external target writers) | backlog |
 | [engine/PLAN_ECHO_DETECTION_SWITCH.md](engine/PLAN_ECHO_DETECTION_SWITCH.md) | Per-channel opt-out for echo detection (for channels needing unconditional target healing) | backlog |
+| [engine/PLAN_DEFERRED_ASSOCIATIONS.md](engine/PLAN_DEFERRED_ASSOCIATIONS.md) | Track and retry associations that couldn't be remapped at fan-out time (missing identity link) | draft |
 
 ## connectors/ — Connector research and cleanup plans
 
