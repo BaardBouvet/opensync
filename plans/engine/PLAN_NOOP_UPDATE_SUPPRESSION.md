@@ -8,6 +8,20 @@ the value written to the connector was identical to what was already there.
 
 ---
 
+## Summary
+
+Two guards are proposed, each opt-in/out per channel in `opensync.json`:
+
+| Guard | Config flag | Default | Direction | What it suppresses |
+|-------|------------|---------|-----------|-------------------|
+| Noop update suppression | `suppressNoopUpdates: true` | **off** | target-side | dispatch when resolved values match target shadow |
+| Echo detection | `echoDetection: false` | **on** | source-side | fan-out when incoming record matches source shadow |
+
+Echo detection is already implemented and on by default; this plan adds the ability to
+disable it per channel. Noop update suppression is new and opt-in.
+
+---
+
 ## 1. Root cause
 
 `_processRecords` dispatches a write to a target connector whenever `resolveConflicts`
@@ -114,24 +128,131 @@ remapped association sentinel from step 1.
 
 ---
 
-## 5. Implementation tasks
+## 5. Per-channel opt-in/out
 
-1. Add `_resolvedMatchesTargetShadow` private method to `SyncEngine`.
-2. Add the guard in `_processRecords` immediately after the empty-resolved skip.
-3. Add tests in `engine.test.ts`:
-   - Poll cycle on an unchanged record → action is `"skip"` (not `"update"`).
-   - Poll cycle after a real change → action is `"update"` (guard does not suppress).
-   - Association-only update on first propagation → `"update"`.
-   - Second poll of same association → `"skip"`.
+Both guards are controlled per channel via `ChannelConfig` in `opensync.json`.
+
+### 5.1 Config shape
+
+Add two optional boolean fields to `ChannelConfig` (`packages/engine/src/config/loader.ts`):
+
+```ts
+export interface ChannelConfig {
+  id: string;
+  members: ChannelMember[];
+  identityFields?: string[];
+  suppressNoopUpdates?: boolean;   // default false — opt-in; see §5.3
+  echoDetection?: boolean;         // default true  — opt-out; see §5.4
+}
+```
+
+In `opensync.json`:
+```json
+{
+  "channels": [
+    {
+      "id": "contacts",
+      "members": [...],
+      "suppressNoopUpdates": true,
+      "echoDetection": false
+    }
+  ]
+}
+```
+
+### 5.2 Why flags on `ChannelConfig`, not `ChannelMember`
+
+Both guards apply to the whole record-level flow through a channel, not to an individual
+connector's mapping. Putting them on `ChannelConfig` keeps the config flat and avoids
+having to repeat the same flag on every member.
+
+### 5.3 `suppressNoopUpdates` — opt-in (default false)
+
+Default is `false` because the bug is new (no production users rely on the current
+noop behaviour), and enabling the guard introduces a risk (§6) that the user should
+consciously accept. Channels that tolerate external writes to a target connector
+should leave this `false`.
+
+The guard in `_processRecords` is wrapped:
+
+```ts
+if (
+  channel.suppressNoopUpdates &&
+  targetShadow !== undefined &&
+  this._resolvedMatchesTargetShadow(resolved, targetShadow, remap.length ? remap : undefined)
+) {
+  results.push({ …, action: "skip" });
+  continue;
+}
+```
+
+### 5.4 `echoDetection` — opt-out (default true)
+
+Echo detection is already implemented (`_shadowMatchesIncoming`) and works well.
+The only reason to disable it is when a connector has **external writers** that may
+update records in-place — i.e. the source record could legitimately return the same
+value twice in sequence, between which an external system already applied a change that
+wasn't visible to OpenSync. Disabling means every inbound record always fans out,
+regardless of whether the source shadow matches.
+
+The existing guard becomes:
+
+```ts
+if (channel.echoDetection !== false && !isResurrection && existingShadow !== undefined) {
+  const same = this._shadowMatchesIncoming(existingShadow, canonical, assocSentinel);
+  if (same) { …skip… }
+}
+```
+
+---
+
+## 7. Implementation tasks
+
+1. `packages/engine/src/config/loader.ts`: add `suppressNoopUpdates?: boolean` and
+   `echoDetection?: boolean` to `ChannelConfig`.
+2. `packages/engine/src/config/schema.ts` (or equivalent validation): accept the new
+   keys on channel objects.
+3. `packages/engine/src/engine.ts`:
+   a. Add `_resolvedMatchesTargetShadow` private method.
+   b. Wrap noop-suppression guard with `channel.suppressNoopUpdates`.
+   c. Wrap echo-detection guard with `channel.echoDetection !== false`.
+4. Tests (`packages/engine/src/engine.test.ts`):
+   - `suppressNoopUpdates: true` — second poll of unchanged record → `"skip"`.
+   - `suppressNoopUpdates: true` — poll after real change → `"update"`.
+   - `suppressNoopUpdates: true` — second poll of same association → `"skip"`.
+   - `suppressNoopUpdates: false` (default) — second poll → `"update"` (noop not suppressed).
+   - `echoDetection: false` — incoming record matching source shadow still fans out.
 
 ---
 
 ## 6. Risks
 
-- **False suppression**: if `targetShadow` is stale (e.g. a concurrent external mutation
-  outside opensync), the guard would suppress a legitimate update.  This is the same
-  trade-off already accepted by the echo-detection guard on the source side.  The mitigation
-  is the ETag / live-snapshot lookup already present in `_dispatchToTarget`.
-  A future iteration could plumb the live snapshot into this check instead of the shadow.
-- **LWW semantics**: the fix does not change when a field is *accepted* — only whether
-  the accepted value is *dispatched*.  Conflict resolution outcome is unchanged.
+### 6.1 False suppression (`suppressNoopUpdates`)
+
+If `targetShadow` is stale — e.g. someone directly wrote to the target connector outside
+OpenSync — the guard would see "already matches" and skip a write that should have healed
+the drift. The shadow is the only source of truth OpenSync has about what it last wrote;
+it has no way to distinguish "same as shadow" from "actually current on the target".
+
+**Mitigation options (not in scope for this plan):**
+- Plumb the live ETag / live-snapshot from `_dispatchToTarget` into this check.
+- Add a periodic "reconcile" mode that reads the target and compares.
+
+Users with connectors that may be written by external systems should leave
+`suppressNoopUpdates: false` (the default).
+
+### 6.2 False positive echo suppression (`echoDetection: true`, the default)
+
+Same structural risk as §6.1 but on the source side: if the source shadow is stale, the
+engine skips fan-out for a record that actually changed. In practice this risk is lower
+because the source shadow is updated every time the engine successfully processes a
+record — there is no path where it can drift unless the database is externally modified.
+
+The risk of disabling echo detection (`echoDetection: false`) is the opposite: every
+source record fans out unconditionally, generating more writes and, paradoxically,
+more noop log entries if `suppressNoopUpdates` is also `false`.
+
+### 6.3 LWW semantics unchanged
+
+Neither guard changes *when* a field value is accepted during conflict resolution — only
+whether the accepted payload is dispatched. Conflict metadata in the shadow is unaffected.
