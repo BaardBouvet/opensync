@@ -3,8 +3,7 @@
     "id": "c1",
     "data": {
       "name": "Alice Liddell",
-      "email": "alice@example.com",
-      "companyId": "co1"
+      "email": "alice@example.com"
     },
     "updated": 1,
     "associations": [
@@ -19,8 +18,7 @@
     "id": "c2",
     "data": {
       "name": "Bob Martin",
-      "email": "bob@example.com",
-      "companyId": "co2"
+      "email": "bob@example.com"
     },
     "updated": 1,
     "associations": [
@@ -35,8 +33,7 @@
     "id": "c3",
     "data": {
       "name": "Carol White",
-      "email": "carol@example.com",
-      "companyId": "co3"
+      "email": "carol@example.com"
     },
     "updated": 1,
     "associations": [

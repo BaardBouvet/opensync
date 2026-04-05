@@ -3,8 +3,7 @@
     "id": "p1",
     "data": {
       "displayName": "Bob Martin",
-      "email": "bob@example.com",
-      "orgRef": "org1"
+      "email": "bob@example.com"
     },
     "updated": 1,
     "associations": [
@@ -19,8 +18,7 @@
     "id": "p2",
     "data": {
       "displayName": "Carol White",
-      "email": "carol@example.com",
-      "orgRef": "org2"
+      "email": "carol@example.com"
     },
     "updated": 1,
     "associations": [
