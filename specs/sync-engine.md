@@ -419,6 +419,8 @@ for each channel:
 
 The watermark advance is **atomic with the shadow state update** — both happen in the same SQLite transaction. A crash between reading and writing cannot produce a watermark that is ahead of the actual written state. On restart, the engine re-reads from the last committed watermark and the shadow state comparison suppresses any records that were already dispatched.
 
+Records are processed in **arrival order** — the order the connector yields them across all batches. Each record's identity and shadow writes are committed before the next record is processed, so later records in the same batch can resolve identity links created by earlier ones. See `specs/associations.md § 5` for the implications on association resolution.
+
 ## Association Propagation Rules
 
 Associations (`Association[]` on a `ReadRecord`) represent foreign-key style links between entities. The engine resolves them through the identity map and applies the following rules — all four are unconditional.
