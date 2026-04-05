@@ -6,19 +6,9 @@
 `{ "op": "update", "id": "...", "updated": N }` with no `before`/`after` diff — meaning
 the value written to the connector was identical to what was already there.
 
----
-
-## Summary
-
-Two guards are proposed, each opt-in/out per channel in `opensync.json`:
-
-| Guard | Config flag | Default | Direction | What it suppresses | Risk |
-|-------|------------|---------|-----------|-------------------|------|
-| Noop update suppression | `suppressNoopUpdates: true` | **off** | target-side | dispatch when resolved values match target shadow | False suppression if target shadow is stale (external write to target) |
-| Echo detection | `echoDetection: false` | **on** | source-side | fan-out when incoming record matches source shadow | No shadow-drift risk; trade-off is write volume vs. target-drift healing |
-
-Echo detection is already implemented and on by default; this plan adds the ability to
-disable it per channel. Noop update suppression is new and opt-in.
+Related:
+- `PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md` — per-channel opt-out for this guard (future)
+- `PLAN_ECHO_DETECTION_SWITCH.md` — per-channel opt-out for echo detection (future)
 
 ---
 
@@ -128,140 +118,22 @@ remapped association sentinel from step 1.
 
 ---
 
-## 5. Per-channel opt-in/out
+## 5. Implementation tasks
 
-Both guards are controlled per channel via `ChannelConfig` in `opensync.json`.
-
-### 5.1 Config shape
-
-Add two optional boolean fields to `ChannelConfig` (`packages/engine/src/config/loader.ts`):
-
-```ts
-export interface ChannelConfig {
-  id: string;
-  members: ChannelMember[];
-  identityFields?: string[];
-  suppressNoopUpdates?: boolean;   // default false — opt-in; see §5.3
-  echoDetection?: boolean;         // default true  — opt-out; see §5.4
-}
-```
-
-In `opensync.json`:
-```json
-{
-  "channels": [
-    {
-      "id": "contacts",
-      "members": [...],
-      "suppressNoopUpdates": true,
-      "echoDetection": false
-    }
-  ]
-}
-```
-
-### 5.2 Why flags on `ChannelConfig`, not `ChannelMember`
-
-Both guards apply to the whole record-level flow through a channel, not to an individual
-connector's mapping. Putting them on `ChannelConfig` keeps the config flat and avoids
-having to repeat the same flag on every member.
-
-### 5.3 `suppressNoopUpdates` — opt-in (default false)
-
-Default is `false` because the bug is new (no production users rely on the current
-noop behaviour), and enabling the guard introduces a risk (§6) that the user should
-consciously accept. Channels that tolerate external writes to a target connector
-should leave this `false`.
-
-The guard in `_processRecords` is wrapped:
-
-```ts
-if (
-  channel.suppressNoopUpdates &&
-  targetShadow !== undefined &&
-  this._resolvedMatchesTargetShadow(resolved, targetShadow, remap.length ? remap : undefined)
-) {
-  results.push({ …, action: "skip" });
-  continue;
-}
-```
-
-### 5.4 `echoDetection` — opt-out (default true)
-
-Echo detection is already implemented (`_shadowMatchesIncoming`) and works well.
-The only reason to disable it is when a connector has **external writers** that may
-update records in-place — i.e. the source record could legitimately return the same
-value twice in sequence, between which an external system already applied a change that
-wasn't visible to OpenSync. Disabling means every inbound record always fans out,
-regardless of whether the source shadow matches.
-
-The existing guard becomes:
-
-```ts
-if (channel.echoDetection !== false && !isResurrection && existingShadow !== undefined) {
-  const same = this._shadowMatchesIncoming(existingShadow, canonical, assocSentinel);
-  if (same) { …skip… }
-}
-```
+1. `packages/engine/src/engine.ts`: add `_resolvedMatchesTargetShadow` private method.
+2. Add the guard in `_processRecords` immediately after the empty-resolved skip.
+3. Tests (TDD — write failing tests first):
+   - Second poll of unchanged record → action `"skip"` (not `"update"`).
+   - Poll after a real field change → action `"update"` (guard does not suppress).
+   - Second poll of unchanged association → action `"skip"`.
+   - First propagation of a new association → action `"update"` (not suppressed).
 
 ---
 
-## 7. Implementation tasks
+## 6. Risk
 
-1. `packages/engine/src/config/loader.ts`: add `suppressNoopUpdates?: boolean` and
-   `echoDetection?: boolean` to `ChannelConfig`.
-2. `packages/engine/src/config/schema.ts` (or equivalent validation): accept the new
-   keys on channel objects.
-3. `packages/engine/src/engine.ts`:
-   a. Add `_resolvedMatchesTargetShadow` private method.
-   b. Wrap noop-suppression guard with `channel.suppressNoopUpdates`.
-   c. Wrap echo-detection guard with `channel.echoDetection !== false`.
-4. Tests (`packages/engine/src/engine.test.ts`):
-   - `suppressNoopUpdates: true` — second poll of unchanged record → `"skip"`.
-   - `suppressNoopUpdates: true` — poll after real change → `"update"`.
-   - `suppressNoopUpdates: true` — second poll of same association → `"skip"`.
-   - `suppressNoopUpdates: false` (default) — second poll → `"update"` (noop not suppressed).
-   - `echoDetection: false` — incoming record matching source shadow still fans out.
-
----
-
-## 6. Risks
-
-### 6.1 False suppression (`suppressNoopUpdates`)
-
-If `targetShadow` is stale — e.g. someone directly wrote to the target connector outside
-OpenSync — the guard would see "already matches" and skip a write that should have healed
-the drift. The shadow is the only source of truth OpenSync has about what it last wrote;
-it has no way to distinguish "same as shadow" from "actually current on the target".
-
-**Mitigation options (not in scope for this plan):**
-- Plumb the live ETag / live-snapshot from `_dispatchToTarget` into this check.
-- Add a periodic "reconcile" mode that reads the target and compares.
-
-Users with connectors that may be written by external systems should leave
-`suppressNoopUpdates: false` (the default).
-
-### 6.2 Echo detection is not a drift risk
-
-The source shadow is a pure read-cache: the engine writes it from whatever the connector
-returned. If the source record changes, the connector returns a new value and the shadow
-check won't match, so fan-out fires as normal. The source shadow cannot diverge from the
-source connector's state by an external actor — nothing other than the connector itself
-can update a source record.
-
-The scenario where `echoDetection: false` is useful is different in kind: **source value
-unchanged, target drifted externally**. If an external system modifies the target connector
-outside OpenSync, and the source record hasn't changed since the last poll, echo detection
-will skip fan-out indefinitely — the engine correctly concludes "nothing new to propagate"
-but cannot detect that the target has diverged. With `echoDetection: false`, every inbound
-source record re-pushes to all targets on every poll, unconditionally healing any target
-drift.
-
-The trade-off is write volume: every non-changing source record generates a target write
-on every cycle. If `suppressNoopUpdates` is `false` at the same time, these writes appear
-as noop log entries in the audit log.
-
-### 6.3 LWW semantics unchanged
-
-Neither guard changes *when* a field value is accepted during conflict resolution — only
-whether the accepted payload is dispatched. Conflict metadata in the shadow is unaffected.
+The guard relies on the target shadow being accurate. If an external system writes to the
+target connector outside OpenSync, the shadow becomes stale and the guard would suppress a
+write that should heal the target. This risk is accepted for now — the guard is always on,
+and a per-channel opt-out is tracked in `PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md` for when it
+becomes necessary.
