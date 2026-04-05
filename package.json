@@ -12,7 +12,9 @@
     "build": "tsc --build",
     "typecheck": "tsc --build --dry",
     "test": "bun test",
-    "demo": "bun run demo/run.ts -d two-system"
+    "demo": "bun run demo/run.ts -d associations-demo",
+    "inspect": "bun run demo/inspect.ts -d associations-demo",
+    "wipe": "rm -rf demo/data/associations-demo"
   },
   "devDependencies": {}
 }
