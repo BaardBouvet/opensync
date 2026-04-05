@@ -12,10 +12,10 @@ the value written to the connector was identical to what was already there.
 
 Two guards are proposed, each opt-in/out per channel in `opensync.json`:
 
-| Guard | Config flag | Default | Direction | What it suppresses |
-|-------|------------|---------|-----------|-------------------|
-| Noop update suppression | `suppressNoopUpdates: true` | **off** | target-side | dispatch when resolved values match target shadow |
-| Echo detection | `echoDetection: false` | **on** | source-side | fan-out when incoming record matches source shadow |
+| Guard | Config flag | Default | Direction | What it suppresses | Risk |
+|-------|------------|---------|-----------|-------------------|------|
+| Noop update suppression | `suppressNoopUpdates: true` | **off** | target-side | dispatch when resolved values match target shadow | False suppression if target shadow is stale (external write to target) |
+| Echo detection | `echoDetection: false` | **on** | source-side | fan-out when incoming record matches source shadow | No shadow-drift risk; trade-off is write volume vs. target-drift healing |
 
 Echo detection is already implemented and on by default; this plan adds the ability to
 disable it per channel. Noop update suppression is new and opt-in.
@@ -241,16 +241,25 @@ it has no way to distinguish "same as shadow" from "actually current on the targ
 Users with connectors that may be written by external systems should leave
 `suppressNoopUpdates: false` (the default).
 
-### 6.2 False positive echo suppression (`echoDetection: true`, the default)
+### 6.2 Echo detection is not a drift risk
 
-Same structural risk as §6.1 but on the source side: if the source shadow is stale, the
-engine skips fan-out for a record that actually changed. In practice this risk is lower
-because the source shadow is updated every time the engine successfully processes a
-record — there is no path where it can drift unless the database is externally modified.
+The source shadow is a pure read-cache: the engine writes it from whatever the connector
+returned. If the source record changes, the connector returns a new value and the shadow
+check won't match, so fan-out fires as normal. The source shadow cannot diverge from the
+source connector's state by an external actor — nothing other than the connector itself
+can update a source record.
 
-The risk of disabling echo detection (`echoDetection: false`) is the opposite: every
-source record fans out unconditionally, generating more writes and, paradoxically,
-more noop log entries if `suppressNoopUpdates` is also `false`.
+The scenario where `echoDetection: false` is useful is different in kind: **source value
+unchanged, target drifted externally**. If an external system modifies the target connector
+outside OpenSync, and the source record hasn't changed since the last poll, echo detection
+will skip fan-out indefinitely — the engine correctly concludes "nothing new to propagate"
+but cannot detect that the target has diverged. With `echoDetection: false`, every inbound
+source record re-pushes to all targets on every poll, unconditionally healing any target
+drift.
+
+The trade-off is write volume: every non-changing source record generates a target write
+on every cycle. If `suppressNoopUpdates` is `false` at the same time, these writes appear
+as noop log entries in the audit log.
 
 ### 6.3 LWW semantics unchanged
 
