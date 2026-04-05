@@ -3,7 +3,9 @@
     "crm": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "auditLog": true,,
+        "auditLog": true,
+        "filePaths": [
+          "demo/data/associations-demo/crm/companies.json",
           "demo/data/associations-demo/crm/contacts.json"
         ]
       }
