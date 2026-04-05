@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import connector from "./index.js";
 import type { ConnectorContext, EntityDefinition, InsertRecord, UpdateRecord } from "@opensync/sdk";
 
@@ -42,6 +42,8 @@ describe("jsonfiles connector", () => {
 
   afterEach(() => {
     if (existsSync(fp)) rmSync(fp);
+    const logFp = fp.replace(/\.json$/, ".log.json");
+    if (existsSync(logFp)) rmSync(logFp);
   });
   // ── schema ─────────────────────────────────────────────────────────────────
 
@@ -417,160 +419,73 @@ describe("jsonfiles connector", () => {
   describe("log format", () => {
     let logCtx: ConnectorContext;
     let logEntity: EntityDefinition;
+    let logFp: string;
 
     beforeEach(() => {
       logCtx = makeCtx([fp], { logFormat: true });
       logEntity = connector.getEntities!(logCtx)[0];
+      logFp = fp.replace(/\.json$/, ".log.json");
     });
 
-    // ── insert ────────────────────────────────────────────────────────────────
-
-    it("insert two records — file has 2 entries, read emits both", async () => {
-      await collect(logEntity.insert!(from([
-        { data: { name: "Alice" } },
-        { data: { name: "Bob" } },
-      ] satisfies InsertRecord[])));
-
-      const [batch] = await collect(logEntity.read!(logCtx));
-      expect(batch.records).toHaveLength(2);
-      expect(batch.records.map((r) => r.data["name"])).toEqual(expect.arrayContaining(["Alice", "Bob"]));
+    it("without logFormat, no .log.json file is written", async () => {
+      await collect(entity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
+      expect(existsSync(logFp)).toBe(false);
     });
 
-    it("insert appends entries to the file without removing old ones", async () => {
+    it("insert writes a log entry with op: insert", async () => {
+      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; data: Record<string, unknown> }>;
+      expect(log).toHaveLength(1);
+      expect(log[0]).toMatchObject({ op: "insert", id: ins.id, data: { name: "Alice" } });
+    });
+
+    it("insert does not make main file append-only", async () => {
       await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.insert!(from([{ data: { name: "Bob" } }] satisfies InsertRecord[])));
-
-      const raw = JSON.parse(require("node:fs").readFileSync(fp, "utf8")) as unknown[];
-      expect(raw).toHaveLength(2);
-    });
-
-    // ── update ────────────────────────────────────────────────────────────────
-
-    it("update appends a new version — file has 2 entries but read emits only latest", async () => {
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      const id = ins.id;
-
-      await collect(logEntity.update!(from([{ id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
-
-      const raw = JSON.parse(require("node:fs").readFileSync(fp, "utf8")) as unknown[];
-      expect(raw).toHaveLength(2); // both versions on disk
-
+      const raw = JSON.parse(readFileSync(fp, "utf8")) as unknown[];
+      expect(raw).toHaveLength(2); // two separate records, not two versions of one
       const [batch] = await collect(logEntity.read!(logCtx));
-      expect(batch.records).toHaveLength(1);
-      expect(batch.records[0].data["name"]).toBe("Alicia");
+      expect(batch.records).toHaveLength(2);
     });
 
-    it("update merges fields from the effective record", async () => {
+    it("update writes a log entry with op: update and merged data", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice", age: 30 } }] satisfies InsertRecord[])));
       await collect(logEntity.update!(from([{ id: ins.id, data: { age: 31 } }] satisfies UpdateRecord[])));
-
-      const [batch] = await collect(logEntity.read!(logCtx));
-      expect(batch.records[0].data).toMatchObject({ name: "Alice", age: 31 });
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string; data: Record<string, unknown> }>;
+      expect(log).toHaveLength(2);
+      expect(log[1]).toMatchObject({ op: "update", id: ins.id, data: { name: "Alice", age: 31 } });
     });
 
-    it("update on unknown id yields notFound", async () => {
-      const results = await collect(logEntity.update!(from([{ id: "ghost", data: { x: 1 } }] satisfies UpdateRecord[])));
-      expect(results[0]).toMatchObject({ id: "ghost", notFound: true });
-    });
-
-    // ── delete ────────────────────────────────────────────────────────────────
-
-    it("delete appends a tombstone — read emits nothing", async () => {
+    it("update mutates main file in-place (not append)", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
+      await collect(logEntity.update!(from([{ id: ins.id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
+      const raw = JSON.parse(readFileSync(fp, "utf8")) as Array<{ data: { name: string } }>;
+      expect(raw).toHaveLength(1);
+      expect(raw[0].data.name).toBe("Alicia");
+    });
 
+    it("delete writes a log entry with op: delete", async () => {
+      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.delete!(from([ins.id])));
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; id: string }>;
+      expect(log).toHaveLength(2);
+      expect(log[1]).toMatchObject({ op: "delete", id: ins.id });
+      expect((log[1] as Record<string, unknown>)["data"]).toBeUndefined();
+    });
 
-      const raw = JSON.parse(require("node:fs").readFileSync(fp, "utf8")) as unknown[];
-      expect(raw).toHaveLength(2); // original + tombstone
-
+    it("delete still removes record from main file", async () => {
+      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
+      await collect(logEntity.delete!(from([ins.id])));
       const [batch] = await collect(logEntity.read!(logCtx));
       expect(batch.records).toHaveLength(0);
     });
 
-    it("delete on unknown id yields notFound", async () => {
-      const results = await collect(logEntity.delete!(from(["ghost"])));
-      expect(results[0]).toMatchObject({ id: "ghost", notFound: true });
-    });
-
-    it("delete on already-tombstoned id yields notFound", async () => {
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      await collect(logEntity.delete!(from([ins.id])));
-
-      const results = await collect(logEntity.delete!(from([ins.id])));
-      expect(results[0]).toMatchObject({ id: ins.id, notFound: true });
-    });
-
-    // ── since / watermark ─────────────────────────────────────────────────────
-
-    it("since filter — updated record is newer than since, re-emitted", async () => {
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      const [firstBatch] = await collect(logEntity.read!(logCtx));
-      const since = firstBatch.since!;
-
-      await collect(logEntity.update!(from([{ id: ins.id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
-
-      const [secondBatch] = await collect(logEntity.read!(logCtx, since));
-      expect(secondBatch.records).toHaveLength(1);
-      expect(secondBatch.records[0].data["name"]).toBe("Alicia");
-    });
-
-    it("since filter — record unchanged since last sync, not re-emitted", async () => {
-      await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      const [firstBatch] = await collect(logEntity.read!(logCtx));
-      const since = firstBatch.since!;
-
-      const [secondBatch] = await collect(logEntity.read!(logCtx, since));
-      expect(secondBatch.records).toHaveLength(0);
-    });
-
-    it("since filter — record deleted after since, tombstone causes omission", async () => {
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      const [firstBatch] = await collect(logEntity.read!(logCtx));
-      const since = firstBatch.since!;
-
-      await collect(logEntity.delete!(from([ins.id])));
-
-      const [secondBatch] = await collect(logEntity.read!(logCtx, since));
-      expect(secondBatch.records).toHaveLength(0);
-    });
-
-    // ── lookup ────────────────────────────────────────────────────────────────
-
-    it("lookup returns only the latest version", async () => {
+    it("log file accumulates all operations in order", async () => {
       const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.update!(from([{ id: ins.id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
-
-      const results = await logEntity.lookup!([ins.id]);
-      expect(results).toHaveLength(1);
-      expect(results[0].data["name"]).toBe("Alicia");
-    });
-
-    it("lookup for tombstoned id returns nothing", async () => {
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
       await collect(logEntity.delete!(from([ins.id])));
-
-      const results = await logEntity.lookup!([ins.id]);
-      expect(results).toHaveLength(0);
-    });
-
-    // ── watermark ordering ────────────────────────────────────────────────────
-
-    it("multiple inserts produce ascending updated ordering in file", async () => {
-      await collect(logEntity.insert!(from([{ data: { n: 1 } }, { data: { n: 2 } }, { data: { n: 3 } }] satisfies InsertRecord[])));
-
-      const raw = JSON.parse(require("node:fs").readFileSync(fp, "utf8")) as Array<{ updated: number }>;
-      const watermarks = raw.map((r) => r.updated);
-      expect(watermarks).toEqual([...watermarks].sort((a, b) => a - b));
-    });
-
-    // ── mutable mode unaffected ───────────────────────────────────────────────
-
-    it("logFormat false (default) — update still mutates in-place", async () => {
-      const [ins] = await collect(entity.insert!(from([{ data: { name: "Alice" } }] satisfies InsertRecord[])));
-      await collect(entity.update!(from([{ id: ins.id, data: { name: "Alicia" } }] satisfies UpdateRecord[])));
-
-      const raw = JSON.parse(require("node:fs").readFileSync(fp, "utf8")) as unknown[];
-      expect(raw).toHaveLength(1);
+      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string }>;
+      expect(log.map((e) => e.op)).toEqual(["insert", "update", "delete"]);
     });
   });
 });
