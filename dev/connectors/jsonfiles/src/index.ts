@@ -32,6 +32,21 @@ import type {
 //
 // Field names are configurable via connector config (idField, dataField,
 // watermarkField, associationsField) but the defaults cover the common case.
+//
+// ── Immutable log format (logFormat: true) ────────────────────────────────────
+// When logFormat is enabled the file becomes an append-only change log:
+//
+//   - Multiple entries with the same `id` are allowed; each is a version.
+//   - Entries are appended in watermark-ascending order (writes always produce
+//     a strictly larger watermark, so no re-sort is ever needed).
+//   - A delete appends a tombstone:  { id, _deleted: true, updated: <wm> }
+//     (`_deleted` field name is configurable via `deletedField` config option).
+//   - Reads deduplicate by id: the last (highest watermark) entry wins. Entries
+//     whose effective version is a tombstone are omitted from the read output.
+//   - The `since` incremental-sync filter is applied to the effective watermark
+//     of each deduplicated record, so incremental reads remain correct.
+//
+// Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md
 
 interface FileRecord {
   id?: unknown;
@@ -48,6 +63,11 @@ interface FieldConfig {
   associationsField: string;
 }
 
+interface LogConfig {
+  logFormat: boolean;
+  deletedField: string;
+}
+
 function readFile(filePath: string): FileRecord[] {
   if (!existsSync(filePath)) return [];
   const raw = readFileSync(filePath, "utf8");
@@ -62,6 +82,7 @@ const DEFAULT_ID_FIELD = "id";
 const DEFAULT_DATA_FIELD = "data";
 const DEFAULT_WATERMARK_FIELD = "updated";
 const DEFAULT_ASSOCIATIONS_FIELD = "associations";
+const DEFAULT_DELETED_FIELD = "_deleted";
 
 function fieldConfig(ctx: ConnectorContext): FieldConfig {
   return {
@@ -69,6 +90,13 @@ function fieldConfig(ctx: ConnectorContext): FieldConfig {
     dataField: (ctx.config["dataField"] as string | undefined) ?? DEFAULT_DATA_FIELD,
     watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? DEFAULT_WATERMARK_FIELD,
     associationsField: (ctx.config["associationsField"] as string | undefined) ?? DEFAULT_ASSOCIATIONS_FIELD,
+  };
+}
+
+function logConfig(ctx: ConnectorContext): LogConfig {
+  return {
+    logFormat: (ctx.config["logFormat"] as boolean | undefined) ?? false,
+    deletedField: (ctx.config["deletedField"] as string | undefined) ?? DEFAULT_DELETED_FIELD,
   };
 }
 
@@ -112,6 +140,27 @@ function nextWatermark(existing: FileRecord[], watermarkField: string): string |
   return new Date().toISOString();
 }
 
+// Log-format deduplication: scan all entries (assumed sorted ascending by watermark),
+// keeping the last-seen version of each id. Tombstone entries (deletedField === true)
+// remove the id from the live set, so the returned map contains only live records.
+// Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.3
+function latestByIdLog(
+  entries: FileRecord[],
+  idField: string,
+  deletedField: string
+): Map<string, FileRecord> {
+  const latest = new Map<string, FileRecord>();
+  for (const entry of entries) {
+    const id = String(entry[idField]);
+    if (entry[deletedField] === true) {
+      latest.delete(id);
+    } else {
+      latest.set(id, entry);
+    }
+  }
+  return latest;
+}
+
 /**
  * Parse the `filePaths` config value (string array) into
  * { entityName, entityFilePath } pairs. Entity name = file basename without extension.
@@ -128,7 +177,8 @@ function parseFilePaths(ctx: ConnectorContext): Array<{ entityName: string; enti
 function makeRecordEntity(
   entityName: string,
   entityFilePath: string,
-  { idField, dataField, watermarkField, associationsField }: FieldConfig
+  { idField, dataField, watermarkField, associationsField }: FieldConfig,
+  { logFormat, deletedField }: LogConfig
 ): EntityDefinition {
   function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
@@ -166,7 +216,13 @@ function makeRecordEntity(
     },
 
     async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
-      const records = readFile(entityFilePath);
+      const allEntries = readFile(entityFilePath);
+
+      // In log format, deduplicate to the latest version of each id before filtering.
+      // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.3
+      const records: FileRecord[] = logFormat
+        ? [...latestByIdLog(allEntries, idField, deletedField).values()]
+        : allEntries;
 
       // Records without a watermark field are always included (treated as "always newer").
       // Records with a watermark are included only when newer than `since`.
@@ -194,9 +250,14 @@ function makeRecordEntity(
 
     async lookup(ids: string[]): Promise<ReadRecord[]> {
       const idSet = new Set(ids);
-      return readFile(entityFilePath)
-        .filter((r) => idSet.has(String(r[idField])))
-        .map(extractRecord);
+      const allEntries = readFile(entityFilePath);
+      // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.7
+      const candidates = logFormat
+        ? [...latestByIdLog(allEntries, idField, deletedField).entries()]
+            .filter(([id]) => idSet.has(id))
+            .map(([, r]) => r)
+        : allEntries.filter((r) => idSet.has(String(r[idField])));
+      return candidates.map(extractRecord);
     },
 
     async *insert(records: AsyncIterable<InsertRecord>): AsyncIterable<InsertResult> {
@@ -218,38 +279,77 @@ function makeRecordEntity(
     async *update(records: AsyncIterable<UpdateRecord>): AsyncIterable<UpdateResult> {
       for await (const record of records) {
         const existing = readFile(entityFilePath);
-        const idx = existing.findIndex((r) => String(r[idField]) === record.id);
-        if (idx === -1) {
-          yield { id: record.id, notFound: true as const };
-          continue;
+        if (logFormat) {
+          // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.5
+          const live = latestByIdLog(existing, idField, deletedField);
+          const prev = live.get(record.id);
+          if (!prev) {
+            yield { id: record.id, notFound: true as const };
+            continue;
+          }
+          const wm = nextWatermark(existing, watermarkField);
+          const prevData = (prev[dataField] as Record<string, unknown> | undefined) ?? {};
+          const newEntry: FileRecord = {
+            [idField]: record.id,
+            [dataField]: { ...prevData, ...record.data },
+            [watermarkField]: wm,
+            ...(record.associations !== undefined
+              ? { [associationsField]: record.associations }
+              : {}),
+          };
+          writeFile(entityFilePath, [...existing, newEntry]);
+          yield { id: record.id, data: { ...prevData, ...record.data } };
+        } else {
+          const idx = existing.findIndex((r) => String(r[idField]) === record.id);
+          if (idx === -1) {
+            yield { id: record.id, notFound: true as const };
+            continue;
+          }
+          const wm = nextWatermark(existing, watermarkField);
+          const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
+          const updated: FileRecord = {
+            ...existing[idx],
+            [dataField]: { ...prev, ...record.data },
+            [watermarkField]: wm,
+            ...(record.associations !== undefined
+              ? { [associationsField]: record.associations }
+              : {}),
+          };
+          existing[idx] = updated;
+          writeFile(entityFilePath, existing);
+          yield { id: record.id, data: { ...prev, ...record.data } };
         }
-        const wm = nextWatermark(existing, watermarkField);
-        const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
-        const updated: FileRecord = {
-          ...existing[idx],
-          [dataField]: { ...prev, ...record.data },
-          [watermarkField]: wm,
-          ...(record.associations !== undefined
-            ? { [associationsField]: record.associations }
-            : {}),
-        };
-        existing[idx] = updated;
-        writeFile(entityFilePath, existing);
-        yield { id: record.id, data: { ...prev, ...record.data } };
       }
     },
 
     async *delete(ids: AsyncIterable<string>): AsyncIterable<DeleteResult> {
       for await (const id of ids) {
         const existing = readFile(entityFilePath);
-        const idx = existing.findIndex((r) => String(r[idField]) === id);
-        if (idx === -1) {
-          yield { id, notFound: true as const };
-          continue;
+        if (logFormat) {
+          // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.6
+          const live = latestByIdLog(existing, idField, deletedField);
+          if (!live.has(id)) {
+            yield { id, notFound: true as const };
+            continue;
+          }
+          const wm = nextWatermark(existing, watermarkField);
+          const tombstone: FileRecord = {
+            [idField]: id,
+            [deletedField]: true,
+            [watermarkField]: wm,
+          };
+          writeFile(entityFilePath, [...existing, tombstone]);
+          yield { id };
+        } else {
+          const idx = existing.findIndex((r) => String(r[idField]) === id);
+          if (idx === -1) {
+            yield { id, notFound: true as const };
+            continue;
+          }
+          existing.splice(idx, 1);
+          writeFile(entityFilePath, existing);
+          yield { id };
         }
-        existing.splice(idx, 1);
-        writeFile(entityFilePath, existing);
-        yield { id };
       }
     },
   };
@@ -293,13 +393,26 @@ const connector: Connector = {
         required: false,
         default: DEFAULT_ASSOCIATIONS_FIELD,
       },
+      logFormat: {
+        type: "boolean",
+        description: "Enable immutable log format. Mutations are appended; reads deduplicate by id returning only the latest version.",
+        required: false,
+        default: false,
+      },
+      deletedField: {
+        type: "string",
+        description: "Field name used on tombstone entries in log format to mark a record as deleted.",
+        required: false,
+        default: DEFAULT_DELETED_FIELD,
+      },
     },
   },
 
   getEntities(ctx: ConnectorContext): EntityDefinition[] {
     const fields = fieldConfig(ctx);
+    const log = logConfig(ctx);
     return parseFilePaths(ctx).map(({ entityName, entityFilePath }) =>
-      makeRecordEntity(entityName, entityFilePath, fields)
+      makeRecordEntity(entityName, entityFilePath, fields, log)
     );
   },
 };

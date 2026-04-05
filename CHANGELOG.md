@@ -15,6 +15,26 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
+- **`jsonfiles` connector: immutable log format.** New `logFormat: true` config option
+  switches the connector to append-only mode. Inserts and updates append new versions;
+  deletes append tombstones (`_deleted: true`). Reads deduplicate by id, emitting only the
+  latest version of each record (tombstoned records are omitted). Incremental `since`
+  filtering continues to work correctly over the deduplicated view. The new `deletedField`
+  config option (default `"_deleted"`) controls the tombstone field name. Default is
+  `false`; all existing fixtures and tests are unaffected.
+
+### Fixed
+
+- **Integer watermarks never picked up after onboarding.** `collectOnly` and `onboard` both
+  advanced watermarks, but both always wrote ISO timestamps regardless of watermark type.
+  `collectOnly` now stores the connector's own integer `batch.since` for integer-mode connectors.
+  `onboard` now preserves any integer watermark already stored by `collectOnly` and only falls
+  back to ISO snapshotAt for ISO-mode connectors. Without this fix, `isNewerThan(2, "2026-04-05T…")`
+  resolved to `NaN > 1` → `false`, causing every subsequent poll to return nothing.
+  Regression test: T26 in `packages/engine/src/onboarding.test.ts`.
+
+### Added
+
 - `dev/` directory: dev-only packages consolidated under `dev/connectors/` and `dev/servers/`.
   Moved from `connectors/` (jsonfiles, mock-crm, mock-erp) and `servers/` (mock-crm, mock-erp).
   Distributable connectors in `connectors/` now contain only publishable packages.
