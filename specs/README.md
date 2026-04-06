@@ -34,4 +34,5 @@ with a POC lesson, the POC wins and the spec should be updated.
 - [config.md](config.md) — `opensync.json` connector registry, `mappings/` YAML format, channel definitions
 - [cli.md](cli.md) — Commands, scaffolding, packaging, npm distribution, connector resolution
 - [demo.md](demo.md) — Interactive demo runner: example folder convention, seed/, field-mapping showcase, path resolution
+- [playground.md](playground.md) — Browser playground UI: layout, cluster view, record cards, modals, dev tools, scenario system
 

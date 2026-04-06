@@ -282,3 +282,63 @@ See `plans/engine/PLAN_CONFIG_VALIDATION.md` for related work.
 - Not a benchmark. Performance characteristics are validated in the engine test suite.
 - Not a tutorial. It shows a working system; prose explanation belongs in `docs/`.
 - Not a connector validation harness. Engine tests (`engine.test.ts`) cover correctness.
+
+---
+
+## § 10 Browser Demo Playground
+
+`demo/demo-browser/` is a self-contained Vite package that runs the full OpenSync engine
+entirely in a browser — no install, no terminal, no server required.
+
+### § 10.1 What it shows
+
+A split-pane developer playground:
+- **Left pane** — CodeMirror JSON editors: one for the channel/mapping config and one per
+  `(system × entity)` pair. Saving a data editor triggers an immediate poll; saving the
+  config editor triggers a full engine reload (db wiped, re-seeded, engine re-initialised).
+- **Right pane** — One column per system, entity tabs, record cards, and a timestamped
+  engine event log at the bottom.
+- **Top bar** — Scenario dropdown, status indicator, and Reset button.
+
+### § 10.2 Scenarios
+
+Built-in scenarios live in `demo/demo-browser/src/scenarios/`. Each is a static TypeScript
+module exporting a `ScenarioDefinition`. The registry in `scenarios/index.ts` lists them.
+Adding a new scenario requires only a new module + one registry entry.
+
+Default scenario: `associations-demo` (three systems × two entities, field renames,
+associations).
+
+### § 10.3 Engine stack in the browser
+
+| Layer | Implementation |
+|-------|---------------|
+| SQLite | `sql.js` (Emscripten WASM port) via `demo/demo-browser/src/db-sqljs.ts` |
+| Connector | `InMemoryConnector` in `demo/demo-browser/src/inmemory.ts` (Map-backed, no fs) |
+| Engine | `@opensync/engine` unchanged — no browser-specific modifications |
+| Bundler | Vite; dead-code stubs replace `better-sqlite3`, `bun:sqlite`, `node:fs`, `node:path` |
+
+### § 10.4 Build and hosting
+
+```sh
+cd demo/demo-browser
+bun run dev    # local dev server (hot reload)
+bun run build  # produces dist/ — deploy to any static host
+```
+
+`dist/` contains `index.html`, the JS bundle, and `sql-wasm.wasm`. The `locateFile`
+callback in `db-sqljs.ts` fetches the WASM from the same base path so it works on
+GitHub Pages, S3, or any sub-path hosting without configuration.
+
+### § 10.5 Config-change reload behaviour
+
+When the user saves the config editor:
+1. The running poll interval is cleared.
+2. The sql.js database is dropped (in-memory — just GC'd).
+3. The new config JSON is parsed and merged with the current scenario shape.
+4. All in-memory connectors are re-seeded from the scenario's original seed data.
+5. The engine is reconstructed and the onboard sequence is re-run from scratch.
+6. The editor pane rebuilds to reflect any new/removed systems.
+
+Data-only saves (per-system entity editors) call `InMemoryConnector.mutate()` and trigger
+one immediate poll cycle — no engine restart needed.

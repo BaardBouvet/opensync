@@ -49,6 +49,10 @@ bun test packages/sdk/
 **Git discipline:**
 - Output git commands for staging and committing but do NOT run `git commit` unless the
   user explicitly says it is fine
+- When committing, stage and commit ALL unstaged changes (using `git add -A` or specific
+  paths). Never leave some changes uncommitted unless the user explicitly asks to split them.
+  Use one commit per logical unit of work; if changes span multiple concerns, make multiple
+  commits in sequence rather than one giant commit or leaving leftovers unstaged.
 - Never create a new branch unless on `main` and the user asks for it
 - Never `git push` without explicit user instruction
 
@@ -69,13 +73,15 @@ bun test packages/sdk/
   state that explicitly. No production code may be written for a feature whose spec changes
   are not listed in the plan.
 
+**Spec discipline:**
+- Spec files in `specs/` are permanent reference documents. They do **not** carry
+  `Status:` or `Date:` metadata headers — those belong only in plan files under `plans/`.
+- After any code change, ask: does a spec in `specs/` need updating to reflect the new behaviour?
+- If yes, update the spec in the same working session — never leave the spec stale
+
 **Changelog discipline:**
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed
 - Format: `## [Unreleased]` section, then `### Added` / `### Fixed` / `### Changed`
-
-**Spec discipline:**
-- After any code change, ask: does a spec in `specs/` need updating to reflect the new behaviour?
-- If yes, update the spec in the same working session — never leave the spec stale
 
 **Bug-fix discipline (TDD):**
 - Before fixing a bug, write a failing test that reproduces it exactly
