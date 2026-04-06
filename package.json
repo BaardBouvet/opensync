@@ -13,6 +13,7 @@
     "build": "tsc --build",
     "typecheck": "tsc --build --dry",
     "test": "bun test",
+    "build:playground": "cd playground && bun run build",
     "demo": "bun run demo/run.ts -d associations-demo",
     "inspect": "bun run demo/inspect.ts -d associations-demo",
     "wipe": "rm -rf demo/data/associations-demo"

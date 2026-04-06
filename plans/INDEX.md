@@ -73,6 +73,6 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_BROWSER_DEMO.md](meta/PLAN_BROWSER_DEMO.md) | Run the demo in a browser — no install, no terminal, just a URL | complete | — |
 | [meta/PLAN_PLAYGROUND_TESTING.md](meta/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog | — |
 | [meta/PLAN_PLAYGROUND_MVU.md](meta/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
-| [meta/PLAN_GITHUB_PAGES.md](meta/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | draft | — |
+| [meta/PLAN_GITHUB_PAGES.md](meta/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | complete | — |
 | [meta/PLAN_RENAME_PLAYGROUND.md](meta/PLAN_RENAME_PLAYGROUND.md) | Rename demo-browser/ to playground/ and @opensync/demo-browser to @opensync/playground | complete | — |
 | [meta/PLAN_MOVE_DEMO_BROWSER.md](meta/PLAN_MOVE_DEMO_BROWSER.md) | Move demo-browser/ to workspace root as a sibling of demo/ | complete | — |
