@@ -13,7 +13,7 @@ understand what each tool does and where it sits, and record what (if anything) 
 learn from it or differentiate against.
 
 Separate, more detailed gap analyses live alongside this file for tools that warrant a deeper
-dive (e.g. `GAP_R2RML_YARRRML.md` in `plans/meta/`).
+dive (e.g. `GAP_R2RML_YARRRML.md` in `plans/ecosystem/`).
 
 ---
 
@@ -247,7 +247,7 @@ problems at a low level.
 
 ### 7.1 R2RML / RML / YARRRML
 
-Covered in depth in [plans/meta/GAP_R2RML_YARRRML.md](../meta/GAP_R2RML_YARRRML.md).
+Covered in depth in [plans/ecosystem/GAP_R2RML_YARRRML.md](GAP_R2RML_YARRRML.md).
 
 **TL;DR for this scout:** These are W3C / academic standards for mapping relational or
 semi-structured data to RDF triples. The transform concepts (column reference, template,
@@ -401,7 +401,7 @@ more expressive.
 | Declarative connector format | Airbyte Manifest YAML | `plans/connectors/REPORT_DECLARATIVE_CONNECTORS.md` |
 | Webhook handling | Trigger.dev | `specs/webhooks.md` |
 | Field-level conflict primitives | Electric SQL | `specs/sync-engine.md` |
-| Semantic field typing | R2RML / JSON-LD / Schema.org | `plans/meta/GAP_R2RML_YARRRML.md` |
+| Semantic field typing | R2RML / JSON-LD / Schema.org | `plans/ecosystem/GAP_R2RML_YARRRML.md` |
 | Singer STATE bookmark format | Singer / Meltano | `specs/connector-sdk.md` |
 | Community connector ecosystem | Airbyte, n8n, Nango | `plans/connectors/` |
 

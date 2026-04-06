@@ -1,6 +1,6 @@
 # Playground: Notification Poll (Debounced Mutation Trigger)
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Domain:** Playground UX  
 **Scope:** `playground/src/main.ts`, `playground/src/engine-lifecycle.ts`, `specs/playground.md`  
