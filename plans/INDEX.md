@@ -52,10 +52,11 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/REPORT_DECLARATIVE_CONNECTORS.md](connectors/REPORT_DECLARATIVE_CONNECTORS.md) | Research: declarative connector format | exploration | — |
 | [connectors/GAP_CONNECTOR_SDK_SPEC.md](connectors/GAP_CONNECTOR_SDK_SPEC.md) | Gap analysis: connector SDK spec completeness | reference | — |
 | [connectors/PLAN_JSONFILES_LOG_FORMAT.md](connectors/PLAN_JSONFILES_LOG_FORMAT.md) | jsonfiles immutable log format: append-only writes, deduplicated reads | complete | — |
-| [connectors/GAP_SESAM_JSON_PROTOCOLS.md](connectors/GAP_SESAM_JSON_PROTOCOLS.md) | Gap analysis: Sesam JSON Pull + Push protocol alignment with OpenSync connector SDK | draft | — |
 | [connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md](connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md) | Association targets outside the source connector's own channel — semantic type URIs, cross-channel entity name translation, stable URI passthrough | draft | — |
 | [connectors/PLAN_ASSOCIATION_SCHEMA.md](connectors/PLAN_ASSOCIATION_SCHEMA.md) | Declare supported predicates on EntityDefinition via `associationSchema`; engine pre-flight checks and write-side dispatch filtering | draft | M |
 | [connectors/PLAN_FIELD_READONLY.md](connectors/PLAN_FIELD_READONLY.md) | `readonly` flag on `FieldDescriptor` for server-computed fields; engine strips on insert+update paths, pre-flight warning on mappings that target readonly fields | backlog | S |
+| [connectors/PLAN_FILE_INGEST.md](connectors/PLAN_FILE_INGEST.md) | File-based ingest via SFTP, CSV, and XML: transport+parser architecture, SFTP connector, SDK csv/xml helpers, watermark strategy (mtime/hash), row-per-entity mode, write-back, HTTP/S file polling | draft | L |
+| [connectors/PLAN_READ_RECORD_UPDATED_AT.md](connectors/PLAN_READ_RECORD_UPDATED_AT.md) | Add `updatedAt?: string` to `ReadRecord`; engine uses it as the per-record LWW timestamp instead of engine ingest time (`Date.now()`) | draft | S |
 
 ## demo/ — CLI demo runner plans
 
@@ -76,10 +77,11 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [playground/PLAN_PLAYGROUND_TESTING.md](playground/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog | — |
 | [playground/PLAN_PLAYGROUND_MVU.md](playground/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
 | [playground/PLAN_PLAYGROUND_SMB_SEED.md](playground/PLAN_PLAYGROUND_SMB_SEED.md) | Expand playground seed to four systems (crm/erp/hr/webshop), six entity concepts, richer fields, intentionally unmapped fields, and a new smb-demo scenario | backlog | S |
-| [playground/PLAN_NOTIFICATION_POLL.md](playground/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | draft | — |
+| [playground/PLAN_NOTIFICATION_POLL.md](playground/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | complete | — |
 | [playground/PLAN_AGENT_PANEL.md](playground/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
 | [playground/PLAN_URL_HISTORY.md](playground/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
 | [playground/PLAN_VERSION_BADGE.md](playground/PLAN_VERSION_BADGE.md) | Version badge in topbar + update notification when a newer GitHub Release is available, linking to release notes | backlog | S |
+| [playground/PLAN_VISUAL_CONFIG_EDITOR.md](playground/PLAN_VISUAL_CONFIG_EDITOR.md) | Visual config editor: form-based tab alongside YAML editor; compares four approaches (form, editable lineage, node-graph, schema hints) | draft | L |
 
 ## meta/ — Cross-cutting project plans
 
@@ -92,10 +94,10 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
 | [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | complete | XS |
 | [meta/REPORT_ASSOCIATION_NAMING.md](meta/REPORT_ASSOCIATION_NAMING.md) | Naming analysis for the `Association` concept — candidates (link, edge, ref, rel, assoc), collision map, migration scope, recommendation | draft | — |
-| [meta/GAP_R2RML_YARRRML.md](meta/GAP_R2RML_YARRRML.md) | Gap analysis: OpenSync vs R2RML / YARRRML / RML — concept mapping, transform expressiveness, identity resolution, what OpenSync can learn, what only OpenSync does | reference | — |
 
 ## ecosystem/ — Related tools, frameworks, and standards in the broader integration space
 
 | File | What it covers | Status | Effort |
 |------|---------------|--------|--------|
 | [ecosystem/REPORT_ECOSYSTEM_SCOUT.md](ecosystem/REPORT_ECOSYSTEM_SCOUT.md) | Scout report: landscape of adjacent tools (Airbyte, Fivetran, Meltano/Singer, n8n, Debezium, Kafka Connect, Estuary, Electric SQL, Nango, Camel, R2RML, YARRRML, and more) — category map, differentiation analysis, open questions | draft | — |
+| [ecosystem/GAP_R2RML_YARRRML.md](ecosystem/GAP_R2RML_YARRRML.md) | Gap analysis: OpenSync vs R2RML / YARRRML / RML — concept mapping, transform expressiveness, identity resolution, what OpenSync can learn, what only OpenSync does | reference | — |

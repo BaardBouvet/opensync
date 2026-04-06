@@ -43,7 +43,7 @@ Without delete propagation:
 
 1. A contact deleted in CRM stays in the ERP forever — data diverges silently.
 2. Connectors that signal deletions via `deleted: true` (webhook DELETED events,
-   tombstone APIs, Sesam `_deleted: true`) have their signal discarded.
+   tombstone APIs, in-band deleted fields) have their signal discarded.
 3. The `shadow_state.deleted_at` column and the `EntityDefinition.delete` method
    are dead weight.
 
@@ -71,7 +71,7 @@ systems is a destructive, hard-to-reverse operation. The default must be safe.
 A connector returns `ReadRecord.deleted = true`. This covers:
 - Hard deletes (disappeared from source API, deleted-objects endpoint, DELETED webhook)
 - Soft deletes the connector has chosen to interpret as removals (`archived: true`)
-- Sesam `_deleted: true` protocol
+- In-band `_deleted: true` soft-delete fields from external APIs
 
 ### Engine behaviour
 

@@ -165,6 +165,17 @@ All plan files must live inside a subfolder (`plans/engine/`, `plans/connectors/
 `plans/meta/`, `plans/demo/`, `plans/playground/`, etc.). No `.md` files go in the root of `plans/` itself (only `INDEX.md` and
 `README.md` are allowed there).
 
+**`plans/internal/` is a private git submodule** — it contains proprietary competitor analysis
+that must never appear in the public repo. Hard rules:
+- Never reference any file from `plans/internal/` in any public plan, spec, code comment, or
+  any other file tracked by this repo. Do not link to them, quote from them, or name them.
+- Never copy content from `plans/internal/` into public files.
+- Never add new proprietary competitor analysis to any folder other than `plans/internal/`.
+- Do not mention competitor names in public-facing files. Generic technical protocol
+  conventions that are also used by public standards are allowed without attribution.
+
+Full rules and content index: `plans/internal/AGENTS.md` (only present when submodule is checked out).
+
 **Important:** Plans that modify `specs/connector-sdk.md` or connector-side SDK types (e.g. `ConnectorRecord`,
 `FieldData`, connector read/write signatures) belong in `plans/connectors/`. This ensures all changes
 to the connector contract are centralized and visible to connector authors. Engine-internal types

@@ -13,10 +13,20 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Changed
+- Some ecosystem plan files moved to the private internal submodule.
+  Public plan cross-references updated accordingly.
+  `AGENTS.md` updated with rules prohibiting public references to internal files.
+
+### Added
+- Playground: Notification poll (debounced mutation trigger). Record mutations in auto mode now trigger a debounced `NOTIFY_MS = 800 ms` notification timer instead of an immediate poll, producing a visible two-phase flash effect: the edited card flashes green instantly, then synced copies flash ~800 ms later when the engine tick fires. Rapid edits within the window are coalesced into one poll. Background interval raised from 2 000 ms to 5 000 ms. A 3 px countdown bar below the topbar depletes over the pending delay, giving a live read of "time until next engine tick". On boot the same countdown fires so the initial sync is visually telegraphed to the user.
+
 ### Fixed
+- Playground: Ctrl/Cmd+Enter to save was silently swallowed in both the YAML config editor and the JSON record editor modal because `defaultKeymap` binds `Mod-Enter` to `insertBlankLine` and was spread before the custom handlers. Custom save bindings are now registered first so they take priority. Hint text is now shown consistently in both editors ("Ctrl/Cmd + Enter to save"), and the hint colour was raised from `#3a3a3a` (invisible on dark background) to `#555`.
 - `onboard()` step 1b (matched records missing from a 3rd connector) now calls `lookup()` on the first available source side and includes remapped associations in the fanout INSERT, the same way step 2 already does. Previously these INSERTs landed without associations, and the warmup fullSync then dispatched "empty" UPDATE events (before == after, only the association changed) to add them. The fix eliminates those bogus warmup UPDATEs for the step 1b target connector. (T42 regression test covers this.)
 - `onboard()` step 1 now pre-fetches each matched side's own associations via `lookup()` before seeding its shadow, storing the correct `__assoc__` sentinel. Previously the sentinel was always `undefined`, causing the warmup fullSync to fail echo detection for any record with associations and dispatch spurious empty-looking READ + UPDATE events. (T43 regression test covers this.)
 - Removed warmup `{ fullSync: true }` ingest pass from `startEngine()`. The pass was a compensating mechanism for the missing-association bug in `onboard()` step 1b; now that step 1b includes associations in the fanout INSERT (and defers via `deferred_associations` when the target ID is not yet resolved), the warmup adds no value. Removed the corresponding step from the `playground.md § 8.2` boot-sequence spec.
+- Engine: records with empty canonical data (`{}`) now fan out correctly to target connectors. Previously the zero-key guard in `_processRecords` (designed to suppress no-op UPDATEs) was firing for brand-new INSERTs as well, because `resolveConflicts({}, undefined) = {}`. The guard now only suppresses dispatch when `existingTargetId !== undefined` (i.e. an UPDATE with nothing to change). Newly inserted records are always dispatched and linked in `identity_map`. (T46 regression test added.)
 
 ### Added
 - **Association predicates in mapping lineage diagram**: `assocMappings` entries now appear as extra rows inside each entity pill in the `Diagram` tab. They are visually distinct from regular field rows — amber colour scheme and a `⟶` prefix marker. The connector-local predicate name (`source`) appears in the entity column; the canonical name (`target`) appears in the centre column as an amber chip. SVG connection lines and focus/highlight behaviour work the same as for field rows.
