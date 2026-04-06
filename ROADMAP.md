@@ -110,7 +110,10 @@ Tracks structural and tooling improvements that are not milestone-gated.
 
 | Item | Plan | Status |
 |------|------|--------|
-| Demo runner with -d flag and built-in examples | [plans/meta/PLAN_DEMO.md](plans/meta/PLAN_DEMO.md) | done |
+| Demo runner with -d flag and built-in examples | [plans/demo/PLAN_DEMO.md](plans/demo/PLAN_DEMO.md) | done |
 | Move dev-only packages to dev/ | [plans/meta/PLAN_DEV_PACKAGES.md](plans/meta/PLAN_DEV_PACKAGES.md) | done |
 | Spec-driven migration (plans/ reorganisation) | [plans/meta/PLAN_SPEC_DRIVEN_MIGRATION.md](plans/meta/PLAN_SPEC_DRIVEN_MIGRATION.md) | done |
 | Remove poc/ directory | [plans/poc/PLAN_REMOVE_POC.md](plans/poc/PLAN_REMOVE_POC.md) | done |
+| Browser playground (Vite + sql.js WASM + in-memory connectors) | [plans/playground/PLAN_BROWSER_DEMO.md](plans/playground/PLAN_BROWSER_DEMO.md) | done |
+| Deploy playground to GitHub Pages | [plans/playground/PLAN_GITHUB_PAGES.md](plans/playground/PLAN_GITHUB_PAGES.md) | done |
+| Reorganise plans/ into subsystem folders | [plans/meta/PLAN_PLANS_REORG.md](plans/meta/PLAN_PLANS_REORG.md) | done |

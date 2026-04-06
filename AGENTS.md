@@ -162,7 +162,7 @@ the spec section first, then the code.
 
 `plans/<topic>/` holds only GAP and REPORT documents — never a parallel design authority.
 All plan files must live inside a subfolder (`plans/engine/`, `plans/connectors/`, `plans/poc/`,
-`plans/meta/`, etc.). No `.md` files go in the root of `plans/` itself (only `INDEX.md` and
+`plans/meta/`, `plans/demo/`, `plans/playground/`, etc.). No `.md` files go in the root of `plans/` itself (only `INDEX.md` and
 `README.md` are allowed there).
 
 ### Spec numbering
@@ -199,6 +199,9 @@ plans/              — gap analyses, research, historical rationale
   poc/              — pre-POC design intent documents
   engine/           — gap analyses for the sync engine
   connectors/       — gap analyses for connectors
+  demo/             — plans for the CLI demo runner (@opensync/demo)
+  playground/       — plans for the Vite browser playground (@opensync/playground)
+  meta/             — cross-cutting project plans (release, tooling, repo structure)
 AGENTS.md           — this file
 ESSENCE.md          — plain-language why
 ROADMAP.md          — milestones and exit criteria

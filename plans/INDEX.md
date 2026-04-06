@@ -52,31 +52,37 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/GAP_SESAM_JSON_PROTOCOLS.md](connectors/GAP_SESAM_JSON_PROTOCOLS.md) | Gap analysis: Sesam JSON Pull + Push protocol alignment with OpenSync connector SDK | draft | — |
 | [connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md](connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md) | Association targets outside the source connector's own channel — semantic type URIs, cross-channel entity name translation, stable URI passthrough | draft | — |
 
-## demo/ — Demo and playground plans
+## demo/ — CLI demo runner plans
 
 | File | What it covers | Status | Effort |
 |------|---------------|--------|--------|
-| [demo/PLAN_MAPPING_VISUALIZATION.md](demo/PLAN_MAPPING_VISUALIZATION.md) | Visual mapping diagram in the playground: channel/field-rename diagram as a Diagram tab alternative to the YAML editor | complete | — |
-| [demo/PLAN_PLAYGROUND_SMB_SEED.md](demo/PLAN_PLAYGROUND_SMB_SEED.md) | Expand playground seed to four systems (crm/erp/hr/webshop), six entity concepts, richer fields, intentionally unmapped fields, and a new smb-demo scenario | backlog | S |
-| [demo/PLAN_NOTIFICATION_POLL.md](demo/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | draft | — |
-| [demo/PLAN_AGENT_PANEL.md](demo/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
-| [demo/PLAN_URL_HISTORY.md](demo/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
-| [demo/PLAN_VERSION_BADGE.md](demo/PLAN_VERSION_BADGE.md) | Version badge in topbar + update notification when a newer GitHub Release is available, linking to release notes | backlog | S |
+| [demo/PLAN_DEMO.md](demo/PLAN_DEMO.md) | Plan: interactive demo runner with -d flag | complete | — |
+| [demo/PLAN_DEMO_ENHANCEMENTS.md](demo/PLAN_DEMO_ENHANCEMENTS.md) | jsonfiles nested format + optional watermark, associations-demo example, table display | complete | — |
 
-## meta/ — Project meta documents
+## playground/ — Vite browser playground plans
+
+| File | What it covers | Status | Effort |
+|------|---------------|--------|--------|
+| [playground/PLAN_BROWSER_DEMO.md](playground/PLAN_BROWSER_DEMO.md) | Run the demo in a browser — no install, no terminal, just a URL | complete | — |
+| [playground/PLAN_GITHUB_PAGES.md](playground/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | complete | — |
+| [playground/PLAN_MOVE_DEMO_BROWSER.md](playground/PLAN_MOVE_DEMO_BROWSER.md) | Move demo-browser/ to workspace root as a sibling of demo/ | complete | — |
+| [playground/PLAN_RENAME_PLAYGROUND.md](playground/PLAN_RENAME_PLAYGROUND.md) | Rename demo-browser/ to playground/ and @opensync/demo-browser to @opensync/playground | complete | — |
+| [playground/PLAN_MAPPING_VISUALIZATION.md](playground/PLAN_MAPPING_VISUALIZATION.md) | Visual mapping diagram in the playground: channel/field-rename diagram as a Diagram tab alternative to the YAML editor | complete | — |
+| [playground/PLAN_PLAYGROUND_TESTING.md](playground/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog | — |
+| [playground/PLAN_PLAYGROUND_MVU.md](playground/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
+| [playground/PLAN_PLAYGROUND_SMB_SEED.md](playground/PLAN_PLAYGROUND_SMB_SEED.md) | Expand playground seed to four systems (crm/erp/hr/webshop), six entity concepts, richer fields, intentionally unmapped fields, and a new smb-demo scenario | backlog | S |
+| [playground/PLAN_NOTIFICATION_POLL.md](playground/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | draft | — |
+| [playground/PLAN_AGENT_PANEL.md](playground/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
+| [playground/PLAN_URL_HISTORY.md](playground/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
+| [playground/PLAN_VERSION_BADGE.md](playground/PLAN_VERSION_BADGE.md) | Version badge in topbar + update notification when a newer GitHub Release is available, linking to release notes | backlog | S |
+
+## meta/ — Cross-cutting project plans
 
 | File | What it covers | Status | Effort |
 |------|---------------|--------|--------|
 | [meta/PLAN_SPEC_DRIVEN_MIGRATION.md](meta/PLAN_SPEC_DRIVEN_MIGRATION.md) | The spec-driven migration plan for this project | complete — historical | — |
-| [meta/PLAN_DEMO.md](meta/PLAN_DEMO.md) | Plan: interactive demo runner with -d flag | complete | — |
 | [meta/PLAN_DEV_PACKAGES.md](meta/PLAN_DEV_PACKAGES.md) | Plan: move dev-only packages to dev/ | complete | — |
-| [meta/PLAN_DEMO_ENHANCEMENTS.md](meta/PLAN_DEMO_ENHANCEMENTS.md) | jsonfiles nested format + optional watermark, associations-demo example, table display | complete | — |
-| [meta/PLAN_BROWSER_DEMO.md](meta/PLAN_BROWSER_DEMO.md) | Run the demo in a browser — no install, no terminal, just a URL | complete | — |
-| [meta/PLAN_PLAYGROUND_TESTING.md](meta/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog | — |
-| [meta/PLAN_PLAYGROUND_MVU.md](meta/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
-| [meta/PLAN_GITHUB_PAGES.md](meta/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | complete | — |
-| [meta/PLAN_RENAME_PLAYGROUND.md](meta/PLAN_RENAME_PLAYGROUND.md) | Rename demo-browser/ to playground/ and @opensync/demo-browser to @opensync/playground | complete | — |
-| [meta/PLAN_MOVE_DEMO_BROWSER.md](meta/PLAN_MOVE_DEMO_BROWSER.md) | Move demo-browser/ to workspace root as a sibling of demo/ | complete | — |
+| [meta/PLAN_PLANS_REORG.md](meta/PLAN_PLANS_REORG.md) | Reorganise plans/ into subsystem folders (demo/, playground/, meta/) | complete | XS |
 | [meta/PLAN_RELEASE_PROCEDURE.md](meta/PLAN_RELEASE_PROCEDURE.md) | Release procedure: tag-triggered GitHub Pages deploy, GitHub Release creation, human checklist; npm publish deferred to M1 | backlog | S |
 | [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
 | [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | backlog | XS |

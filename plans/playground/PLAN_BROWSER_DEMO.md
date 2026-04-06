@@ -1,6 +1,6 @@
 # PLAN_BROWSER_DEMO.md
 
-**Status:** in-progress  
+**Status:** complete  
 **Date:** 2026-04-05  
 
 Run the OpenSync demo entirely in a browser — no install, no terminal, just a URL.

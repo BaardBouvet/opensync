@@ -1,6 +1,6 @@
 # Plan: Reorganise plans/ into subsystem folders
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Domain:** project structure  
 **Scope:** `plans/` — file moves only, no content changes
