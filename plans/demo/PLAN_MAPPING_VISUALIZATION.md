@@ -310,12 +310,35 @@ No other spec files need updating.
 
 ---
 
-## Out of Scope
+## Out of Scope (v1)
 
 - Editing field mappings by dragging lines (that is a full graphical editor; separate plan).
 - Displaying expression bodies in the diagram; these remain YAML-only.
 - Association lineage (what entity an association foreign key resolves to); add later.
 - Printing or exporting the diagram.
+
+---
+
+## Possible v2 Additions
+
+### Connector field pill focus
+
+After entity expansion, individual connector field pills could themselves be selectable,
+entering a more specific focus than clicking the canonical pill:
+
+- Click **canonical pill** → highlight all connectors that participate in that canonical field.
+- Click **connector field pill** → highlight only the single path from that field to its
+  canonical node (e.g. `accountName → name`), dimming even other lines that connect to the
+  same canonical field.
+
+This creates a clear two-level focus hierarchy and is most useful for `forward_only` /
+`reverse_only` fields where the full canonical-pill view would reveal more connections than
+the user is asking about. It is not worth the added interaction surface in v1, where all
+fields are bidirectional.
+
+Implementation delta from v1: add a `data-connector-id` + `data-source-field` attribute to
+each field pill; extend the state machine with a `field-focused` state distinct from
+`canonical-focused`; add a CSS class `.ld-line-single` for single-path highlight.
 
 ---
 

@@ -69,3 +69,4 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_BROWSER_DEMO.md](meta/PLAN_BROWSER_DEMO.md) | Run the demo in a browser — no install, no terminal, just a URL | draft |
 | [meta/PLAN_PLAYGROUND_TESTING.md](meta/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog |
 | [meta/PLAN_PLAYGROUND_MVU.md](meta/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog |
+| [meta/PLAN_GITHUB_PAGES.md](meta/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | draft |
