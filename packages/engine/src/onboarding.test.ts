@@ -1877,3 +1877,121 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
   });
 });
 
+// ─── T42: onboard step 1b includes associations in fanout inserts ─────────────
+// Regression for: onboard step 1b (matched+missing-connector fanout) issued
+// INSERT without associations, then the warmup ingest dispatched a "silent" UPDATE
+// that only added the association (before == after in the event payload).
+// Fix: step 1b now calls lookup() on the first available source side and includes
+// the remapped associations in the INSERT, matching step 2 behaviour.
+// Spec: plans/engine/PLAN_ENGINE_USABILITY.md § 3.2
+
+describe("T42: onboard step 1b includes associations in the fanout INSERT", () => {
+  it("inserted record has associations and the warmup produces no UPDATE events", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    const dirC = makeTempDir();
+
+    // sa has companies + contacts (Alice with a companyId association)
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    // sb has the same records matched (Alice + Acme)
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "acc1" }] },
+    ]);
+    writeJson(join(dirB, "companies.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    // sc has NO contacts yet — Alice will be created via step 1b fanout
+    writeJson(join(dirC, "contacts.json"), [
+      // sc needs at least one row so discover() doesn't throw; Dave is unrelated to Alice
+      { id: "p1", data: { name: "Dave Palmer", email: "dave@example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirC, "companies.json"), [
+      { id: "org1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [
+        makeInst("sa", dirA, ["contacts", "companies"]),
+        makeInst("sb", dirB, ["contacts", "companies"]),
+        makeInst("sc", dirC, ["contacts", "companies"]),
+      ],
+      channels: [
+        {
+          id: "companies",
+          members: [
+            { connectorId: "sa", entity: "companies" },
+            { connectorId: "sb", entity: "companies" },
+            { connectorId: "sc", entity: "companies" },
+          ],
+          identityFields: ["domain"],
+        },
+        {
+          id: "contacts",
+          members: [
+            { connectorId: "sa", entity: "contacts" },
+            { connectorId: "sb", entity: "contacts" },
+            { connectorId: "sc", entity: "contacts" },
+          ],
+          identityFields: ["email"],
+        },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard companies first so the identity link is ready when contacts onboard runs
+    for (const connId of ["sa", "sb", "sc"]) {
+      await engine.ingest("companies", connId, { collectOnly: true });
+    }
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // Onboard contacts
+    for (const connId of ["sa", "sb", "sc"]) {
+      await engine.ingest("contacts", connId, { collectOnly: true });
+    }
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // sc should now have Alice with her association (step 1b fanout with lookup)
+    const scContacts = readJson(join(dirC, "contacts.json")) as Array<{
+      id: string;
+      data: { email: string };
+      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+    }>;
+    const alice = scContacts.find((r) => r.data.email === "alice@example.com");
+    expect(alice).toBeDefined();
+    expect(alice!.associations?.length).toBeGreaterThan(0);
+    // The association targetId must be the sc-side company ID (org1)
+    expect(alice!.associations![0].targetId).toBe("org1");
+
+    // Warmup fullSync: after the fix, sc's shadow has the assoc sentinel
+    // so echo detection fires for sc-targeted dispatches → zero UPDATEs to sc.
+    // (sa ↔ sb UPDATEs may still happen because step 1 seeds matched-record shadows
+    // without assoc sentinels — that is a separate, pre-existing behavior.)
+    const warmupResults = [];
+    for (const connId of ["sa", "sb", "sc"]) {
+      const r = await engine.ingest("contacts", connId, { fullSync: true });
+      warmupResults.push(...r.records);
+    }
+    const warmupUpdatesToSc = warmupResults.filter((r) => r.action === "update" && r.targetConnectorId === "sc");
+    expect(warmupUpdatesToSc).toHaveLength(0);
+  });
+});
+

@@ -13,6 +13,9 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Fixed
+- `onboard()` step 1b (matched records missing from a 3rd connector) now calls `lookup()` on the first available source side and includes remapped associations in the fanout INSERT, the same way step 2 already does. Previously these INSERTs landed without associations, and the warmup fullSync then dispatched "empty" UPDATE events (before == after, only the association changed) to add them. The fix eliminates those bogus warmup UPDATEs for the step 1b target connector. (T42 regression test covers this.)
+
 ### Added
 - `RecordSyncResult` now carries structured payload fields: `sourceData` (source record after inbound mapping), `sourceShadow` (engine's prior shadow for diff display), `after` (canonical values written to the target), and `before` (target's pre-write shadow for UPDATE events).  All fields are optional — callers that don't use them are unaffected.
 - New `action: "read"` variant on `SyncAction` / `RecordSyncResult`.  One READ result is prepended per non-echo-detected source record per ingest pass, before any dispatch results.

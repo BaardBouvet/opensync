@@ -560,10 +560,39 @@ export class SyncEngine {
 
     // 1b. Propagate each matched record to channel members not in match.sides.
     // This handles partial N-way matches (record in A+B but not C).
+    // Spec: plans/engine/PLAN_ENGINE_USABILITY.md § 3.2 — call lookup() on the first
+    // available source side so associations are included in the fanout insert, eliminating
+    // the post-boot UPDATE burst that previously occurred because the shadow had no
+    // __assoc__ sentinel and the warmup re-dispatched the same record.
+    const matchAssocCache = new Map<string, Association[] | undefined>(); // "connId/extId" → assoc
     for (let mi = 0; mi < report.matched.length; mi++) {
       const match = report.matched[mi]!;
       const canonicalId = matchCanonicals.get(mi)!;
       const matchedConnectors = new Set(match.sides.map((s) => s.connectorId));
+
+      // Resolve associations from the first source side that supports lookup().
+      let srcAssoc: Association[] | undefined;
+      let srcConnForAssoc: string | undefined;
+      for (const side of match.sides) {
+        const cacheKey = `${side.connectorId}/${side.externalId}`;
+        if (matchAssocCache.has(cacheKey)) {
+          srcAssoc = matchAssocCache.get(cacheKey);
+          srcConnForAssoc = side.connectorId;
+          break;
+        }
+        const sideWired = this.wired.get(side.connectorId);
+        const sideMember = memberByConnector.get(side.connectorId);
+        const sideEntityDef = sideWired?.entities.find((e) => e.name === sideMember?.entity);
+        if (sideEntityDef?.lookup) {
+          const looked = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
+          const rec = looked.find((r) => r.id === side.externalId);
+          srcAssoc = rec?.associations;
+          srcConnForAssoc = side.connectorId;
+          matchAssocCache.set(cacheKey, srcAssoc);
+          break;
+        }
+      }
+
       for (const targetMember of channel.members) {
         if (matchedConnectors.has(targetMember.connectorId)) continue;
         if (dbGetExternalId(this.db, canonicalId, targetMember.connectorId)) continue;
@@ -575,12 +604,20 @@ export class SyncEngine {
 
         if (breaker.evaluate() === "OPEN") break;
 
+        // Remap associations from source side to target (mirrors step 2 pattern).
+        const remappedAssoc = srcConnForAssoc && srcAssoc?.length
+          ? this._remapAssociations(srcAssoc, srcConnForAssoc, targetMember.connectorId)
+          : [];
+        const assocToInsert = (remappedAssoc !== null && !("error" in remappedAssoc) && remappedAssoc.length > 0)
+          ? remappedAssoc
+          : undefined;
+
         const outboundData = applyMapping(match.canonicalData, targetMember.outbound, "outbound");
         let newId: string | undefined;
         let insertError: string | undefined;
 
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData, associations: assocToInsert }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -588,7 +625,10 @@ export class SyncEngine {
         }
 
         if (newId) {
-          const fd = buildFieldData(undefined, match.canonicalData, targetMember.connectorId, ts, undefined);
+          const remappedSentinel = assocToInsert?.length
+            ? JSON.stringify([...assocToInsert].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+            : undefined;
+          const fd = buildFieldData(undefined, match.canonicalData, targetMember.connectorId, ts, remappedSentinel);
           this.db.transaction(() => {
             dbLinkIdentity(this.db, canonicalId, targetMember.connectorId, newId!);
             dbSetShadow(this.db, targetMember.connectorId, targetMember.entity, newId!, canonicalId, fd);
@@ -602,6 +642,14 @@ export class SyncEngine {
               dataBefore: undefined,
               dataAfter: fd,
             });
+            // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.2 — if remap returned
+            // null (identity link missing for the association target), write a deferred row
+            // so the retry loop can add the association once the link is established.
+            if (remappedAssoc === null && srcConnForAssoc) {
+              const srcMem = memberByConnector.get(srcConnForAssoc)!;
+              const srcSide = match.sides.find((s) => s.connectorId === srcConnForAssoc)!;
+              dbInsertDeferred(this.db, srcConnForAssoc, srcMem.entity, srcSide.externalId, targetMember.connectorId);
+            }
           })();
           // Spec: specs/sync-engine.md § OnboardResult
           inserts.push({ entity: targetMember.entity, action: "insert", sourceId: match.sides[0]!.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: match.canonicalData });
