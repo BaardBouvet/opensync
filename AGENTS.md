@@ -165,6 +165,10 @@ All plan files must live inside a subfolder (`plans/engine/`, `plans/connectors/
 `plans/meta/`, `plans/demo/`, `plans/playground/`, etc.). No `.md` files go in the root of `plans/` itself (only `INDEX.md` and
 `README.md` are allowed there).
 
+**Important:** Plans that modify `specs/connector-sdk.md` or any core SDK type (e.g. `RecordSyncResult`,
+`ConnectorRecord`, `FieldData`) belong in `plans/connectors/`, even if they primarily affect the engine.
+This ensures all changes to the connector contract are centralized and visible to connector authors.
+
 ### Spec numbering
 
 Number all items inside spec sections so they can be cited precisely. Use `§N.M` notation:

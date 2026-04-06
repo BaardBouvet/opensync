@@ -2,7 +2,7 @@
 
 **Status:** draft  
 **Date:** 2026-04-06  
-**Domain:** Engine API, Observability  
+**Domain:** Engine API, Observability, Connector Integration  
 **Scope:** `packages/engine/src/`, `packages/sdk/src/`, `playground/src/`, `demo/run.ts`  
 **Depends on:** `plans/engine/PLAN_ENGINE_USABILITY.md` (§ 2 — Silent Onboarding Events)  
 

@@ -50,24 +50,18 @@ available for advanced use and testing. This would reduce the demo glue from ~40
 
 ---
 
-## § 2 Silent Onboarding Events
+## § 2 Event Payload and Onboarding Events
 
-### § 2.1 The problem
+See `plans/connectors/PLAN_ENGINE_SYNC_EVENTS.md` for the design of first-class `SyncEvent`
+emission from the engine, which includes:
 
-`onboard()` returns only aggregate counters (`linked`, `shadowsSeeded`, `uniqueQueued`).
-It does NOT return the individual fanout records it inserted. These are logged to
-`transaction_log` internally but are opaque to the caller.
+- **§ 2** — Moving event construction into the engine and extending `RecordSyncResult` to
+  carry field payloads (`sourceData`, `sourceShadow`, `before`, `after`).
+- **§ 5** — Exposing individual onboarding fanout INSERT events to callers via
+  `OnboardResult.inserts`.
 
-Consequence: the browser demo's event log was blank during the boot phase. Users saw
-records appearing in the UI with no explanation of where they came from. The demo had to
-separately query `transaction_log` after the fact, then infer source/target connectors
-by inspecting `identity_map` — fragile and non-composable.
-
-### § 2.2 Proposed fix
-
-Return `RecordSyncResult[]` (or an equivalent list) from `onboard()` so callers can log
-individual insert events. The `batchId` is already assigned internally and could be exposed
-too for correlation.
+This plan originated in this document but is now owned by the connector-integration plan
+so that changes to `RecordSyncResult` (a core SDK type) are centralized.
 
 ---
 
