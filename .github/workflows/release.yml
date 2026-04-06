@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write   # create GitHub Releases
+  pages: write      # deploy to GitHub Pages
+  id-token: write   # authenticate to GitHub Pages
 
 concurrency:
   group: release-${{ github.ref }}
@@ -51,6 +53,25 @@ jobs:
 
       - name: Build
         run: cd playground && bun run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: playground/dist
+
+  # ── Deploy playground to GitHub Pages ──────────────────────────────────
+  deploy-playground:
+    name: Deploy playground to GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-playground
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   # ── Create GitHub Release ───────────────────────────────────────────────
   publish-release:
