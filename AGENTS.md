@@ -62,6 +62,7 @@ bun test packages/sdk/
   ```
   **Status:** backlog  
   **Date:** 2026-04-05  
+  **Effort:** M  
   ```
   Each line must end with two trailing spaces (Markdown hard break) so they render on separate
   lines in GitHub preview. Additional metadata lines (Domain, Scope, Spec, Depends on, …) may follow.
@@ -188,6 +189,7 @@ dev/                — local-only development and test fixtures (never publishe
   connectors/       — dev connector packages (jsonfiles, mock-crm, mock-erp)
   servers/          — companion HTTP servers for mock connectors (mock-crm, mock-erp)
 demo/               — interactive demo runner and examples
+playground/         — browser playground (Vite, sql.js WASM, in-memory connectors)
 specs/              — canonical specifications (the authority)
 plans/              — gap analyses, research, historical rationale
   poc/              — pre-POC design intent documents

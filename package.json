@@ -7,7 +7,7 @@
     "dev/connectors/*",
     "dev/servers/*",
     "demo",
-    "demo/demo-browser"
+    "playground"
   ],
   "scripts": {
     "build": "tsc --build",

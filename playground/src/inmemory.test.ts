@@ -1,5 +1,5 @@
 /**
- * demo/demo-browser/src/inmemory.test.ts
+ * playground/src/inmemory.test.ts
  *
  * Unit tests for the in-memory connector used by the browser demo.
  * These run in Bun — no browser or WASM required.

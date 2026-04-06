@@ -287,7 +287,7 @@ See `plans/engine/PLAN_CONFIG_VALIDATION.md` for related work.
 
 ## § 10 Browser Demo Playground
 
-`demo/demo-browser/` is a self-contained Vite package that runs the full OpenSync engine
+`playground/` is a self-contained Vite package that runs the full OpenSync engine
 entirely in a browser — no install, no terminal, no server required.
 
 ### § 10.1 What it shows
@@ -302,7 +302,7 @@ A split-pane developer playground:
 
 ### § 10.2 Scenarios
 
-Built-in scenarios live in `demo/demo-browser/src/scenarios/`. Each is a static TypeScript
+Built-in scenarios live in `playground/src/scenarios/`. Each is a static TypeScript
 module exporting a `ScenarioDefinition`. The registry in `scenarios/index.ts` lists them.
 Adding a new scenario requires only a new module + one registry entry.
 
@@ -313,15 +313,15 @@ associations).
 
 | Layer | Implementation |
 |-------|---------------|
-| SQLite | `sql.js` (Emscripten WASM port) via `demo/demo-browser/src/db-sqljs.ts` |
-| Connector | `InMemoryConnector` in `demo/demo-browser/src/inmemory.ts` (Map-backed, no fs) |
+| SQLite | `sql.js` (Emscripten WASM port) via `playground/src/db-sqljs.ts` |
+| Connector | `InMemoryConnector` in `playground/src/inmemory.ts` (Map-backed, no fs) |
 | Engine | `@opensync/engine` unchanged — no browser-specific modifications |
 | Bundler | Vite; dead-code stubs replace `better-sqlite3`, `bun:sqlite`, `node:fs`, `node:path` |
 
 ### § 10.4 Build and hosting
 
 ```sh
-cd demo/demo-browser
+cd playground
 bun run dev    # local dev server (hot reload)
 bun run build  # produces dist/ — deploy to any static host
 ```

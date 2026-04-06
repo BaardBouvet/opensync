@@ -7,8 +7,8 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 // requests "sql-wasm.wasm". Copy both so either build works.
 function copySqlWasmFiles(): void {
   const sqlJsDistCandidates = [
-    path.resolve(import.meta.dirname, "../../node_modules/.bun/sql.js@1.14.1/node_modules/sql.js/dist"),
-    path.resolve(import.meta.dirname, "../../node_modules/sql.js/dist"),
+    path.resolve(import.meta.dirname, "../node_modules/.bun/sql.js@1.14.1/node_modules/sql.js/dist"),
+    path.resolve(import.meta.dirname, "../node_modules/sql.js/dist"),
   ];
   const filenames = ["sql-wasm-browser.wasm", "sql-wasm.wasm"];
   const publicDir = path.resolve(import.meta.dirname, "public");
@@ -71,7 +71,7 @@ export default defineConfig({
     host: true, // bind to 0.0.0.0 so the devcontainer port-forward is reachable from the host
     fs: {
       // Allow importing the WASM file from the sql.js package
-      allow: ["../.."],
+      allow: [".."]
     },
   },
 });
