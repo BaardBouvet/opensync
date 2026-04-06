@@ -1,3 +1,0 @@
-[submodule "plans/internal"]
-	path = plans/internal
-	url = git@github.com:you/opensync-internal.git

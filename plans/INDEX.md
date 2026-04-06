@@ -56,6 +56,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/PLAN_ASSOCIATION_SCHEMA.md](connectors/PLAN_ASSOCIATION_SCHEMA.md) | Declare supported predicates on EntityDefinition via `associationSchema`; engine pre-flight checks and write-side dispatch filtering | draft | M |
 | [connectors/PLAN_FIELD_READONLY.md](connectors/PLAN_FIELD_READONLY.md) | `readonly` flag on `FieldDescriptor` for server-computed fields; engine strips on insert+update paths, pre-flight warning on mappings that target readonly fields | backlog | S |
 | [connectors/PLAN_FILE_INGEST.md](connectors/PLAN_FILE_INGEST.md) | File-based ingest via SFTP, CSV, and XML: transport+parser architecture, SFTP connector, SDK csv/xml helpers, watermark strategy (mtime/hash), row-per-entity mode, write-back, HTTP/S file polling | draft | L |
+| [connectors/PLAN_ASYNC_EXPORT_TRANSPORT.md](connectors/PLAN_ASYNC_EXPORT_TRANSPORT.md) | Async export transport: POST job → poll status → download result file(s); AsyncExportTransport interface, transport.asyncExport() factory, backoff/timeout poll loop, Salesforce Bulk API and HubSpot examples | draft | M |
 | [connectors/PLAN_READ_RECORD_UPDATED_AT.md](connectors/PLAN_READ_RECORD_UPDATED_AT.md) | Add `updatedAt?: string` to `ReadRecord`; engine uses it as the per-record LWW timestamp instead of engine ingest time (`Date.now()`) | draft | S |
 
 ## demo/ — CLI demo runner plans
