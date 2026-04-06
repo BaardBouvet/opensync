@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenSync Playground</title>
+  <style>
+    /* ── Reset + base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; font-family: system-ui, sans-serif; font-size: 13px; background: #1a1a1a; color: #d4d4d4; }
+
+    /* ── Top bar ──────────────────────────────────────────────────────────── */
+    #topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 14px; height: 42px;
+      background: #111; border-bottom: 1px solid #333;
+      flex-shrink: 0;
+    }
+    #topbar .brand { font-weight: 700; font-size: 14px; color: #fff; letter-spacing: 0.3px; }
+    #topbar label { color: #888; font-size: 12px; }
+    #topbar select {
+      background: #222; color: #d4d4d4; border: 1px solid #444;
+      padding: 3px 8px; border-radius: 4px; font-size: 12px;
+    }
+    .status { font-size: 12px; color: #888; }
+    .status.running { color: #4ec94e; }
+    .status.loading { color: #e8a838; }
+    .spacer { flex: 1; }
+    button {
+      background: #2d2d2d; color: #ccc; border: 1px solid #444;
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    button:hover { background: #3a3a3a; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button:disabled:hover { background: #2d2d2d; }
+    /* Auto-sync (poll) toggle label */
+    .realtime-label {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 12px; color: #888; cursor: pointer; user-select: none;
+    }
+    .realtime-label input[type="checkbox"] {
+      accent-color: #4ec94e; width: 13px; height: 13px; cursor: pointer;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    #layout { display: flex; height: calc(100vh - 42px); }
+
+    /* ── Left pane (config editor only) ──────────────────────────────────── */
+    #editor-pane {
+      width: 360px; min-width: 260px; max-width: 480px;
+      display: flex; flex-direction: column;
+      border-right: 1px solid #333; background: #18181b;
+      overflow: hidden;
+    }
+    #editor-pane-title {
+      padding: 8px 12px; font-size: 11px; color: #555;
+      text-transform: uppercase; letter-spacing: 0.8px;
+      border-bottom: 1px solid #2a2a2a; flex-shrink: 0;
+    }
+    #editor-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .editor-section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 10px; background: #1f1f22; border-bottom: 1px solid #2a2a2a;
+      flex-shrink: 0;
+    }
+    .editor-section-title { font-size: 11px; color: #888; font-family: monospace; }
+    .editor-hint { padding: 3px 10px; font-size: 10px; color: #3a3a3a; flex-shrink: 0; }
+    .btn-save {
+      font-size: 11px; padding: 2px 8px;
+      background: #1a3a1a; color: #4ec94e; border-color: #2a5a2a;
+    }
+    .btn-save:hover { background: #1f4a1f; }
+    /* The CodeMirror mount takes all remaining height in the left pane */
+    .editor-mount-full { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .editor-mount-full .cm-editor { flex: 1; height: 100%; }
+
+    /* ── Right pane ───────────────────────────────────────────────────────── */
+    #right-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #resize-handle { width: 4px; background: #222; cursor: col-resize; flex-shrink: 0; }
+    #resize-handle:hover, #resize-handle.dragging { background: #444; }
+    #devtools-resize-handle { height: 4px; background: #222; cursor: row-resize; flex-shrink: 0; }
+    #devtools-resize-handle:hover, #devtools-resize-handle.dragging { background: #444; }
+
+    /* ── Channel tab bar ──────────────────────────────────────────────────── */
+    #systems-container { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .channel-tab-bar {
+      display: flex; gap: 0; border-bottom: 1px solid #2a2a2a; flex-shrink: 0;
+      background: #111; padding: 0 8px;
+    }
+    .channel-tab {
+      padding: 7px 16px; font-size: 12px; font-family: monospace;
+      background: transparent; color: #555; border: none; border-radius: 0;
+      cursor: pointer; border-bottom: 2px solid transparent;
+      transition: color 0.12s; letter-spacing: 0.3px;
+    }
+    .channel-tab:hover { color: #aaa; background: transparent; }
+    .channel-tab.active { color: #a78bfa; border-bottom: 2px solid #a78bfa; }
+    .channel-tab-unmapped { color: #444; }
+    .channel-tab-unmapped:hover { color: #888; }
+    .channel-tab-unmapped.active { color: #e8a838; border-bottom: 2px solid #e8a838; }
+
+    /* ── Channel area + cluster grid ─────────────────────────────────────── */
+    .channel-area { flex: 1; overflow-x: auto; overflow-y: hidden; }
+
+    /* Cluster view — flex column filling channel area */
+    .cluster-view { display: flex; flex-direction: column; height: 100%; min-width: fit-content; }
+
+    /* Column header row */
+    .cluster-header-row {
+      display: grid; flex-shrink: 0;
+      background: #1f1f22; border-bottom: 1px solid #2e2e2e;
+    }
+    .cluster-col-head {
+      padding: 7px 12px; display: flex; align-items: baseline; gap: 8px;
+      border-right: 1px solid #2a2a2a;
+    }
+    .cluster-col-head:last-child { border-right: none; }
+
+    /* System / entity labels (reused in cluster header) */
+    .system-name { font-weight: 700; font-size: 13px; color: #fff; }
+    .entity-badge {
+      font-size: 10px; font-family: monospace; color: #666;
+      background: #2a2a2e; border: 1px solid #333; padding: 1px 6px; border-radius: 3px;
+    }
+
+    /* Scrollable cluster rows */
+    .cluster-body { flex: 1; overflow-y: auto; padding: 8px 6px; }
+    .cluster-group {
+      position: relative;
+      margin-bottom: 10px;
+      border: 1px solid #2a2a3a;
+      border-radius: 6px;
+      background: #16161a;
+      padding: 14px 5px 5px 5px;
+    }
+    .cluster-label {
+      position: absolute;
+      top: 0;
+      left: 10px;
+      transform: translateY(-50%);
+      background: #16161a;
+      padding: 0 5px;
+      font-family: monospace;
+      font-size: 10px;
+      color: #484870;
+      letter-spacing: 0.2px;
+    }
+    .cluster-cards-row { display: grid; gap: 6px; }
+    .cluster-cell { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+    .cluster-cell-empty {
+      border: 1px dashed #252525; border-radius: 5px; min-height: 50px;
+    }
+    .cluster-cell-pending {
+      background: #1e1e22; border: 1px solid #2e2e2e; border-radius: 5px;
+      padding: 6px 8px; font-size: 10px; color: #555; font-family: monospace;
+    }
+
+    /* New record row (per-connector buttons, outside clusters) */
+    .cluster-new-row {
+      display: grid; flex-shrink: 0;
+      border-top: 1px solid #2a2a2a; padding: 5px 6px; gap: 6px;
+      background: #111;
+    }
+
+    /* ── Record cards ─────────────────────────────────────────────────────── */
+    .record-card {
+      background: #1e1e22; border: 1px solid #2e2e2e; border-radius: 5px;
+      padding: 8px 10px; margin-bottom: 6px;
+      transition: border-color 0.2s;
+    }
+    .record-card:hover { border-color: #3a3a46; }
+    .record-id { font-size: 10px; color: #444; display: block; margin-bottom: 4px; }
+    .record-fields { width: 100%; border-collapse: collapse; }
+    .record-fields td { padding: 1px 0; vertical-align: top; }
+    .field-key { color: #7a9fbf; font-size: 11px; padding-right: 8px; white-space: nowrap; }
+    .field-val { color: #d4d4d4; font-size: 11px; word-break: break-all; }
+    .assoc-badges { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+    .assoc-badge {
+      font-size: 10px; background: #1a2a3a; border: 1px solid #2a4a5a;
+      color: #7eb8d4; padding: 1px 6px; border-radius: 3px; user-select: none;
+    }
+    .assoc-badge-link { cursor: pointer; }
+    .assoc-badge-link:hover { background: #1f3a4a; color: #a0d4f0; border-color: #3a6a7a; }
+    /* Missing target (object no longer exists in this connector) */
+    .assoc-missing {
+      background: #2a1010; border-color: #5a2020; color: #e07070; cursor: default;
+    }
+    .assoc-missing::before { content: "⚠ "; }
+    /* Soft-deleted target */
+    .assoc-deleted-target {
+      background: #1e1a10; border-color: #4a3a10; color: #c4a050; cursor: pointer;
+    }
+    .assoc-deleted-target:hover { background: #252015; color: #d4b060; }
+    .assoc-deleted-target::before { content: "⊘ "; }
+
+    /* Count badge in column headers */
+    .count-badge {
+      font-size: 10px; font-family: monospace; background: #1c2a1c;
+      border: 1px solid #2a4a2a; color: #4a9a4a; border-radius: 3px;
+      padding: 0 5px; margin-left: 4px; min-width: 16px; text-align: center;
+    }
+
+    /* Card footer: modified time + action buttons */
+    .card-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 6px; padding-top: 5px;
+      border-top: 1px solid #272727;
+    }
+    .record-modified { font-size: 10px; color: #3a3a3a; font-family: monospace; }
+    .card-actions { display: flex; gap: 4px; }
+    .btn-card {
+      font-size: 10px; padding: 2px 8px;
+      background: #252528; color: #888; border-color: #353535;
+    }
+    .btn-card:hover { background: #2e2e33; color: #ccc; }
+    .btn-delete { color: #885555; border-color: #3a2525; }
+    .btn-delete:hover { background: #2a1818; color: #e06c75; }
+    .btn-restore { color: #4ec94e; border-color: #2a5a2a; }
+    .btn-restore:hover { background: #1a2a1a; color: #6aef6a; }
+
+    /* Record empty placeholder */
+    .record-empty { color: #444; font-size: 11px; text-align: center; padding: 20px 0; font-style: italic; }
+
+    /* "+ New" inline button in column header — same size as edit/delete */
+    .btn-new-inline {
+      margin-left: auto; font-size: 10px; padding: 2px 8px;
+      background: #1a281a; color: #3a7a3a; border-color: #2a3f2a;
+    }
+    .btn-new-inline:hover { background: #1e301e; color: #4ec94e; }
+
+    /* Keep old btn-new-record style for unmapped view (just in case) */
+    .btn-new-record {
+      width: 100%;
+      background: #1a281a; color: #3a7a3a; border-color: #2a3f2a;
+      font-size: 11px; padding: 5px; flex-shrink: 0;
+    }
+    .btn-new-record:hover { background: #1e301e; color: #4ec94e; }
+
+    /* ── Record deleted (soft-delete) ────────────────────────────────────── */
+    .record-deleted { opacity: 0.45; border-style: dashed; }
+    .record-deleted .field-val { text-decoration: line-through; color: #555; }
+
+    /* ── Record highlight (association nav) ─────────────────────────────── */
+    .record-highlight { border-color: #a78bfa !important; box-shadow: 0 0 0 2px rgba(167,139,250,0.25); }
+
+    /* ── Flash animation ─────────────────────────────────────────────────── */
+    @keyframes record-flash {
+      0%   { background: #162a18; border-color: #2d6b35; box-shadow: 0 0 0 2px rgba(78,201,78,0.15); }
+      100% { background: #1e1e22; border-color: #2e2e2e; box-shadow: none; }
+    }
+    .record-flash { animation: record-flash 1.4s ease-out; }
+
+    /* ── Dev tools panel (tabbed: Events | DB State) ─────────────────────── */
+    #devtools-container {
+      height: 160px; min-height: 100px; border-top: 1px solid #2a2a2a;
+      display: flex; flex-direction: column; background: #111; flex-shrink: 0;
+    }
+    .devtools-tab-bar {
+      display: flex; align-items: center;
+      padding: 0 8px; border-bottom: 1px solid #1e1e1e;
+      flex-shrink: 0; gap: 0;
+    }
+    .devtools-tab {
+      padding: 5px 14px; font-size: 11px; font-family: monospace;
+      background: transparent; color: #555; border: none; border-radius: 0;
+      cursor: pointer; border-bottom: 2px solid transparent;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .devtools-tab:hover { color: #888; background: transparent; }
+    .devtools-tab.active { color: #7eb8d4; border-bottom: 2px solid #7eb8d4; }
+    .devtools-panel { flex: 1; overflow-y: auto; display: none; min-height: 0; }
+    .devtools-panel-active { display: block; }
+    .devtools-panel-db { padding: 6px 10px; }
+
+    /* ── Ticks (Log) panel (network-log style) ───────────────────────────── */
+    .devtools-panel-ticks { display: none; overflow: hidden; }
+    .devtools-panel-ticks.devtools-panel-active { display: flex; flex-direction: column; }
+    .ticks-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+    /* Left column: toolbar + list */
+    .ticks-left { width: 140px; flex-shrink: 0; border-right: 1px solid #1e1e1e; display: flex; flex-direction: column; }
+    .ticks-toolbar {
+      display: flex; align-items: center; justify-content: flex-end;
+      padding: 2px 6px; border-bottom: 1px solid #1a1a1a; flex-shrink: 0;
+    }
+    .ticks-clear-btn { font-size: 10px; padding: 1px 6px; color: #444; }
+    .ticks-clear-btn:hover { color: #888; }
+    .ticks-list { flex: 1; overflow-y: auto; }
+    .tick-row {
+      display: flex; flex-direction: column; gap: 2px;
+      padding: 5px 8px; cursor: pointer;
+      border-bottom: 1px solid #1a1a1a;
+      border-left: 2px solid transparent;
+    }
+    .tick-row:hover { background: #131318; }
+    .tick-row-selected { background: #131318; border-left-color: #7eb8d4; }
+    .tick-label { font-family: monospace; font-size: 11px; color: #555; }
+    .tick-row-selected .tick-label { color: #ccc; }
+    .tick-counts { display: flex; gap: 5px; }
+    .tick-count-read { font-family: monospace; font-size: 9px; color: #555; }
+    .tick-count-ins  { font-family: monospace; font-size: 9px; color: #4ec94e; }
+    .tick-count-upd  { font-family: monospace; font-size: 9px; color: #7eb8d4; }
+    /* Right: event detail */
+    .tick-detail { flex: 1; overflow-y: auto; }
+    .tick-detail-empty { font-size: 11px; color: #333; font-style: italic; padding: 8px 12px; }
+    /* Event item wrapper */
+    .te-item { border-bottom: 1px solid #161616; }
+    .tick-event-row {
+      display: flex; align-items: center; gap: 8px;
+      font-family: monospace; font-size: 11px; padding: 3px 10px;
+    }
+    .te-expandable { cursor: pointer; }
+    .tick-event-row:hover { background: #131318; }
+    .te-op {
+      font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+      flex-shrink: 0; letter-spacing: 0.3px; min-width: 50px; text-align: center;
+    }
+    .te-op-insert { background: #1a2e1a; color: #4ec94e; border: 1px solid #2a4a2a; }
+    .te-op-update { background: #1a2a38; color: #7eb8d4; border: 1px solid #2a4a5a; }
+    .te-op-read   { background: #1e1e22; color: #555;    border: 1px solid #2a2a30; }
+    .te-op-delete { background: #2e1a1a; color: #e06c75; border: 1px solid #4a2a2a; }
+    .te-op-defer  { background: #2e2518; color: #e8a838; border: 1px solid #4a3a1a; }
+    .te-conn   { color: #555; font-size: 10px; flex-shrink: 0; }
+    .te-entity { color: #666; font-size: 10px; flex-shrink: 0; }
+    .te-id     { color: #888; font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .te-chevron { font-size: 9px; color: #444; flex-shrink: 0; }
+    .te-expandable:hover .te-chevron { color: #888; }
+    .te-ts     { color: #333; font-size: 10px; flex-shrink: 0; margin-left: auto; }
+    /* Expandable detail */
+    .te-detail { display: none; padding: 4px 10px 6px 10px; background: #0f0f14; }
+    .te-item-open .te-detail { display: block; }
+    .te-json {
+      margin: 0; font-family: monospace; font-size: 10px; color: #7eb8d4;
+      white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+    }
+    .te-detail-note { font-size: 10px; color: #444; font-style: italic; }
+    .te-diff-table { border-collapse: collapse; font-family: monospace; font-size: 10px; width: 100%; }
+    .te-diff-key   { color: #888; padding: 1px 8px 1px 0; white-space: nowrap; vertical-align: top; }
+    .te-diff-old   { color: #c06060; padding: 1px 8px; }
+    .te-diff-arrow { color: #444; padding: 1px 4px; }
+    .te-diff-new   { color: #4ec94e; padding: 1px 0; word-break: break-all; }
+    .db-table-section { display: flex; flex-direction: column; gap: 4px; }
+    .db-table-title { font-size: 10px; color: #666; font-family: monospace; text-transform: uppercase; letter-spacing: 0.5px; }
+    .db-table-empty { font-size: 11px; color: #3a3a3a; font-style: italic; }
+    .db-table { border-collapse: collapse; font-family: monospace; font-size: 10px; width: 100%; }
+    .db-table th { color: #555; text-align: left; padding: 2px 8px 2px 0; border-bottom: 1px solid #222; font-weight: normal; }
+    .db-table td { color: #888; padding: 1px 8px 1px 0; border-bottom: 1px solid #1a1a1a; white-space: nowrap; }
+    .btn-ghost { background: transparent; border: none; color: #555; padding: 2px 6px; font-size: 11px; cursor: pointer; }
+    .btn-ghost:hover { color: #888; background: transparent; }
+
+    /* ── Unmapped entities view ──────────────────────────────────────────── */
+    /* Reuses cluster-view + cluster-header-row + cluster-body; just adds the col layout */
+    .unmapped-cols-row { display: grid; gap: 6px; align-items: start; }
+    .unmapped-col { min-width: 0; }
+
+    /* ── Edit modal / dialog ─────────────────────────────────────────────── */
+    .edit-dialog {
+      background: #18181b; border: 1px solid #3a3a44; border-radius: 8px;
+      padding: 0; color: #d4d4d4;
+      min-width: 480px; max-width: 680px; width: 90vw;
+      box-shadow: 0 24px 72px rgba(0,0,0,0.7);
+    }
+    .edit-dialog::backdrop { background: rgba(0,0,0,0.55); }
+    .dialog-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px; border-bottom: 1px solid #2a2a2a;
+    }
+    .dialog-title { font-size: 12px; font-weight: 600; color: #bbb; font-family: monospace; }
+    /* Optional ID field shown only in new-record dialogs */
+    .dialog-id-field {
+      padding: 8px 16px 4px; border-bottom: 1px solid #222;
+    }
+    .dialog-id-label {
+      display: block; font-size: 11px; color: #888; margin-bottom: 4px;
+    }
+    .dialog-id-optional { color: #555; }
+    .dialog-id-input {
+      width: 100%; box-sizing: border-box;
+      background: #111; border: 1px solid #333; border-radius: 4px;
+      color: #d4d4d4; font-size: 12px; font-family: monospace;
+      padding: 5px 8px; outline: none;
+    }
+    .dialog-id-input:focus { border-color: #555; }
+    .dialog-editor-mount { padding: 0; }
+    .dialog-footer {
+      display: flex; justify-content: flex-end; gap: 8px;
+      padding: 10px 16px; border-top: 1px solid #2a2a2a;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div id="topbar">
+  <span class="brand">OpenSync Playground</span>
+  <label for="scenario-select">Scenario:</label>
+  <select id="scenario-select"></select>
+  <span id="status" class="status loading">starting…</span>
+  <span class="spacer"></span>
+  <label class="realtime-label" for="toggle-realtime">
+    <input type="checkbox" id="toggle-realtime" checked>
+    auto
+  </label>
+  <button id="btn-sync" disabled title="Disable auto-sync to use manual sync">Sync</button>
+  <button id="btn-reset">Reset</button>
+</div>
+
+<!-- Main layout -->
+<div id="layout">
+
+  <!-- Left: config editor pane -->
+  <div id="editor-pane">
+    <div id="editor-pane-title">Config</div>
+    <div id="editor-container"></div>
+  </div>
+
+  <div id="resize-handle"></div>
+
+  <!-- Right: systems + devtools -->
+  <div id="right-pane">
+    <div id="systems-container"></div>
+    <div id="devtools-resize-handle"></div>
+    <div id="devtools-container"></div>
+  </div>
+
+</div>
+
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>
