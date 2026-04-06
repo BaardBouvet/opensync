@@ -81,6 +81,33 @@ export function dbGetAllCanonicals(db: Db, connectorIds: string[]): string[] {
     .map((r) => r.canonical_id);
 }
 
+/**
+ * Returns canonical IDs that are linked to at least one member in the given
+ * list, filtered by entity name via shadow_state. This prevents contacts/
+ * employees from leaking into a companies channel that shares the same
+ * connector IDs.
+ */
+export function dbGetCanonicalsByChannelMembers(
+  db: Db,
+  members: Array<{ connectorId: string; entity: string }>,
+): string[] {
+  if (members.length === 0) return [];
+  const clauses = members
+    .map(() => "(im.connector_id = ? AND ss.entity_name = ?)")
+    .join(" OR ");
+  const params = members.flatMap((m) => [m.connectorId, m.entity]);
+  return db
+    .prepare<{ canonical_id: string }>(
+      `SELECT DISTINCT im.canonical_id
+       FROM identity_map im
+       JOIN shadow_state ss
+         ON ss.connector_id = im.connector_id AND ss.external_id = im.external_id
+       WHERE (${clauses})`,
+    )
+    .all(...params)
+    .map((r) => r.canonical_id);
+}
+
 export function dbGetLinkedConnectors(db: Db, canonicalId: string): string[] {
   return db
     .prepare<{ connector_id: string }>(

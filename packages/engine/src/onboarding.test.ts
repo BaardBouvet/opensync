@@ -69,6 +69,17 @@ function makeInstance(id: string, dir: string): ResolvedConfig["connectors"][0] 
   };
 }
 
+function makeInstanceEntity(id: string, dir: string, filename: string): ResolvedConfig["connectors"][0] {
+  return {
+    id,
+    connector: jsonfiles,
+    config: { filePaths: [join(dir, filename)] },
+    auth: {},
+    batchIdRef: { current: undefined },
+    triggerRef: { current: undefined },
+  };
+}
+
 function makeConfig(
   connectors: ResolvedConfig["connectors"],
   channelMembers: { connectorId: string; entity: string }[],
@@ -1542,4 +1553,327 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
   });
 });
 
+// ─── T39: 3-connector partial match — no duplicate propagation ───────────────
+//
+// Bug: discover() required a record to appear in ALL connectors to be "matched".
+// A record in 2 of 3 connectors ended up as uniquePerSide from BOTH sides,
+// causing onboard() to insert it twice into the missing connector.
+// Fix: match any record appearing in 2+ connectors; 1-of-N = uniquePerSide.
+
+describe("T39: 3-connector partial match — no duplicate propagation on onboard", () => {
+  function makePartialMatchSetup() {
+    const dirA = makeTempDir(); const dirB = makeTempDir(); const dirC = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" } },
+      { id: "a2", data: { name: "Bob",   email: "bob@example.com"   } },
+      { id: "a3", data: { name: "Carol", email: "carol@example.com" } },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" } },
+      { id: "b2", data: { name: "Bob",   email: "bob@example.com"   } },
+    ]);
+    writeJson(join(dirC, "contacts.json"), [
+      { id: "c1", data: { name: "Bob",   email: "bob@example.com"   } },
+    ]);
+    return { dirA, dirB, dirC };
+  }
+
+  it("discover classifies Alice (in A+B) as matched, Carol (A only) as unique", async () => {
+    const db = openDb(":memory:");
+    const { dirA, dirB, dirC } = makePartialMatchSetup();
+    const engine = new SyncEngine(
+      makeConfig(
+        [makeInstance("system-a", dirA), makeInstance("system-b", dirB), makeInstance("system-c", dirC)],
+        [
+          { connectorId: "system-a", entity: "contacts" },
+          { connectorId: "system-b", entity: "contacts" },
+          { connectorId: "system-c", entity: "contacts" },
+        ],
+      ),
+      db,
+    );
+    await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
+    const report = await engine.discover("ch");
+
+    // Bob (all 3) + Alice (A+B) = 2 matches
+    expect(report.matched.length).toBe(2);
+    // Carol (A only) = 1 unique
+    expect(report.uniquePerSide.length).toBe(1);
+    expect(report.uniquePerSide[0]!.externalId).toBe("a3");
+  });
+
+  it("onboard writes exactly one Alice per connector — no duplicates", async () => {
+    const db = openDb(":memory:");
+    const { dirA, dirB, dirC } = makePartialMatchSetup();
+    const engine = new SyncEngine(
+      makeConfig(
+        [makeInstance("system-a", dirA), makeInstance("system-b", dirB), makeInstance("system-c", dirC)],
+        [
+          { connectorId: "system-a", entity: "contacts" },
+          { connectorId: "system-b", entity: "contacts" },
+          { connectorId: "system-c", entity: "contacts" },
+        ],
+      ),
+      db,
+    );
+    await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-c", { batchId: crypto.randomUUID(), collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    const bRecords = readJson(join(dirB, "contacts.json")) as Array<{ data: { email: string } }>;
+    const cRecords = readJson(join(dirC, "contacts.json")) as Array<{ data: { email: string } }>;
+
+    // B (had Alice + Bob): gets Carol added → 3 records, exactly 1 Alice
+    expect(bRecords.length).toBe(3);
+    expect(bRecords.filter(r => r.data.email === "alice@example.com").length).toBe(1);
+
+    // C (had Bob): gets Alice + Carol added → 3 records, exactly 1 Alice
+    expect(cRecords.length).toBe(3);
+    expect(cRecords.filter(r => r.data.email === "alice@example.com").length).toBe(1);
+
+    // 3 people × 3 connectors = 9 identity_map rows
+    const imTotal = db.prepare<{ n: number }>("SELECT COUNT(*) as n FROM identity_map").get()!.n;
+    expect(imTotal).toBe(9);
+  });
+});
+
+// ─── T40: heterogeneous entity names ─────────────────────────────────────────
+//
+// Bug: onboard() used report.entity (= channel.members[0].entity) for ALL
+// shadow_state writes, even for connectors that have a different entity name.
+// E.g. channel[0]="contacts", channel[1]="employees" → B's shadow was stored
+// as (system-b, "contacts") → echo detection failed on subsequent polls.
+// Fix: use memberByConnector.get(connectorId).entity for each shadow write.
+
+describe("T40: heterogeneous entity names — shadow stored with per-connector entity name", () => {
+  it("shadow_state entry for matched record uses the connector's own entity name", async () => {
+    const db = openDb(":memory:");
+    const dirA = makeTempDir(); const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    writeJson(join(dirB, "employees.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    const iA = makeInstanceEntity("system-a", dirA, "contacts.json");
+    const iB = makeInstanceEntity("system-b", dirB, "employees.json");
+    const engine = new SyncEngine(
+      makeConfig([iA, iB], [
+        { connectorId: "system-a", entity: "contacts" },
+        { connectorId: "system-b", entity: "employees" },
+      ]),
+      db,
+    );
+    await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    const correctRow = db.prepare<{ n: number }>(
+      "SELECT COUNT(*) as n FROM shadow_state WHERE connector_id = 'system-b' AND entity_name = 'employees'",
+    ).get()!.n;
+    const wrongRow = db.prepare<{ n: number }>(
+      "SELECT COUNT(*) as n FROM shadow_state WHERE connector_id = 'system-b' AND entity_name = 'contacts'",
+    ).get()!.n;
+
+    expect(correctRow).toBe(1); // shadow stored under correct entity name
+    expect(wrongRow).toBe(0);   // NOT stored under first connector's entity name
+  });
+
+  it("normal ingest after onboard with heterogeneous entities produces 0 writes", async () => {
+    const db = openDb(":memory:");
+    const dirA = makeTempDir(); const dirB = makeTempDir();
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "a1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    writeJson(join(dirB, "employees.json"), [
+      { id: "b1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    const iA = makeInstanceEntity("system-a", dirA, "contacts.json");
+    const iB = makeInstanceEntity("system-b", dirB, "employees.json");
+    const config = makeConfig([iA, iB], [
+      { connectorId: "system-a", entity: "contacts" },
+      { connectorId: "system-b", entity: "employees" },
+    ]);
+    const engine = new SyncEngine(config, db);
+    await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("ch", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+    const report = await engine.discover("ch");
+    await engine.onboard("ch", report);
+
+    // Re-ingest both — 0 writes (echo detection must work with correct entity name)
+    const r1 = await engine.ingest("ch", "system-a", { batchId: crypto.randomUUID() });
+    const r2 = await engine.ingest("ch", "system-b", { batchId: crypto.randomUUID() });
+    const writes = [...r1.records, ...r2.records].filter(r => r.action !== "skip").length;
+    expect(writes).toBe(0);
+  });
+});
+
+// ─── T41: multi-channel channelStatus entity-scoping ─────────────────────────
+// Regression: when two channels share the same connectors (e.g. crm/erp/hr for
+// both "companies" and "contacts"), channelStatus() for the second channel must
+// not see the first channel's shadow rows and falsely report "collected" — which
+// caused the contacts channel to skip onboarding entirely, inserting duplicates.
+
+describe("T41: channelStatus is scoped to the channel's own entities", () => {
+  it("second channel is 'uninitialized' until its own entities are collected", async () => {
+    const db = openDb(":memory:");
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" } },
+    ]);
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" } },
+    ]);
+    writeJson(join(dirB, "employees.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+
+    const iA = {
+      id: "system-a",
+      connector: jsonfiles,
+      config: { filePaths: [join(dirA, "companies.json"), join(dirA, "contacts.json")] },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    } satisfies ResolvedConfig["connectors"][0];
+    const iB = {
+      id: "system-b",
+      connector: jsonfiles,
+      config: { filePaths: [join(dirB, "accounts.json"), join(dirB, "employees.json")] },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    } satisfies ResolvedConfig["connectors"][0];
+
+    const engine = new SyncEngine(
+      {
+        connectors: [iA, iB],
+        channels: [
+          {
+            id: "companies",
+            identityFields: ["domain"],
+            members: [
+              { connectorId: "system-a", entity: "companies" },
+              { connectorId: "system-b", entity: "accounts" },
+            ],
+          },
+          {
+            id: "contacts",
+            identityFields: ["email"],
+            members: [
+              { connectorId: "system-a", entity: "contacts" },
+              { connectorId: "system-b", entity: "employees" },
+            ],
+          },
+        ],
+        conflict: { strategy: "lww" },
+        readTimeoutMs: 10_000,
+      },
+      db,
+    );
+
+    // Before anything: both channels uninitialized
+    expect(engine.channelStatus("companies")).toBe("uninitialized");
+    expect(engine.channelStatus("contacts")).toBe("uninitialized");
+
+    // Collect companies channel only
+    await engine.ingest("companies", "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+    await engine.ingest("companies", "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+
+    // Companies collected; contacts must still be uninitialized (not affected by companies shadow rows)
+    expect(engine.channelStatus("companies")).toBe("collected");
+    expect(engine.channelStatus("contacts")).toBe("uninitialized");
+  });
+
+  it("onboarding both channels produces 0 fanout inserts on first normal ingest", async () => {
+    const db = openDb(":memory:");
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" } },
+    ]);
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" } },
+    ]);
+    writeJson(join(dirB, "employees.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" } },
+    ]);
+
+    const iA = {
+      id: "system-a",
+      connector: jsonfiles,
+      config: { filePaths: [join(dirA, "companies.json"), join(dirA, "contacts.json")] },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    } satisfies ResolvedConfig["connectors"][0];
+    const iB = {
+      id: "system-b",
+      connector: jsonfiles,
+      config: { filePaths: [join(dirB, "accounts.json"), join(dirB, "employees.json")] },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    } satisfies ResolvedConfig["connectors"][0];
+
+    const channelDefs = [
+      {
+        id: "companies",
+        identityFields: ["domain"],
+        members: [
+          { connectorId: "system-a", entity: "companies" },
+          { connectorId: "system-b", entity: "accounts" },
+        ],
+      },
+      {
+        id: "contacts",
+        identityFields: ["email"],
+        members: [
+          { connectorId: "system-a", entity: "contacts" },
+          { connectorId: "system-b", entity: "employees" },
+        ],
+      },
+    ];
+
+    const engine = new SyncEngine(
+      { connectors: [iA, iB], channels: channelDefs, conflict: { strategy: "lww" }, readTimeoutMs: 10_000 },
+      db,
+    );
+
+    // Onboard both channels
+    for (const ch of channelDefs) {
+      await engine.ingest(ch.id, "system-a", { batchId: crypto.randomUUID(), collectOnly: true });
+      await engine.ingest(ch.id, "system-b", { batchId: crypto.randomUUID(), collectOnly: true });
+      const report = await engine.discover(ch.id);
+      await engine.onboard(ch.id, report);
+    }
+
+    expect(engine.channelStatus("companies")).toBe("ready");
+    expect(engine.channelStatus("contacts")).toBe("ready");
+
+    // Normal ingest after onboarding — must produce 0 INSERT fanouts
+    const allRecords = [];
+    for (const ch of channelDefs) {
+      const r1 = await engine.ingest(ch.id, "system-a", { batchId: crypto.randomUUID() });
+      const r2 = await engine.ingest(ch.id, "system-b", { batchId: crypto.randomUUID() });
+      allRecords.push(...r1.records, ...r2.records);
+    }
+    const inserts = allRecords.filter(r => r.action === "insert").length;
+    expect(inserts).toBe(0);
+  });
+});
 

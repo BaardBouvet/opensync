@@ -22,6 +22,7 @@ import {
   dbMergeCanonicals,
   dbFindCanonicalByField,
   dbGetAllCanonicals,
+  dbGetCanonicalsByChannelMembers,
   dbGetCanonicalFields,
   dbGetWatermark,
   dbSetWatermark,
@@ -158,26 +159,37 @@ export class SyncEngine {
     const channel = this.channels.get(channelId);
     if (!channel) return "uninitialized";
 
-    const memberIds = channel.members.map((m) => m.connectorId);
-    const ph = memberIds.map(() => "?").join(", ");
+    // Spec: specs/sync-engine.md — all shadow/identity queries must be scoped to these
+    // channel members' (connectorId, entity) pairs, not just connectorId. Without entity
+    // scoping a multi-channel scenario (e.g. companies + contacts sharing crm/erp/hr) would
+    // cause the second channel to see the first channel's shadow rows and believe it is
+    // already "collected", skipping onboarding entirely.
+    const memberClauses = channel.members.map(() => "(connector_id = ? AND entity_name = ?)").join(" OR ");
+    const memberParams = channel.members.flatMap((m) => [m.connectorId, m.entity]);
 
     const base = dbGetChannelStatus(this.db, channelId);
     if (base === "ready") {
+      // Entity-aware cross-link check: canonicals linked across 2+ of this channel's specific entities
+      const idClauses = channel.members.map(() => "(im.connector_id = ? AND ss.entity_name = ?)").join(" OR ");
+      const idParams = channel.members.flatMap((m) => [m.connectorId, m.entity]);
       const crossLinked = this.db
         .prepare<{ n: number }>(
           `SELECT COUNT(*) as n FROM (
-             SELECT canonical_id FROM identity_map WHERE connector_id IN (${ph})
-             GROUP BY canonical_id HAVING COUNT(DISTINCT connector_id) > 1)`,
+             SELECT im.canonical_id
+             FROM identity_map im
+             JOIN shadow_state ss ON ss.connector_id = im.connector_id AND ss.external_id = im.external_id
+             WHERE (${idClauses})
+             GROUP BY im.canonical_id HAVING COUNT(DISTINCT im.connector_id) > 1)`,
         )
-        .get(...memberIds);
+        .get(...idParams);
       if ((crossLinked?.n ?? 0) > 0) return "ready";
     }
 
     const hasShadow = this.db
       .prepare<{ n: number }>(
-        `SELECT COUNT(*) as n FROM shadow_state WHERE connector_id IN (${ph})`,
+        `SELECT COUNT(*) as n FROM shadow_state WHERE (${memberClauses})`,
       )
-      .get(...memberIds);
+      .get(...memberParams);
     return (hasShadow?.n ?? 0) > 0 ? "collected" : "uninitialized";
   }
 
@@ -412,38 +424,31 @@ export class SyncEngine {
       return identityFields.map((f) => normalise(r[f])).join("\x01");
     };
 
-    const sideIndexes = sides.slice(1).map((s) => {
-      const idx = new Map<string, { id: string; canonical: Record<string, unknown> }>();
-      for (const r of s.records) {
-        const k = buildKey(r.canonical);
-        if (k) idx.set(k, r);
-      }
-      return idx;
-    });
-
+    // Spec: specs/sync-engine.md § Discover — group all records by identity key
+    // across all connectors. Any key with 2+ sides is a match; 1-of-N is unique.
+    // This handles partial N-way matches (e.g. Alice in A+B but not C).
+    const keyIndex = new Map<string, DiscoverySide[]>();
     const matched: DiscoveryMatch[] = [];
     const uniquePerSide: DiscoverySide[] = [];
-    const matchedOnOthers = new Set<string>();
 
-    for (const r of sides[0].records) {
-      const k = buildKey(r.canonical);
-      if (!k) { uniquePerSide.push({ connectorId: sides[0].connectorId, externalId: r.id, rawData: r.canonical }); continue; }
-
-      const ms: DiscoverySide[] = [{ connectorId: sides[0].connectorId, externalId: r.id, rawData: r.canonical }];
-      let all = true;
-      for (let i = 0; i < sideIndexes.length; i++) {
-        const hit = sideIndexes[i].get(k);
-        if (hit) { ms.push({ connectorId: sides[i + 1].connectorId, externalId: hit.id, rawData: hit.canonical }); matchedOnOthers.add(`${sides[i + 1].connectorId}:${hit.id}`); }
-        else { all = false; }
+    for (const side of sides) {
+      for (const r of side.records) {
+        const k = buildKey(r.canonical);
+        if (!k) {
+          uniquePerSide.push({ connectorId: side.connectorId, externalId: r.id, rawData: r.canonical });
+          continue;
+        }
+        const existing = keyIndex.get(k) ?? [];
+        existing.push({ connectorId: side.connectorId, externalId: r.id, rawData: r.canonical });
+        keyIndex.set(k, existing);
       }
-      if (all && ms.length === sides.length) matched.push({ canonicalData: r.canonical, sides: ms });
-      else uniquePerSide.push({ connectorId: sides[0].connectorId, externalId: r.id, rawData: r.canonical });
     }
 
-    for (let i = 0; i < sides.length - 1; i++) {
-      for (const r of sides[i + 1].records) {
-        if (!matchedOnOthers.has(`${sides[i + 1].connectorId}:${r.id}`))
-          uniquePerSide.push({ connectorId: sides[i + 1].connectorId, externalId: r.id, rawData: r.canonical });
+    for (const [, keySides] of keyIndex.entries()) {
+      if (keySides.length >= 2) {
+        matched.push({ canonicalData: keySides[0]!.rawData, sides: keySides });
+      } else {
+        uniquePerSide.push(keySides[0]!);
       }
     }
 
@@ -490,9 +495,18 @@ export class SyncEngine {
       throw new Error(`Circuit breaker OPEN for channel "${channelId}" — onboard() blocked`);
     }
 
+    // Spec: specs/sync-engine.md § Onboard — per-connector entity name lookup.
+    // report.entity = channel.members[0].entity, which is wrong for connectors
+    // with a different entity name. Use memberByConnector for all entity lookups.
+    const memberByConnector = new Map(channel.members.map((m) => [m.connectorId, m]));
+
     // 1. Merge matched provisional canonicals
+    // Build a map of match index → final canonical ID so step 1b can propagate
+    // matched records to connectors not present in match.sides.
+    const matchCanonicals = new Map<number, string>();
     this.db.transaction(() => {
-      for (const match of report.matched) {
+      for (let mi = 0; mi < report.matched.length; mi++) {
+        const match = report.matched[mi]!;
         let winnerId = dbGetCanonicalId(this.db, match.sides[0].connectorId, match.sides[0].externalId);
         if (!winnerId) {
           winnerId = crypto.randomUUID();
@@ -505,20 +519,78 @@ export class SyncEngine {
           else if (!dropId) dbLinkIdentity(this.db, winnerId, side.connectorId, side.externalId);
         }
         for (const side of match.sides) {
+          const sideEntity = memberByConnector.get(side.connectorId)!.entity;
           const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, undefined);
-          dbSetShadow(this.db, side.connectorId, report.entity, side.externalId, winnerId!, fd);
+          dbSetShadow(this.db, side.connectorId, sideEntity, side.externalId, winnerId!, fd);
           linked++;
           shadowsSeeded++;
         }
+        matchCanonicals.set(mi, winnerId!);
       }
     })();
+
+    // batchId covers both matched-record propagation (1b) and unique-per-side (2)
+    // so all onboarding inserts share the same audit batch.
+    const batchId = crypto.randomUUID();
+
+    // 1b. Propagate each matched record to channel members not in match.sides.
+    // This handles partial N-way matches (record in A+B but not C).
+    for (let mi = 0; mi < report.matched.length; mi++) {
+      const match = report.matched[mi]!;
+      const canonicalId = matchCanonicals.get(mi)!;
+      const matchedConnectors = new Set(match.sides.map((s) => s.connectorId));
+      for (const targetMember of channel.members) {
+        if (matchedConnectors.has(targetMember.connectorId)) continue;
+        if (dbGetExternalId(this.db, canonicalId, targetMember.connectorId)) continue;
+
+        const targetWired = this.wired.get(targetMember.connectorId);
+        if (!targetWired) continue;
+        const targetEntityDef = targetWired.entities.find((e) => e.name === targetMember.entity);
+        if (!targetEntityDef?.insert) continue;
+
+        if (breaker.evaluate() === "OPEN") break;
+
+        const outboundData = applyMapping(match.canonicalData, targetMember.outbound, "outbound");
+        let newId: string | undefined;
+        let insertError: string | undefined;
+
+        for await (const result of targetEntityDef.insert(
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData }; })(),
+          targetWired.ctx,
+        )) {
+          if (result.error) { insertError = result.error; }
+          else { newId = result.id; }
+        }
+
+        if (newId) {
+          const fd = buildFieldData(undefined, match.canonicalData, targetMember.connectorId, ts, undefined);
+          this.db.transaction(() => {
+            dbLinkIdentity(this.db, canonicalId, targetMember.connectorId, newId!);
+            dbSetShadow(this.db, targetMember.connectorId, targetMember.entity, newId!, canonicalId, fd);
+            dbLogTransaction(this.db, {
+              batchId,
+              connectorId: targetMember.connectorId,
+              entityName: targetMember.entity,
+              externalId: newId!,
+              canonicalId,
+              action: "insert",
+              dataBefore: undefined,
+              dataAfter: fd,
+            });
+          })();
+          uniqueQueued++;
+          breaker.recordResult(false);
+        } else if (insertError) {
+          breaker.recordResult(true);
+        }
+      }
+    }
 
     // 2. Propagate unique-per-side records
     // Gap 8: use _processRecords for safety pipeline; but first advance shadows
     // NOTE: v9 uses direct insert() here because _processRecords would skip (diff = "skip").
     // The Gap 8 fix routes through a dedicated propagation path that checks the circuit
     // breaker and logs to transaction_log, but does not re-diff (which would skip).
-    const batchId = crypto.randomUUID();
 
     // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.2
     // For each unique source record, look up its full data (incl. associations) once per
@@ -526,7 +598,7 @@ export class SyncEngine {
     const sourceAssocCache = new Map<string, Association[] | undefined>();
     for (const unique of report.uniquePerSide) {
       const sourceWired = this.wired.get(unique.connectorId);
-      const sourceEntityDef = sourceWired?.entities.find((e) => e.name === report.entity);
+      const sourceEntityDef = sourceWired?.entities.find((e) => e.name === memberByConnector.get(unique.connectorId)!.entity);
       if (sourceEntityDef?.lookup && !sourceAssocCache.has(unique.externalId)) {
         const records = await sourceEntityDef.lookup([unique.externalId], sourceWired!.ctx);
         const rec = records.find((r) => r.id === unique.externalId);
@@ -594,7 +666,7 @@ export class SyncEngine {
             // If remap returned null (identity link missing), write a deferred row so
             // the retry loop picks it up on the next ingest cycle.
             if (remappedAssoc === null) {
-              dbInsertDeferred(this.db, unique.connectorId, report.entity, unique.externalId, targetMember.connectorId);
+              dbInsertDeferred(this.db, unique.connectorId, memberByConnector.get(unique.connectorId)!.entity, unique.externalId, targetMember.connectorId);
             }
           })();
           uniqueQueued++;
@@ -609,6 +681,30 @@ export class SyncEngine {
     dbSetChannelReady(this.db, channelId, report.entity);
 
     return { linked, shadowsSeeded, uniqueQueued };
+  }
+
+  // ─── getChannelIdentityMap ────────────────────────────────────────────────
+
+  /**
+   * Returns all canonical clusters for a channel as a Map<canonicalId, Map<connectorId, externalId>>.
+   * Used by the browser demo to group records by identity.
+   */
+  getChannelIdentityMap(channelId: string): Map<string, Map<string, string>> {
+    const channel = this.channels.get(channelId);
+    if (!channel) return new Map();
+    // Spec: specs/sync-engine.md — filter by entity so contacts don't leak into companies channel
+    const canonicals = dbGetCanonicalsByChannelMembers(this.db, channel.members);
+    const connectorIds = channel.members.map((m) => m.connectorId);
+    const result = new Map<string, Map<string, string>>();
+    for (const cid of canonicals) {
+      const row = new Map<string, string>();
+      for (const connectorId of connectorIds) {
+        const externalId = dbGetExternalId(this.db, cid, connectorId);
+        if (externalId !== undefined) row.set(connectorId, externalId);
+      }
+      result.set(cid, row);
+    }
+    return result;
   }
 
   // ─── addConnector ─────────────────────────────────────────────────────────
