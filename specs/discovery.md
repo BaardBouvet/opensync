@@ -112,8 +112,9 @@ without side effects.
 member has no shadow_state rows, throws with a message pointing to the collect step.
 
 **Matching**: exact match on all `identityFields` (case-insensitive, whitespace-trimmed).
-Records matched on all identity fields → `DiscoveryReport.matched`.
-Records with no match in any other connector → `DiscoveryReport.uniquePerSide`.
+A record key that appears in **2 or more** connectors → `DiscoveryReport.matched` (partial
+N-way match is supported: Alice in A+B counts even when C has no Alice).
+A record key that appears in **exactly 1** connector → `DiscoveryReport.uniquePerSide`.
 
 ```typescript
 interface DiscoveryReport {
@@ -139,6 +140,11 @@ Commits the discovery report. Idempotent: re-running after failure is safe.
 Steps:
 1. For each `matched` entry: `dbMergeCanonicals(keepId, discardId)` — single atomic UPDATE that
    redirects all identity_map and shadow_state rows from the discarded provisional to the kept one.
+   Writes shadow_state for each side using **that connector's own entity name** (not
+   `report.entity`, which is only the first member's entity and may differ in heterogeneous channels).
+1b. For each `matched` entry, propagate the record to any channel member **not** in
+   `match.sides` (partial N-way match gap). Inserts via `entity.insert()` and seeds shadow_state,
+   same as step 2.
 2. For each `uniquePerSide` entry: call the other side's `entity.insert()` directly (bypasses
    shadow-diff, which would produce "skip" since the shadow already exists from collect).
    Link the new external ID. Seed shadow_state.

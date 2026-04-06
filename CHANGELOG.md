@@ -15,6 +15,202 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
+- **Browser playground: READ events in boot tick.** The boot tick now shows one READ event per
+  record collected from each connector during the initial `collectOnly` pass.  These events have
+  no `before` field and display all fields in green (new records).
+- **Browser playground: READ event diff.** Poll-tick READ events now include a `before` field
+  populated from the shadow state snapshot taken immediately before `engine.ingest()` runs.
+  The dev-tools expanded view shows only the changed fields (old → new diff) instead of the
+  full record.  Boot-tick READs (no prior shadow) still show all fields in green.
+- **Browser playground: `captureSourceShadow()`.** New helper in `engine-lifecycle.ts` that
+  queries `shadow_state` before each ingest and returns a map of externalId → field values for
+  use as READ event `before` data.
+
+### Changed
+
+- **Browser playground spec (`specs/playground.md`):** Updated §§ 4.2, 4.7, 7, 7.1, 8.1,
+  8.2, 8.3, 8.4, 8.6, 10 to reflect current implementation: "auto" mode label, tick-viewer
+  Log tab, `+ New` in column headers, boot-tick READ events, shadow diff for poll READs,
+  `SyncEvent` interface, and `ActivityLogEntry` structure.
+
+
+- **Plan: `plans/meta/PLAN_PLAYGROUND_TESTING.md`.** Playwright E2E test rig plan for the
+  browser playground demo — setup, test scenarios (bootstrap, add/edit/delete/restore contacts,
+  real-time toggle, devtools), and CI integration.
+- **Plan: `plans/meta/PLAN_PLAYGROUND_MVU.md`.** Architecture migration plan to move the
+  playground from imperative DOM mutation to Model–View–Update, enabling unit-testable
+  `update()` and pure `render()` functions.
+- **Browser demo: expandable syslog rows.** Each entry in the Logs tab can now be clicked
+  to expand: inserts show the full JSON payload; updates show a colour-coded diff table
+  (old value → new value). Timestamp is now always visible on the summary row.
+- **Browser demo: event log tick ordering fixed.** The `── boot ──` separator now appears
+  before the onboarding INSERT events, not after them.
+
+### Fixed
+
+- **Browser demo: real-time off, edits no longer propagate.** When real-time was disabled,
+  saving or restoring a record still called `triggerPoll()`, causing immediate propagation.
+  Callbacks now call `refreshUI()` (UI-only render) when `isRealtime` is false, and only call
+  `triggerPoll()` when real-time is on.
+- **`inmemory.insertRecord` uses `data.id` when provided.** Consistent with the engine-driven
+  `entity.insert()` generator, `insertRecord` now uses `data["id"]` as the record's ID if no
+  `explicitId` is passed. Fixes IM4/IM7/IM9 test cases.
+
+- **Browser demo: onboarding events in the event log.** Boot-phase INSERT events (fanout
+  inserts that `onboard()` performs silently) are now surfaced in the dev-tools event log.
+  They appear dimmed/italic with a `[boot]` prefix to distinguish them from live-poll events.
+  Source connector is inferred from `identity_map`. A warmup ingest pass also runs after all
+  channels onboard, propagating associations and emitting the resulting UPDATE events, so the
+  initial UI state is fully resolved before the poll interval starts.
+- **Browser demo: Sync button + real-time toggle.** The topbar now has a "real-time" checkbox
+  and a "Sync" button. When real-time is checked (default), the automatic 2-second poll runs
+  as before and the Sync button is disabled. Unchecking real-time pauses the interval and
+  enables the Sync button, which triggers one full poll cycle on demand.
+- **`EngineState.pause()` / `EngineState.resume()`.** The engine lifecycle state object now
+  exposes `pause()` and `resume()` to control the automatic poll interval at runtime, plus
+  a read-only `isRealtime` getter.
+- **`SyncEvent.phase` field.** Events now carry an optional `phase: "onboard" | "poll"` so
+  consumers can distinguish boot-time events from live-poll events.
+- **Plan: `plans/engine/PLAN_ENGINE_USABILITY.md`.** Gap analysis covering six engine API
+  friction points: 3-step boot protocol, silent onboard events, step-1b associations gap,
+  entity-scope bugs, global fan-out guard, and implicit channel ordering dependency.
+  Includes proposed fixes and complexity estimates for each.
+
+### Fixed
+
+- **Browser demo: contacts associations on initial load.** After onboarding, fanned-out
+  contacts (records inserted into a 3rd connector by `onboard()` step 1b) were inserted
+  without association data. A warmup ingest pass now runs immediately after all channels
+  onboard, propagating associations via UPDATE before the poll interval starts. Users no
+  longer see a 2-second window where contacts exist but lack their company links.
+
+### Changed
+
+- **`AGENTS.md` — spec discipline clarification.** Spec files in `specs/` no longer carry
+  `Status:` or `Date:` metadata headers; those are for plan files only. The rule is now
+  explicit in the agents instructions.
+- **`specs/playground.md` — removed Status/Date header.**
+
+
+  header now shows a count badge with the number of active (non-soft-deleted) records. Both
+  the channel cluster view and the unmapped view include these badges.
+- **Browser demo: multi-record cluster cells.** Unlinked records from the same connector are
+  now grouped into a single cluster group instead of appearing as separate single-card rows.
+  Cells support stacking multiple cards vertically. Linked clusters remain one-to-one as
+  enforced by the identity map schema.
+- **Browser demo: optional ID in new-record dialog.** The "New" record dialog now includes an
+  optional ID input field above the JSON editor. If filled, the value is used as the record's
+  external ID; if left blank, a UUID is generated. The `InMemoryConnector.insertRecord()`
+  signature adds an `explicitId?` parameter.
+- **Browser demo: association target state badges.** Association badges now indicate the state
+  of the target record: active targets show as a blue clickable badge (unchanged), soft-deleted
+  targets show as an amber badge with ⊘ prefix, and missing targets (not found in the
+  connector's store) show as a red badge with ⚠ prefix and are not clickable.
+- **Spec: `specs/playground.md`.** New specification file documenting the browser playground
+  UI: layout, cluster view, record cards, modals, dev tools, scenario system, engine
+  integration, and resizing.
+
+  YAML (via `@codemirror/lang-yaml`) instead of JSON. Comments in the YAML explain each
+  field (`identityFields`, `inbound`/`outbound` mappings). Conflict strategy is no longer
+  exposed in the editor — it inherits from the scenario.
+- **Browser demo: "Unmapped" channel tab.** A new "unmapped" tab at the end of the channel
+  list shows all connector entities not covered by any channel (with full edit/delete/new
+  capability). Navigating to a record in an unmapped entity switches to this tab.
+- **Browser demo: Dev tools panel.** Replaced the event log with a tabbed "Events / DB State"
+  dev panel at the bottom. The DB State tab shows live row counts for `identity_map`,
+  `shadow_state`, and `channel_onboarding_status`, auto-updating after each poll pass.
+- **Browser demo: cluster group borders.** Each identity cluster group now has a visible
+  border and background, making the grouping visually obvious.
+
+### Fixed
+
+- **Browser demo: "c1… syncing" phantom clusters.** `SyncEngine.getChannelIdentityMap()` now
+  filters canonicals by entity name (via a new `dbGetCanonicalsByChannelMembers()` query that
+  joins `identity_map` with `shadow_state`). Previously, the companies channel incorrectly
+  showed contact/employee/people canonicals because all three connectors (crm/erp/hr) are
+  shared across channel, and the old query returned all canonicals for those connectors
+  regardless of entity. Fixes both the phantom "syncing" rows and contacts duplication.
+- **Browser demo: "New" button label.** The per-connector "new record" button in the cluster
+  footer now reads "+ New" instead of "+ New crm" (which was redundant with the column header).
+
+- **Browser demo: fixed CRM/ERP/HR connector set.** All scenarios now share the same
+  three systems (crm, erp, hr) with fixed seed data, moved to `demo/demo-browser/src/lib/systems.ts`.
+  `ScenarioDefinition` no longer carries `systems` or `seed`; scenarios declare only
+  `channels` and `conflict`. This makes the playground a pure channel-config experiment space.
+
+- **Browser demo: "minimal" scenario.** A two-system (crm ↔ erp), single-channel (companies)
+  scenario with simple field-rename mappings. Demonstrates the core sync loop without
+  associations or three-way matching.
+
+- **Browser demo: soft-delete.** Clicking Delete on a record marks it as soft-deleted
+  (dashed border, faded text, hidden from the engine's read output) rather than permanently
+  removing it. A Restore button re-presents the record to the engine, which picks it up on
+  the next poll and re-syncs if needed.
+
+- **Browser demo: association editing.** The Edit modal now shows `{ data, associations }`
+  combined, allowing users to add, remove, or modify associations on any record.
+
+- **Browser demo: association badge navigation.** Clicking an association badge on a record
+  card navigates to the channel that owns the target entity and highlights the target card
+  in purple for 2.5 seconds with auto-scroll.
+
+- **Browser demo: richer event log.** `SyncEvent` now carries `sourceConnector`,
+  `sourceEntity`, `targetConnector`, `targetEntity`, and `targetId`. Each log row shows
+  `srcConnector→tgtConnector  ACTION  entity  srcId… → tgtId…`, matching the CLI demo format.
+
+- **Browser demo: identity-cluster row layout.** Records are now grouped horizontally by
+  canonical identity. Each row spans all channel members; empty cells show connectors that
+  haven't received the record yet. `SyncEngine.getChannelIdentityMap()` exposes the
+  identity map to the UI.
+
+- **Browser demo: "New" buttons outside clusters.** Per-connector "+ New" buttons are in a
+  dedicated footer row, separate from the cluster grid, since the engine controls which
+  identity group a new record belongs to.
+
+- **Browser demo: unsaved-changes confirmation.** Switching scenario, resetting, or
+  reloading config while record edits are pending prompts the user before discarding changes.
+
+### Fixed
+
+- **Browser demo: event log source connector.** `sourceConnector` was incorrectly set to
+  `r.entity` (the entity name) instead of the actual connector ID. Fixed in `emitEvents()`
+  and `triggerPoll()`.
+
+### Fixed
+
+- **`discover()` partial N-way matching (`engine.ts`).** Previously, a record had to appear
+  in *all* N connectors to be classified as `matched`. Any record present in only 2 of 3
+  connectors was split into two separate `uniquePerSide` entries, causing `onboard()` to
+  insert it into the missing connector *twice* (once from each side). Fixed by grouping all
+  shadow records by identity key across every connector: any key in 2+ connectors is a match;
+  only keys appearing in exactly one connector are unique. Regression test: T39.
+
+- **`onboard()` entity name for heterogeneous channels (`engine.ts`).** `onboard()` was
+  writing all `shadow_state` rows with `report.entity` (= `channel.members[0].entity`),
+  even for connectors whose entity name differs (e.g. crm="contacts", erp="employees").
+  This caused echo detection to fail on subsequent polls because the shadow_state row for
+  erp was stored under "contacts" while ingest looked for "employees". Fixed by building a
+  `memberByConnector` map and using each member's own entity name for shadow writes, source
+  entity lookups, and deferred-association rows. Regression test: T40.
+
+- **`onboard()` propagation of partial matches (`engine.ts`).** Matched records that appear
+  in a subset of channel connectors (2 of N) were never inserted into the missing connectors.
+  Fixed by adding a step 1b that iterates matched records and inserts them into any connector
+  not already in `match.sides`. Covered by T39.
+
+### Added
+
+- **Browser demo playground (`demo/demo-browser`).** A fully static, browser-native demo
+  that runs the full OpenSync engine in-memory via sql.js (SQLite compiled to WebAssembly).
+  Hosted as a Vite-built single-page application deployable to GitHub Pages. Features a
+  REPL-style split-pane layout: CodeMirror JSON editors (config + per-system data) on the
+  left; live system columns with record cards + a timestamped engine event log on the right.
+  Scenario dropdown with three built-in examples (`associations-demo`, `three-system`,
+  `two-system`). Config changes trigger a full engine reload; data edits trigger an
+  immediate poll. No server required. See `plans/meta/PLAN_BROWSER_DEMO.md`.
+
+### Added
+
 - **`specs/associations.md § 7` — Cross-System Association Remapping.** Documents how the
   engine translates association `targetId` values across systems via the identity map, the
   requirement that connectors use canonical entity type names in `targetEntity`, and why FK

@@ -33,6 +33,9 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_DEFERRED_ASSOCIATIONS.md](engine/PLAN_DEFERRED_ASSOCIATIONS.md) | Track and retry associations that couldn't be remapped at fan-out time (missing identity link) | complete |
 | [engine/PLAN_EAGER_ASSOCIATION_MODE.md](engine/PLAN_EAGER_ASSOCIATION_MODE.md) | Change default dispatch to eager: insert immediately without unresolvable associations, deferred retry adds them later; fixes latency and circular-ref stall | complete |
 | [engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md](engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md) | Strict association mode (opt-in) + deadlock detection/breakDeadlock() — prerequisite: eager default must be in place first | backlog |
+| [engine/PLAN_ENGINE_USABILITY.md](engine/PLAN_ENGINE_USABILITY.md) | Gap analysis: engine API friction for callers — boot protocol, silent events, step-1b associations, fan-out guard scope | backlog |
+| [engine/PLAN_DELETE_PROPAGATION.md](engine/PLAN_DELETE_PROPAGATION.md) | Opt-in delete propagation: explicit signal (record.deleted = true) + mark-and-sweep; per-channel config, circuit breaker integration | draft |
+| [engine/PLAN_ENGINE_SYNC_EVENTS.md](engine/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from the engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | draft |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference |
 
 ## connectors/ — Connector research and cleanup plans
@@ -49,6 +52,12 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/GAP_SESAM_JSON_PROTOCOLS.md](connectors/GAP_SESAM_JSON_PROTOCOLS.md) | Gap analysis: Sesam JSON Pull + Push protocol alignment with OpenSync connector SDK | draft |
 | [connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md](connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md) | Association targets outside the source connector's own channel — semantic type URIs, cross-channel entity name translation, stable URI passthrough | draft |
 
+## demo/ — Demo and playground plans
+
+| File | What it covers | Status |
+|------|---------------|--------|
+| [demo/PLAN_MAPPING_VISUALIZATION.md](demo/PLAN_MAPPING_VISUALIZATION.md) | Visual mapping diagram in the playground: channel/field-rename diagram as a Diagram tab alternative to the YAML editor | draft |
+
 ## meta/ — Project meta documents
 
 | File | What it covers | Status |
@@ -58,3 +67,5 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_DEV_PACKAGES.md](meta/PLAN_DEV_PACKAGES.md) | Plan: move dev-only packages to dev/ | complete |
 | [meta/PLAN_DEMO_ENHANCEMENTS.md](meta/PLAN_DEMO_ENHANCEMENTS.md) | jsonfiles nested format + optional watermark, associations-demo example, table display | complete |
 | [meta/PLAN_BROWSER_DEMO.md](meta/PLAN_BROWSER_DEMO.md) | Run the demo in a browser — no install, no terminal, just a URL | draft |
+| [meta/PLAN_PLAYGROUND_TESTING.md](meta/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog |
+| [meta/PLAN_PLAYGROUND_MVU.md](meta/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog |
