@@ -1411,8 +1411,12 @@ export class SyncEngine {
         const targetShadow = existingTargetId ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId) : undefined;
 
         const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig);
-        if (!Object.keys(resolved).length) {
-          results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId ?? "" });
+        // Zero-key guard: suppress dispatch only when updating an *existing* target record
+        // with no field changes.  When existingTargetId is undefined this is a brand-new
+        // INSERT — dispatch must run even for empty canonical data so the record is created
+        // and linked in identity_map.  (T46 regression)
+        if (!Object.keys(resolved).length && existingTargetId !== undefined) {
+          results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
           continue;
         }
 

@@ -23,6 +23,7 @@
  * T24  addConnector merges joiner canonicals and backfills missing records both ways
  * T25  full ingest of all 3 connectors after addConnector produces 0 writes
  * T26  collectOnly with integer watermarks stores integer since, not ISO timestamp
+ * T46  record with empty data fans out and is linked in identity_map (zero-key guard regression)
  */
 import { describe, it, expect } from "bun:test";
 import { tmpdir } from "node:os";
@@ -2243,5 +2244,77 @@ describe("T45: association predicate is translated from source name to target na
     const result = await engine.ingest("contacts", "crm");
     const updatesToErp = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "erp");
     expect(updatesToErp).toHaveLength(0);
+  });
+});
+
+// ─── T46: empty-data record fanout ────────────────────────────────────────────
+// Regression: a record with no declared identity field and empty data ({}}) was
+// silently skipped during fanout because resolveConflicts({}, undefined) === {}
+// and the zero-key guard treated it as a noop.  The engine must insert the record
+// in the target connector and write an identity_map row even when canonical data
+// is empty.
+
+describe("T46: record with empty data fans out and is linked in identity_map", () => {
+  it("inserts the empty record in the target and creates an identity_map row", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    // Seed both sides with a matching record so the channel is onboarded and
+    // cross-linked (fan-out guard requires cross-linked connectors).
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "seed1", data: { email: "seed@example.com" } },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "seed1b", data: { email: "seed@example.com" } },
+    ]);
+
+    const db = openDb(":memory:");
+    const iA = makeInstance("system-a", dirA);
+    const iB = makeInstance("system-b", dirB);
+    const engine = new SyncEngine(
+      makeConfig([iA, iB], [
+        { connectorId: "system-a", entity: "contacts" },
+        { connectorId: "system-b", entity: "contacts" },
+      ]),
+      db,
+    );
+
+    // Onboard so both sides are cross-linked
+    await engine.ingest("ch", "system-a", { collectOnly: true });
+    await engine.ingest("ch", "system-b", { collectOnly: true });
+    await engine.onboard("ch", await engine.discover("ch"));
+
+    // Insert a new record with empty data into system-a
+    const emptyRecord = { id: "empty1", data: {} };
+    const existing = readJson(join(dirA, "contacts.json")) as unknown[];
+    writeJson(join(dirA, "contacts.json"), [...existing, emptyRecord]);
+
+    // Ingest from system-a — should fan out to system-b
+    const result = await engine.ingest("ch", "system-a");
+    const insertToB = result.records.filter(
+      (r) => r.action === "insert" && r.targetConnectorId === "system-b",
+    );
+
+    // The empty record must be inserted in system-b (not skipped)
+    expect(insertToB).toHaveLength(1);
+    expect(insertToB[0]!.sourceId).toBe("empty1");
+
+    // system-b must have a non-empty targetId (the assigned ID)
+    expect(insertToB[0]!.targetId).not.toBe("");
+
+    // identity_map must have a row for system-b
+    const identityRows = db
+      .prepare<{ connector_id: string; external_id: string }>(
+        "SELECT connector_id, external_id FROM identity_map WHERE canonical_id = " +
+        "(SELECT canonical_id FROM identity_map WHERE connector_id = 'system-a' AND external_id = 'empty1')",
+      )
+      .all();
+    const bRow = identityRows.find((r) => r.connector_id === "system-b");
+    expect(bRow).toBeDefined();
+    expect(bRow!.external_id).not.toBe("");
+
+    // system-b output file must contain the new record
+    const bRecords = readJson(join(dirB, "contacts.json")) as Array<{ id: string }>;
+    expect(bRecords.some((r) => r.id === bRow!.external_id)).toBe(true);
   });
 });
