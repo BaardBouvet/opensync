@@ -76,3 +76,5 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_GITHUB_PAGES.md](meta/PLAN_GITHUB_PAGES.md) | Deploy the browser playground to GitHub Pages via GitHub Actions | complete | — |
 | [meta/PLAN_RENAME_PLAYGROUND.md](meta/PLAN_RENAME_PLAYGROUND.md) | Rename demo-browser/ to playground/ and @opensync/demo-browser to @opensync/playground | complete | — |
 | [meta/PLAN_MOVE_DEMO_BROWSER.md](meta/PLAN_MOVE_DEMO_BROWSER.md) | Move demo-browser/ to workspace root as a sibling of demo/ | complete | — |
+| [meta/PLAN_RELEASE_PROCEDURE.md](meta/PLAN_RELEASE_PROCEDURE.md) | Release procedure: tag-triggered GitHub Pages deploy, GitHub Release creation, human checklist; npm publish deferred to M1 | backlog | S |
+| [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
