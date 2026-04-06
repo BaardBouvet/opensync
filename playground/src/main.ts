@@ -8,6 +8,10 @@ import { buildEditorPane } from "./ui/editor-pane.js";
 import { createSystemsPane } from "./ui/systems-pane.js";
 import { createDevTools } from "./ui/devtools.js";
 
+// ─── Constants ──────────────────────────────────────────────────────────────────
+
+const POLL_MS = 2_000;
+
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 let engineState: EngineState | null = null;
@@ -46,7 +50,7 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
         editorPane?.update(engineState!.scenario);
         devTools?.refreshDbState();
       },
-      2_000,
+      POLL_MS,
       (phase) => devTools?.beginTick(phase),
     );
   } catch (err) {
@@ -116,10 +120,14 @@ document.addEventListener("DOMContentLoaded", () => {
     syncBtn.title = rt ? "Disable auto-sync to use manual sync" : "Run one poll cycle now";
   }
 
+  const pollHint = document.getElementById("poll-hint") as HTMLElement;
+  pollHint.textContent = `${POLL_MS / 1000}s`;
+
   realtimeToggle.addEventListener("change", () => {
     if (!engineState) return;
     if (realtimeToggle.checked) { engineState.resume(); } else { engineState.pause(); }
     updatePollControls();
+    pollHint.style.opacity = realtimeToggle.checked ? "1" : "0.35";
   });
 
   syncBtn.addEventListener("click", () => {

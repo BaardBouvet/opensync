@@ -12,6 +12,7 @@ import type { Association } from "@opensync/sdk";
 import type { InMemoryConnector, RecordWithMeta } from "../inmemory.js";
 import type { ChannelCluster } from "../engine-lifecycle.js";
 import type { ChannelConfig } from "@opensync/engine";
+import { renderLineageDiagram } from "./lineage-diagram.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -412,6 +413,13 @@ export function createSystemsPane(
       renderUnmappedContent(channels, systems, isFirst);
       return;
     }
+    if (activeChannel === "__lineage__") {
+      // Only mount once — poll refreshes must not rebuild the diagram (that would destroy state)
+      if (!channelArea.querySelector(".ld-map-host")) {
+        renderLineageContent(channels);
+      }
+      return;
+    }
     // Save scroll pos so the view doesn't jump on every poll refresh
     const savedScroll = channelArea.querySelector<HTMLElement>(".cluster-body")?.scrollTop ?? 0;
     channelArea.innerHTML = "";
@@ -573,7 +581,12 @@ export function createSystemsPane(
       tabBar.appendChild(btn);
     }
 
-    // "unmapped" pseudo-tab — always shown at the end
+    // Separator before the view pseudo-tabs
+    const sep = document.createElement("span");
+    sep.className = "channel-tab-sep";
+    tabBar.appendChild(sep);
+
+    // "unmapped" pseudo-tab
     const unmappedBtn = document.createElement("button");
     unmappedBtn.className = `channel-tab channel-tab-unmapped${activeChannel === "__unmapped__" ? " active" : ""}`;
     unmappedBtn.textContent = "unmapped";
@@ -586,6 +599,27 @@ export function createSystemsPane(
       updateWatermarks(cachedSystems);
     });
     tabBar.appendChild(unmappedBtn);
+
+    // "lineage" pseudo-tab — field lineage diagram
+    const lineageBtn = document.createElement("button");
+    lineageBtn.className = `channel-tab channel-tab-lineage${activeChannel === "__lineage__" ? " active" : ""}`;
+    lineageBtn.textContent = "lineage";
+    lineageBtn.title = "Field lineage diagram — shows how connector fields flow through the canonical model";
+    lineageBtn.addEventListener("click", () => {
+      if (activeChannel === "__lineage__") return;
+      activeChannel = "__lineage__";
+      renderTabs(cachedChannels);
+      renderContent(cachedChannels, cachedSystems, cachedClusters, false);
+    });
+    tabBar.appendChild(lineageBtn);
+  }
+
+  function renderLineageContent(channels: ChannelConfig[]): void {
+    channelArea.innerHTML = "";
+    const container = document.createElement("div");
+    container.className = "ld-map-host";
+    channelArea.appendChild(container);
+    renderLineageDiagram(container, channels);
   }
 
   function updateWatermarks(systems: Map<string, InMemoryConnector>): void {
@@ -611,6 +645,7 @@ export function createSystemsPane(
       activeChannel = channels[0]!.id;
     } else if (
       activeChannel !== "__unmapped__" &&
+      activeChannel !== "__lineage__" &&
       activeChannel &&
       !channels.find((c) => c.id === activeChannel)
     ) {

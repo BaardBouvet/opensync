@@ -25,6 +25,7 @@
     .status { font-size: 12px; color: #888; }
     .status.running { color: #4ec94e; }
     .status.loading { color: #e8a838; }
+    .poll-hint { font-size: 11px; color: #555; margin-left: -6px; transition: opacity 0.15s; }
     .spacer { flex: 1; }
     button {
       background: #2d2d2d; color: #ccc; border: 1px solid #444;
@@ -96,9 +97,16 @@
     }
     .channel-tab:hover { color: #aaa; background: transparent; }
     .channel-tab.active { color: #a78bfa; border-bottom: 2px solid #a78bfa; }
-    .channel-tab-unmapped { color: #444; }
+    .channel-tab-unmapped { color: #444; font-style: italic; }
     .channel-tab-unmapped:hover { color: #888; }
     .channel-tab-unmapped.active { color: #e8a838; border-bottom: 2px solid #e8a838; }
+    .channel-tab-sep {
+      width: 1px; background: #2a2a2a; margin: 8px 6px 6px;
+      align-self: stretch; flex-shrink: 0;
+    }
+    .channel-tab-lineage { color: #444; font-style: italic; }
+    .channel-tab-lineage:hover { color: #888; }
+    .channel-tab-lineage.active { color: #60a5fa; border-bottom: 2px solid #60a5fa; }
 
     /* ── Channel area + cluster grid ─────────────────────────────────────── */
     .channel-area { flex: 1; overflow-x: auto; overflow-y: hidden; }
@@ -359,6 +367,8 @@
       padding: 0; color: #d4d4d4;
       min-width: 480px; max-width: 680px; width: 90vw;
       box-shadow: 0 24px 72px rgba(0,0,0,0.7);
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      margin: 0;
     }
     .edit-dialog::backdrop { background: rgba(0,0,0,0.55); }
     .dialog-header {
@@ -386,6 +396,119 @@
       display: flex; justify-content: flex-end; gap: 8px;
       padding: 10px 16px; border-top: 1px solid #2a2a2a;
     }
+
+    /* ── Field lineage diagram — Spec: specs/playground.md § 11 ─────────── */
+    .ld-hidden { display: none !important; }
+
+    .ld-map-host {
+      display: flex; flex-direction: column;
+      height: 100%; overflow-y: auto; overflow-x: auto;
+    }
+    .ld-container {
+      padding: 40px 24px 40px; display: flex; flex-direction: column; gap: 0;
+      width: 100%; box-sizing: border-box;
+    }
+
+    /* Channel section — swimlane with a separator above each except the first */
+    .ld-channel { display: flex; flex-direction: column; gap: 8px; padding: 24px 0; }
+    .ld-channel + .ld-channel { border-top: 1px solid #1e1e2e; }
+
+    /* Flow direction header — 3 columns aligned with ld-graph grid */
+    .ld-flow-header {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      column-gap: 64px;
+      padding-bottom: 10px;
+      margin-bottom: 4px;
+    }
+    .ld-flow-label {
+      font-size: 10px; color: #3a3a5a; text-transform: uppercase; letter-spacing: 0.8px;
+      font-family: monospace;
+    }
+    .ld-flow-left  { text-align: left;   padding-left: 2px; }
+    .ld-flow-left::after  { content: "  →"; color: #50507a; font-size: 13px; }
+    .ld-flow-right { text-align: right;  padding-right: 2px; }
+    .ld-flow-right::before { content: "→  "; color: #50507a; font-size: 13px; }
+    .ld-flow-channel-id {
+      font-size: 12px; font-family: monospace; font-weight: 600;
+      color: #a78bfa; letter-spacing: 0.4px;
+      text-align: center;
+    }
+
+    /* Three-column graph */
+    .ld-graph {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      column-gap: 64px;
+      position: relative;
+      align-items: start;
+      min-height: 40px;
+      width: 100%;
+    }
+
+    /* Columns */
+    .ld-col { display: flex; flex-direction: column; gap: 4px; }
+
+    /* Centre column */
+    .ld-col-centre {
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+    }
+
+    /* Entity header pill */
+    .ld-entity-group { display: flex; flex-direction: column; gap: 2px; }
+    .ld-entity-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px;
+      padding: 4px 10px; cursor: pointer; user-select: none;
+    }
+    .ld-entity-header:hover { background: #1e1e36; }
+    .ld-entity-name {
+      font-size: 12px; font-family: monospace; font-weight: 600;
+      color: #a78bfa;
+    }
+    .ld-connector-id {
+      font-size: 10px; color: #4a4a6a; font-family: monospace;
+    }
+    .ld-toggle { font-size: 11px; color: #555; flex-shrink: 0; }
+
+    /* Field rows */
+    .ld-fields { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
+    .ld-field {
+      display: flex; align-items: center; gap: 6px;
+      padding: 2px 8px; border-radius: 3px;
+      font-size: 11px; font-family: monospace;
+    }
+    .ld-field:hover { background: #1a1a2a; }
+    .ld-field-name { color: #9ca3af; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ld-field-name.ld-identity { color: #fbbf24; font-weight: 600; }
+    .ld-field-arrow { color: #374151; font-size: 10px; }
+    .ld-field-rename { color: #6b7280; font-size: 10px; font-style: italic; }
+    .ld-field-target { color: #60a5fa; flex: 1; }
+    .ld-field-target.ld-identity { color: #fbbf24; font-weight: 600; }
+
+    /* Canonical fields (centre column) */
+    .ld-canonical-field {
+      display: flex; align-items: center; gap: 4px;
+      padding: 2px 8px; border-radius: 3px; cursor: pointer;
+      font-size: 11px; font-family: monospace;
+    }
+    .ld-canonical-field:hover { background: #1a1a2a; }
+    .ld-canonical-field.ld-focused { background: #1a2a1a; }
+    .ld-canonical-name { color: #34d399; flex: 1; }
+    .ld-canonical-name.ld-identity { color: #fbbf24; font-weight: 600; }
+    .ld-canonical-dot { width: 5px; height: 5px; border-radius: 50%; background: #374151; flex-shrink: 0; }
+    .ld-canonical-dot.ld-identity { background: #92400e; }
+
+    /* Highlighted fields — lit up when a canonical field is focused */
+    .ld-field.ld-lit .ld-field-name,
+    .ld-field.ld-lit .ld-field-target { color: #facc15; }
+    .ld-field.ld-dim .ld-field-name,
+    .ld-field.ld-dim .ld-field-target { color: #2a2a3a; }
+    .ld-field.ld-dim .ld-field-arrow,
+    .ld-field.ld-dim .ld-field-rename { color: #1e1e2e; }
+
+    /* Collapsed entity — just the header, no fields */
+    .ld-entity-group.ld-collapsed .ld-fields { display: none; }
   </style>
 </head>
 <body>
@@ -401,6 +524,7 @@
     <input type="checkbox" id="toggle-realtime" checked>
     auto
   </label>
+  <span id="poll-hint" class="poll-hint"></span>
   <button id="btn-sync" disabled title="Disable auto-sync to use manual sync">Sync</button>
   <button id="btn-reset">Reset</button>
 </div>
