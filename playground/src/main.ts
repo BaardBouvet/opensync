@@ -10,7 +10,15 @@ import { createDevTools } from "./ui/devtools.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
-const POLL_MS = 2_000;
+// Background interval: how long between polls when no mutation has occurred.
+const POLL_MS = 5_000;
+// Notification delay: how long after a mutation before the engine is notified.
+// Simulates a webhook arriving shortly after a write, making the two-phase
+// effect (local flash → propagation flash) visible to the user.
+const NOTIFY_MS = 800;
+// Delay before the first cross-system sync after boot. Set to 0 for instant
+// fanout; raise (e.g. 5_000) to let the user observe the seed-only state first.
+const BOOT_NOTIFY_MS = 0;
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -18,6 +26,8 @@ let engineState: EngineState | null = null;
 let statusEl: HTMLElement;
 let editorPane: ReturnType<typeof buildEditorPane> | null = null;
 let isDirty = false;
+// Debounce timer for notification polls (fired after each mutation in auto mode).
+let notifyTimer: ReturnType<typeof setTimeout> | undefined;
 
 function setStatus(text: string, running: boolean): void {
   if (!statusEl) return;
@@ -33,6 +43,11 @@ function buildClusters() {
 }
 
 async function boot(scenario: ScenarioDefinition): Promise<void> {
+  // Cancel any pending notification poll from the previous engine before stopping it.
+  clearTimeout(notifyTimer);
+  notifyTimer = undefined;
+  resetCountdownBar();
+
   if (engineState) {
     engineState.stop();
     engineState = null;
@@ -49,9 +64,30 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
         systemsPane?.refresh(engineState!.scenario.channels, engineState!.connectors, buildClusters());
         editorPane?.update(engineState!.scenario);
         devTools?.refreshDbState();
+        // After each poll, if auto-mode is on and no notification is pending,
+        // restart the countdown bar for the next background interval tick.
+        // Spec: specs/playground.md § 10
+        if (engineState?.isRealtime && !notifyTimer) {
+          startCountdownBar(POLL_MS);
+        }
       },
       POLL_MS,
-      (phase) => devTools?.beginTick(phase),
+      (phase) => {
+        devTools?.beginTick(phase);
+        // Flash the countdown bar when a poll tick actually starts.
+        // Spec: specs/playground.md § 10
+        if (phase === "poll" && engineState?.isRealtime) flashCountdownBar();
+      },
+      // onAfterSeed: render seed-only state before onboarding fanout writes.
+      // The systems pane records the watermarks for those seed records; when the
+      // 800ms schedulePoll fires the fanout records (prevWm === undefined) flash in.
+      // Spec: specs/playground.md § 10
+      (seedConnectors, preClusters) => {
+        const seedClusterMap = new Map(
+          scenario.channels.map((ch) => [ch.id, preClusters(ch.id)]),
+        );
+        systemsPane?.refresh(scenario.channels, seedConnectors, seedClusterMap);
+      },
     );
   } catch (err) {
     setStatus(`error: ${String(err)}`, false);
@@ -60,7 +96,6 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
   }
 
   setStatus("● running", true);
-  systemsPane?.refresh(engineState.scenario.channels, engineState.connectors, buildClusters());
   editorPane?.update(engineState.scenario);
   // Sync new engine state with the realtime toggle
   const rt = document.getElementById("toggle-realtime") as HTMLInputElement | null;
@@ -68,6 +103,17 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
     if (!rt.checked) engineState.pause();
     const syncBtnEl = document.getElementById("btn-sync") as HTMLButtonElement | null;
     if (syncBtnEl) { syncBtnEl.disabled = rt.checked; }
+  }
+  // Boot debounce (auto mode only): onAfterSeed already rendered seed records.
+  // Schedule the 800ms notification poll so fanout-inserted records flash in.
+  // When auto is off show everything immediately — no countdown anyway.
+  // Spec: specs/playground.md § 10
+  const autoOn = rt?.checked !== false;
+  setCountdownBarVisible(autoOn);
+  if (autoOn) {
+    schedulePoll(BOOT_NOTIFY_MS);
+  } else {
+    systemsPane?.refresh(engineState.scenario.channels, engineState.connectors, buildClusters());
   }
 }
 
@@ -125,7 +171,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
   realtimeToggle.addEventListener("change", () => {
     if (!engineState) return;
-    if (realtimeToggle.checked) { engineState.resume(); } else { engineState.pause(); }
+    if (realtimeToggle.checked) {
+      engineState.resume();
+      setCountdownBarVisible(true);
+      schedulePoll(); // start boot-debounce countdown when re-enabling auto
+    } else {
+      engineState.pause();
+      clearTimeout(notifyTimer);
+      notifyTimer = undefined;
+      resetCountdownBar();
+      setCountdownBarVisible(false);
+    }
     updatePollControls();
     pollHint.style.opacity = realtimeToggle.checked ? "1" : "0.35";
   });
@@ -150,7 +206,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       // In manual mode, only refresh the UI — do NOT run the engine.
       // The user explicitly controls when the engine runs via the Sync button.
-      if (engineState.isRealtime) void triggerPoll();
+      if (engineState.isRealtime) schedulePoll();
       else refreshUI();
     },
     onSoftDelete(systemId, entity, id) {
@@ -162,7 +218,7 @@ document.addEventListener("DOMContentLoaded", () => {
       isDirty = true;
       engineState?.connectors.get(systemId)?.restoreRecord(entity, id);
       // Same as onSave: only propagate via engine when in real-time mode.
-      if (engineState?.isRealtime) void triggerPoll();
+      if (engineState?.isRealtime) schedulePoll();
       else refreshUI();
     },
   });
@@ -240,6 +296,62 @@ function refreshUI(): void {
   if (!engineState) return;
   systemsPane?.refresh(engineState.scenario.channels, engineState.connectors, buildClusters());
   devTools?.refreshDbState();
+}
+
+// ─── Notification poll (debounced mutation trigger) ───────────────────────────
+// Spec: specs/playground.md § 10
+
+/** Schedule one poll after the most recent mutation; debounces rapid edits.
+ *  Pass a custom delayMs to override NOTIFY_MS (e.g. BOOT_NOTIFY_MS on first boot). */
+function schedulePoll(delayMs = NOTIFY_MS): void {
+  clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => {
+    notifyTimer = undefined;
+    void triggerPoll();
+  }, delayMs);
+  startCountdownBar(delayMs);
+}
+
+// ─── Countdown bar helpers ────────────────────────────────────────────────────
+// Spec: specs/playground.md § 10
+
+function startCountdownBar(durationMs: number): void {
+  const fill = document.getElementById("poll-countdown-fill") as HTMLDivElement | null;
+  if (!fill) return;
+  // Do NOT remove poll-blink here: opacity (blink) and width (depletion) are independent
+  // CSS properties. The blink plays itself out while the depletion starts simultaneously.
+  // Snap to full width (disable transition), then re-enable and animate to 0.
+  fill.style.transition = "none";
+  fill.style.width = "100%";
+  fill.getBoundingClientRect(); // force reflow so the browser registers 100% first
+  fill.style.transition = `width ${durationMs}ms linear`;
+  fill.style.width = "0%";
+}
+
+function resetCountdownBar(): void {
+  const fill = document.getElementById("poll-countdown-fill") as HTMLDivElement | null;
+  if (!fill) return;
+  fill.classList.remove("poll-blink");
+  fill.style.transition = "none";
+  fill.style.width = "0%";
+}
+
+function flashCountdownBar(): void {
+  const fill = document.getElementById("poll-countdown-fill") as HTMLDivElement | null;
+  if (!fill) return;
+  // Snap to full width and play a single forward flash to signal the poll is running.
+  // animationend auto-removes the class so subsequent startCountdownBar() starts clean.
+  fill.classList.remove("poll-blink");
+  fill.style.transition = "none";
+  fill.style.width = "100%";
+  fill.getBoundingClientRect(); // reflow
+  fill.classList.add("poll-blink");
+  fill.addEventListener("animationend", () => fill.classList.remove("poll-blink"), { once: true });
+}
+
+function setCountdownBarVisible(visible: boolean): void {
+  const bar = document.getElementById("poll-countdown") as HTMLElement | null;
+  if (bar) bar.style.visibility = visible ? "visible" : "hidden";
 }
 
 // ─── Manual poll trigger ──────────────────────────────────────────────────────

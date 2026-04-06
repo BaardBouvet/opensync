@@ -43,7 +43,27 @@
       accent-color: #4ec94e; width: 13px; height: 13px; cursor: pointer;
     }
 
-    /* ── Layout ───────────────────────────────────────────────────────────── */
+    /* ── Poll countdown bar (inline pill next to auto toggle) ────────────── */
+    /* Spec: specs/playground.md § 10 */
+    #poll-countdown {
+      width: 40px; height: 4px; border-radius: 2px;
+      background: #2a2a2a; overflow: hidden; flex-shrink: 0;
+      align-self: center;
+      visibility: hidden; /* hidden (not display:none) so it always holds its 40px */
+    }
+    #poll-countdown-fill {
+      height: 100%; width: 100%;
+      background: rgba(34, 197, 94, 0.6); /* flash-green accent, opacity 0.6 */
+    }
+    /* Quick single flash played at the moment a poll fires, before the bar refills.
+       Brightens to a lighter mint then returns to the normal green. */
+    @keyframes poll-blink {
+      0%   { background: rgba(187, 247, 208, 0.95); }
+      100% { background: rgba(34, 197, 94, 0.6); }
+    }
+    .poll-blink { animation: poll-blink 280ms ease-out forwards; }
+
+    /* ── Layout ──────────────────────────────────────────────────────────── */
     #layout { display: flex; height: calc(100vh - 42px); }
 
     /* ── Left pane (config editor only) ──────────────────────────────────── */
@@ -66,7 +86,7 @@
       flex-shrink: 0;
     }
     .editor-section-title { font-size: 11px; color: #888; font-family: monospace; }
-    .editor-hint { padding: 3px 10px; font-size: 10px; color: #3a3a3a; flex-shrink: 0; }
+    .editor-hint { padding: 3px 10px; font-size: 10px; color: #555; flex-shrink: 0; }
     .btn-save {
       font-size: 11px; padding: 2px 8px;
       background: #1a3a1a; color: #4ec94e; border-color: #2a5a2a;
@@ -418,9 +438,10 @@
     .dialog-id-input:focus { border-color: #555; }
     .dialog-editor-mount { padding: 0; }
     .dialog-footer {
-      display: flex; justify-content: flex-end; gap: 8px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
       padding: 10px 16px; border-top: 1px solid #2a2a2a;
     }
+    .dialog-footer-actions { display: flex; gap: 8px; }
 
     /* ── Field lineage diagram — Spec: specs/playground.md § 11 ─────────── */
     .ld-hidden { display: none !important; }
@@ -593,6 +614,9 @@
   <select id="scenario-select"></select>
   <span id="status" class="status loading">starting…</span>
   <span class="spacer"></span>
+  <!-- Poll countdown pill: small bar that depletes over NOTIFY_MS / POLL_MS.
+       Sits inline before the auto toggle so the toggle never shifts. Spec: specs/playground.md § 10 -->
+  <div id="poll-countdown"><div id="poll-countdown-fill"></div></div>
   <label class="realtime-label" for="toggle-realtime">
     <input type="checkbox" id="toggle-realtime" checked>
     auto

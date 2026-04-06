@@ -372,7 +372,14 @@ After `startEngine()` is called:
 
 ### § 8.3 Poll loop
 
-When auto mode is active, a `setInterval` fires every 2 000 ms.  Each tick:
+Two complementary timers drive engine ticks in auto mode:
+
+| Timer | Constant | Purpose |
+|-------|----------|---------|
+| Background interval | `POLL_MS = 5 000 ms` | Safety net — catches changes missed by the notification timer |
+| Notification timer | `NOTIFY_MS = 800 ms` | "Webhook" — fires one poll shortly after a mutation |
+
+When auto mode is active, `setInterval` fires every `POLL_MS`.  Each interval tick:
 
 1. Calls `onTickStart("poll")` to open a new tick group in the dev tools.
 2. For each channel member:
@@ -382,11 +389,21 @@ When auto mode is active, a `setInterval` fires every 2 000 ms.  Each tick:
       events using `r.sourceData`, `r.sourceShadow`, `r.before`, and `r.after` directly.
 3. Calls `onRefresh()` to re-render the UI.
 
-Manual record mutations call `pollOnce()` immediately after the mutation without waiting
-for the next tick.
+When a record mutation occurs in auto mode, `schedulePoll()` is called instead of
+`pollOnce()` directly. `schedulePoll()` debounces rapid edits: it sets (or resets) a
+`NOTIFY_MS` timer so that only one poll fires after the dust settles, regardless of how
+many mutations occur within that window.
 
-`engineState.pollOnce()` is the single entry point for both interval-driven and manual
-poll passes.
+The two timers are independent. A notification poll firing close to an interval tick
+produces at most one redundant noop pass, which is harmless.
+
+`engineState.pollOnce()` is the single entry point for both interval-driven and
+notification poll passes.
+
+**Boot debounce.** After `startEngine()` returns and the engine is fully onboarded,
+`schedulePoll()` is called once so the user sees a short 800 ms countdown bar before the
+first background poll fires. This makes the initial sync visually distinct from the static
+page load.
 
 ### § 8.4 Manual sync
 
@@ -446,18 +463,49 @@ persisted across page loads.
 
 The topbar contains:
 - An **"auto" checkbox** (`#toggle-realtime`). When checked (default), the automatic
-  2-second poll interval runs. When unchecked, `engineState.pause()` is called and the
-  interval is suspended.
+  poll interval and notification timer run. When unchecked, `engineState.pause()` is
+  called, both timers are cancelled, and the countdown bar is hidden.
 - A **"Sync" button** (`#btn-sync`). Enabled only when auto mode is off. Clicking it calls
   `pollOnce()` once, running a full ingest pass across all channel members and refreshing
   the UI.
 
-When auto mode is **on**, every record mutation (edit, create, delete) calls `pollOnce()`
-immediately, which is why syncs appear instantaneous — the poll is not waiting for the
-2-second timer.
+### § 10.1 Two-phase flash effect
 
-Switching scenarios or resetting respects the current toggle state: if auto mode is off when
-the new engine boots, it is immediately paused after `startEngine()` returns.
+When auto mode is **on**, record mutations produce two visible events:
+
+1. **Mutation flash** — the edited card flashes green immediately (UI refresh only;
+   no engine involvement).
+2. **Propagation flash** — `NOTIFY_MS` (800 ms) later the notification timer fires,
+   the engine ingests the change, and synced copies flash green across the other systems.
+
+This two-phase effect makes the async nature of sync visible.  Rapid edits within the
+`NOTIFY_MS` window are debounced — only one poll fires, after the *last* mutation.
+
+### § 10.2 Countdown bar
+
+A `<div id="poll-countdown">` with an inner `<div id="poll-countdown-fill">` renders
+as a small inline pill (40 px × 4 px) sitting directly to the right of the "auto"
+checkbox in the topbar.  The fill depletes from 100% to 0% via a CSS `width` transition,
+giving a live read of "time until next engine tick."
+
+| Situation | Duration shown |
+|-----------|---------------|
+| Notification timer pending (mutation just made, or auto just enabled) | `NOTIFY_MS` (800 ms) |
+| No notification pending; background interval is next | `POLL_MS` (5 000 ms) |
+| Boot: first render after `startEngine()` return | `NOTIFY_MS` (800 ms) |
+
+The bar is hidden (`display: none`) when auto mode is off or the engine is not running.
+
+Transition implementation uses a CSS `width` linear transition — no
+`requestAnimationFrame` loop.  A forced reflow (`getBoundingClientRect()`) between
+setting `width: 100%` (no transition) and `width: 0%` (with transition) ensures the
+browser registers the start point before animating.
+
+### § 10.3 Scenario switch / reset behaviour
+
+Switching scenarios or resetting respects the current toggle state: if auto mode is off
+when the new engine boots, it is immediately paused after `startEngine()` returns and the
+countdown bar remains hidden.
 
 ---
 

@@ -205,8 +205,8 @@ function drawLines(
     if (cf) canonicalChips.set(cf, el);
   });
 
-  drawSide(graphEl, svgEl, leftCol,  canonicalChips, lineage.inboundFields,  state.expandedLeft,  "left");
-  drawSide(graphEl, svgEl, rightCol, canonicalChips, lineage.outboundFields, state.expandedRight, "right");
+  drawSide(graphEl, svgEl, leftCol,  canonicalChips, lineage.inboundFields,  state.expandedLeft,  state.autoExpandedLeft,  "left");
+  drawSide(graphEl, svgEl, rightCol, canonicalChips, lineage.outboundFields, state.expandedRight, state.autoExpandedRight, "right");
 
   applyFocusToLines(svgEl, state);
 }
@@ -218,6 +218,7 @@ function drawSide(
   canonicalChips: Map<string, HTMLElement>,
   fields: ConnectorFieldNode[],
   expandedSet: Set<string>,
+  autoExpandedSet: Set<string>,
   side: "left" | "right",
 ): void {
   // Group fields by member
@@ -229,7 +230,7 @@ function drawSide(
   }
 
   for (const [mk, mFields] of byMember) {
-    const isExpanded = expandedSet.has(mk);
+    const isExpanded = expandedSet.has(mk) || autoExpandedSet.has(mk);
     const passthrough = mFields.length === 1 && mFields[0]!.canonicalField === "*";
 
     if (!isExpanded || passthrough) {
@@ -455,7 +456,7 @@ function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
   if (f.isAssoc) {
     const marker = document.createElement("span");
     marker.className = "ld-assoc-marker";
-    marker.textContent = "⟶";
+    marker.textContent = "◇";
     node.appendChild(marker);
     node.appendChild(document.createTextNode(f.sourceField));
   } else {
@@ -553,10 +554,12 @@ function buildCentreColumn(lineage: ChannelLineage): HTMLElement {
     if (node.isAssoc) {
       const marker = document.createElement("span");
       marker.className = "ld-assoc-marker";
-      marker.textContent = "⟶";
-      chip.appendChild(marker);
+      marker.textContent = "◇";
+      nameSpan.appendChild(marker);
+      nameSpan.appendChild(document.createTextNode(node.fieldName === "*" ? "(all fields)" : node.fieldName));
+    } else {
+      nameSpan.textContent = node.fieldName === "*" ? "(all fields)" : node.fieldName;
     }
-    nameSpan.textContent = node.fieldName === "*" ? "(all fields)" : node.fieldName;
     chip.appendChild(nameSpan);
     col.appendChild(chip);
   }

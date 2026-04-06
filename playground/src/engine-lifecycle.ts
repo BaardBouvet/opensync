@@ -114,10 +114,43 @@ function buildConfig(scenario: ScenarioDefinition, connectors: Map<string, InMem
 // ─── startEngine ─────────────────────────────────────────────────────────────
 
 /**
+ * Build unlinked clusters from seed connector data — used for the pre-onboard render.
+ * Each seed record becomes its own cluster with canonicalId === null and a single
+ * non-null slot; other member slots are null (not yet linked).
+ * Spec: specs/playground.md § 10
+ */
+function buildSeedClusters(
+  channelId: string,
+  connectors: Map<string, InMemoryConnector>,
+  channels: ChannelConfig[],
+): ChannelCluster[] {
+  const ch = channels.find((c) => c.id === channelId);
+  if (!ch) return [];
+  const clusters: ChannelCluster[] = [];
+  ch.members.forEach((member, mi) => {
+    const conn = connectors.get(member.connectorId);
+    if (!conn) return;
+    const recs = conn.snapshotFull()[member.entity] ?? [];
+    for (const rec of recs) {
+      const slots: Array<ChannelClusterSlot | null> = ch.members.map((_, i) =>
+        i === mi
+          ? { connectorId: member.connectorId, entity: member.entity, externalIds: [rec.id] }
+          : null,
+      );
+      clusters.push({ canonicalId: null, slots });
+    }
+  });
+  return clusters;
+}
+
+/**
  * Boot a new engine from a scenario.
- * @param onEvent      called for each non-skip sync action during polling
- * @param onRefresh    called after each poll pass so the UI can re-render system columns
- * @param onTickStart  called before each tick group (onboard warmup or regular poll cycle)
+ * @param onEvent       called for each non-skip sync action during polling
+ * @param onRefresh     called after each poll pass so the UI can re-render system columns
+ * @param onTickStart   called before each tick group (onboard warmup or regular poll cycle)
+ * @param onAfterSeed   called after connectors are seeded but before onboarding fanout;
+ *                      receives connectors + a pre-onboard cluster builder so the UI can
+ *                      render the seed-only state before cross-system inserts appear.
  */
 export async function startEngine(
   scenario: ScenarioDefinition,
@@ -125,12 +158,20 @@ export async function startEngine(
   onRefresh: () => void,
   pollMs = 2_000,
   onTickStart?: (phase: "onboard" | "poll") => void,
+  onAfterSeed?: (
+    connectors: Map<string, InMemoryConnector>,
+    preClusters: (channelId: string) => ChannelCluster[],
+  ) => void,
 ): Promise<EngineState> {
   // 1. Create one in-memory connector per fixed system
   const connectors = new Map<string, InMemoryConnector>();
   for (const systemId of FIXED_SYSTEMS) {
     connectors.set(systemId, createInMemoryConnector(systemId, FIXED_SEED[systemId] ?? {}));
   }
+
+  // 1b. Let the UI render the seed-only state before onboarding fanout writes.
+  // Spec: specs/playground.md § 10
+  onAfterSeed?.(connectors, (chId) => buildSeedClusters(chId, connectors, scenario.channels));
 
   // 2. Open a fresh in-memory sql.js database
   const db = await openBrowserDb();

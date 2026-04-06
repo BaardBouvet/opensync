@@ -45,8 +45,11 @@ function ensureModal(): void {
     </div>
     <div class="dialog-editor-mount"></div>
     <div class="dialog-footer">
-      <button class="btn-ghost dialog-cancel">Cancel</button>
-      <button class="btn-save dialog-save">Save</button>
+      <span class="editor-hint">Ctrl/Cmd + Enter to save</span>
+      <div class="dialog-footer-actions">
+        <button class="btn-ghost dialog-cancel">Cancel</button>
+        <button class="btn-save dialog-save">Save</button>
+      </div>
     </div>
   `;
   document.body.appendChild(modalEl);
@@ -66,9 +69,9 @@ function ensureModal(): void {
         oneDark,
         EditorView.lineWrapping,
         keymap.of([
-          ...defaultKeymap,
           { key: "Ctrl-Enter", run: () => { modalSaveHandler?.(); modalEl?.close(); return true; } },
           { key: "Mod-Enter",  run: () => { modalSaveHandler?.(); modalEl?.close(); return true; } },
+          ...defaultKeymap,
         ]),
         EditorView.theme({
           "&": { fontSize: "13px" },
@@ -211,9 +214,7 @@ function buildCard(
     delBtn.className = "btn-card btn-delete";
     delBtn.textContent = "Delete";
     delBtn.addEventListener("click", () => {
-      if (confirm(`Delete record "${rec.id}" from ${systemId}/${entity}?`)) {
-        callbacks.onSoftDelete(systemId, entity, rec.id);
-      }
+      callbacks.onSoftDelete(systemId, entity, rec.id);
     });
     actions.appendChild(delBtn);
   } else {
@@ -546,7 +547,10 @@ export function createSystemsPane(
             if (rec) {
               const wmKey = `${slot.connectorId}/${slot.entity}/${rec.id}`;
               const prevWm = lastWatermarks.get(wmKey);
-              const flash = !isFirst && (prevWm === undefined || rec.watermark > prevWm);
+              // Flash whenever a record is newly appearing (no prior watermark) or was
+              // updated since the last render.  The !isFirst guard is dropped: on the
+              // delayed first render after boot debounce all cards are new and should flash.
+              const flash = prevWm === undefined || (!isFirst && rec.watermark > prevWm);
               const isHl = highlightId !== undefined && rec.id === highlightId;
               cell.appendChild(buildCard(rec, slot.connectorId, slot.entity, flash, isHl, callbacks, navigateToRecord, systems));
             } else {

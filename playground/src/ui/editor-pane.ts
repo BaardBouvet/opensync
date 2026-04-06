@@ -117,7 +117,7 @@ export function buildEditorPane(opts: EditorPaneOptions): {
     // Hint
     const hint = document.createElement("div");
     hint.className = "editor-hint";
-    hint.textContent = "Ctrl/Cmd + Enter to save  ·  YAML";
+    hint.textContent = "Ctrl/Cmd + Enter to save";
     container.appendChild(hint);
 
     // Editor
@@ -133,9 +133,9 @@ export function buildEditorPane(opts: EditorPaneOptions): {
           oneDark,
           EditorView.lineWrapping,
           keymap.of([
-            ...defaultKeymap,
             { key: "Ctrl-Enter", run: () => { doSave(); return true; } },
             { key: "Mod-Enter",  run: () => { doSave(); return true; } },
+            ...defaultKeymap,
           ]),
           EditorView.theme({
             "&": { height: "100%", fontSize: "12px" },
