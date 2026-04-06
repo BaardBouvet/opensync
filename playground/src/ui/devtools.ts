@@ -31,6 +31,8 @@ export function createDevTools(
     <button class="devtools-tab active" data-tab="ticks">Log</button>
     <button class="devtools-tab" data-tab="identity_map">identity_map</button>
     <button class="devtools-tab" data-tab="shadow_state">shadow_state</button>
+    <button class="devtools-tab" data-tab="watermarks">watermarks</button>
+    <button class="devtools-tab" data-tab="channels">channels</button>
   `;
   container.appendChild(tabBar);
 
@@ -71,14 +73,37 @@ export function createDevTools(
   identityPanel.className = "devtools-panel devtools-panel-db";
   container.appendChild(identityPanel);
 
+  // Shadow state: split layout — metadata table on left, field detail on right
   const shadowPanel = document.createElement("div");
-  shadowPanel.className = "devtools-panel devtools-panel-db";
+  shadowPanel.className = "devtools-panel devtools-panel-shadow";
   container.appendChild(shadowPanel);
+
+  const shadowSplit = document.createElement("div");
+  shadowSplit.className = "shadow-split";
+  shadowPanel.appendChild(shadowSplit);
+
+  const shadowLeft = document.createElement("div");
+  shadowLeft.className = "shadow-left";
+  shadowSplit.appendChild(shadowLeft);
+
+  const shadowRight = document.createElement("div");
+  shadowRight.className = "shadow-right";
+  shadowSplit.appendChild(shadowRight);
+
+  const watermarksPanel = document.createElement("div");
+  watermarksPanel.className = "devtools-panel devtools-panel-db";
+  container.appendChild(watermarksPanel);
+
+  const channelsPanel = document.createElement("div");
+  channelsPanel.className = "devtools-panel devtools-panel-db";
+  container.appendChild(channelsPanel);
 
   const panels: Record<string, HTMLElement> = {
     ticks: ticksPanel,
     identity_map: identityPanel,
     shadow_state: shadowPanel,
+    watermarks: watermarksPanel,
+    channels: channelsPanel,
   };
 
   // ── Tab switching ─────────────────────────────────────────────────────────
@@ -93,6 +118,8 @@ export function createDevTools(
     }
     if (tab === "identity_map") renderIdentityMap();
     if (tab === "shadow_state") renderShadowState();
+    if (tab === "watermarks") renderWatermarks();
+    if (tab === "channels") renderChannelStatus();
   }
 
   tabBar.addEventListener("click", (e) => {
@@ -453,13 +480,122 @@ export function createDevTools(
     renderTable(identityPanel, getDbState().identityMap);
   }
 
+  // ── Shadow state split view ───────────────────────────────────────────────
+  let selectedShadowRow: HTMLElement | null = null;
+
   function renderShadowState(): void {
-    renderTable(shadowPanel, getDbState().shadowState);
+    const rows = getDbState().shadowState;
+    shadowLeft.innerHTML = "";
+    shadowRight.innerHTML = "";
+
+    const hint = document.createElement("div");
+    hint.className = "shadow-right-empty";
+    hint.textContent = "\u2190 click a row to inspect fields";
+    shadowRight.appendChild(hint);
+    selectedShadowRow = null;
+
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "db-table-empty";
+      empty.textContent = "(empty)";
+      shadowLeft.appendChild(empty);
+      return;
+    }
+
+    const cols = ["connector_id", "entity_name", "external_id", "canonical_id", "deleted_at"] as const;
+    const table = document.createElement("table");
+    table.className = "db-table db-table-selectable";
+
+    const thead = document.createElement("thead");
+    const hTr = document.createElement("tr");
+    for (const col of cols) {
+      const th = document.createElement("th");
+      th.textContent = col;
+      hTr.appendChild(th);
+    }
+    thead.appendChild(hTr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement("tbody");
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      for (const col of cols) {
+        const td = document.createElement("td");
+        const v = r[col];
+        td.textContent = v === null || v === undefined ? "\u2014" : String(v);
+        tr.appendChild(td);
+      }
+      tr.addEventListener("click", () => {
+        if (selectedShadowRow) selectedShadowRow.classList.remove("shadow-row-selected");
+        tr.classList.add("shadow-row-selected");
+        selectedShadowRow = tr;
+        showShadowDetail(r);
+      });
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    shadowLeft.appendChild(table);
+  }
+
+  function showShadowDetail(
+    r: { connector_id: string; entity_name: string; external_id: string; canonical_data: string },
+  ): void {
+    shadowRight.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "shadow-data-title";
+    title.textContent = `${r.connector_id} / ${r.entity_name} / ${r.external_id.slice(0, 8)}\u2026`;
+    shadowRight.appendChild(title);
+
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(r.canonical_data) as Record<string, unknown>;
+    } catch {
+      const err = document.createElement("div");
+      err.className = "shadow-right-empty";
+      err.textContent = "(invalid JSON)";
+      shadowRight.appendChild(err);
+      return;
+    }
+
+    const entries = Object.entries(data);
+    if (entries.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "shadow-right-empty";
+      empty.textContent = "(no fields)";
+      shadowRight.appendChild(empty);
+      return;
+    }
+
+    for (const [k, val] of entries) {
+      const fieldRow = document.createElement("div");
+      fieldRow.className = "shadow-data-field";
+      const keyEl = document.createElement("span");
+      keyEl.className = "shadow-data-key";
+      keyEl.textContent = k;
+      const valEl = document.createElement("span");
+      valEl.className = "shadow-data-val";
+      valEl.textContent = val === null || val === undefined
+        ? "null"
+        : typeof val === "string" ? val : JSON.stringify(val);
+      fieldRow.append(keyEl, valEl);
+      shadowRight.appendChild(fieldRow);
+    }
+  }
+
+  function renderWatermarks(): void {
+    renderTable(watermarksPanel, getDbState().watermarks);
+  }
+
+  function renderChannelStatus(): void {
+    renderTable(channelsPanel, getDbState().channelStatus);
   }
 
   function refreshDbState(): void {
     if (activeTab === "identity_map") renderIdentityMap();
     else if (activeTab === "shadow_state") renderShadowState();
+    else if (activeTab === "watermarks") renderWatermarks();
+    else if (activeTab === "channels") renderChannelStatus();
   }
 
   return { appendEvent, beginTick, clearEvents, refreshDbState };

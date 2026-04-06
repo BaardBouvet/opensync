@@ -26,6 +26,26 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Fixed
 
+- **Playground devtools: shadow_state tab now shows actual field data.** The `shadow_state`
+  table has always stored a `canonical_data` JSON column with the last-synced field values,
+  but the tab was only displaying metadata columns. The tab is now a split view: the left
+  side shows the metadata table (`connector_id`, `entity_name`, `external_id`, `canonical_id`,
+  `deleted_at`); clicking a row selects it and the right side panel shows the parsed field
+  values (`canonical_data` JSON) with key → value rows in monospace.
+
+### Added
+
+- **Playground devtools: `watermarks` tab.** Shows the `watermarks` table
+  (`connector_id`, `entity_name`, `since`). The `since` cursor is the opaque timestamp
+  passed to each connector's incremental read as the `after` parameter, so this tab makes
+  it obvious exactly how far into each source the engine has read.
+
+- **Playground devtools: `channels` tab.** Shows the `channel_onboarding_status` table
+  (`channel_id`, `entity`, `marked_ready_at`). This makes it clear which channels have
+  completed onboarding and when, which is relevant when using the manual sync button.
+
+### Fixed
+
 - **Playground object viewer: column header alignment.** The `cluster-header-row` was starting
   at x=0 while card columns were inset by `cluster-body` padding (6px) + `cluster-group` side
   padding (5px) = 11px; and no `column-gap` meant misalignment compounded for 2+ columns. Fixed

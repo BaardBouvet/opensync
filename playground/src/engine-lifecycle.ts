@@ -37,7 +37,8 @@ export interface EngineState {
 
 export interface DbSnapshot {
   identityMap: Array<{ canonical_id: string; connector_id: string; external_id: string }>;
-  shadowState: Array<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string; deleted_at: string | null }>;
+  shadowState: Array<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string; canonical_data: string; deleted_at: string | null }>;
+  watermarks: Array<{ connector_id: string; entity_name: string; since: string }>;
   channelStatus: Array<{ channel_id: string; entity: string; marked_ready_at: string }>;
 }
 
@@ -291,8 +292,13 @@ export async function startEngine(
           )
           .all(),
         shadowState: db
-          .prepare<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string; deleted_at: string | null }>(
-            "SELECT connector_id, entity_name, external_id, canonical_id, deleted_at FROM shadow_state ORDER BY connector_id, entity_name, external_id",
+          .prepare<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string; canonical_data: string; deleted_at: string | null }>(
+            "SELECT connector_id, entity_name, external_id, canonical_id, canonical_data, deleted_at FROM shadow_state ORDER BY connector_id, entity_name, external_id",
+          )
+          .all(),
+        watermarks: db
+          .prepare<{ connector_id: string; entity_name: string; since: string }>(
+            "SELECT connector_id, entity_name, since FROM watermarks ORDER BY connector_id, entity_name",
           )
           .all(),
         channelStatus: db
