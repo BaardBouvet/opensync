@@ -24,6 +24,24 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
   `demo/demo-browser/`; it is now a first-class sibling at `demo-browser/`. Updated `package.json`
   workspaces, `vite.config.ts`, `tsconfig.json`, `AGENTS.md`, and `specs/demo.md` accordingly.
 
+### Fixed
+
+- **Playground object viewer: column header alignment.** The `cluster-header-row` was starting
+  at x=0 while card columns were inset by `cluster-body` padding (6px) + `cluster-group` side
+  padding (5px) = 11px; and no `column-gap` meant misalignment compounded for 2+ columns. Fixed
+  by setting header `padding` and `column-gap` in the render functions (6px for the unmapped
+  view, 11px for channel cluster view). The `border-right` separator on header cells was removed;
+  the `column-gap` now provides visual column separation.
+
+- **Playground object viewer: per-column accent stripe.** Added a coloured left border on each
+  `cluster-col-head` (full intensity) and the corresponding `cluster-cell` nth-child position
+  (30% opacity), cycling through four muted colours. This visually links a header cell to the
+  card column directly below it, making column ownership unambiguous.
+
+- **Playground object viewer: empty slot visibility.** `cluster-cell-empty` border colour
+  changed from `#252525` (near-invisible) to `#2e2e3a` with a faint background, so empty
+  "no record for this system" slots are clearly visible within a cluster group.
+
 ### Added
 
 - **GitHub Actions workflow to deploy playground to GitHub Pages.** Added

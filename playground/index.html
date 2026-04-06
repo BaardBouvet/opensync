@@ -121,9 +121,13 @@
     }
     .cluster-col-head {
       padding: 7px 12px; display: flex; align-items: baseline; gap: 8px;
-      border-right: 1px solid #2a2a2a;
+      border-left: 3px solid transparent;  /* colour set per nth-child below */
     }
-    .cluster-col-head:last-child { border-right: none; }
+    /* Per-column accent stripe (cycles every 4); links header cell to card column */
+    .cluster-col-head:nth-child(4n+1) { border-left-color: #3d62a8; }
+    .cluster-col-head:nth-child(4n+2) { border-left-color: #794a98; }
+    .cluster-col-head:nth-child(4n+3) { border-left-color: #3a8a5a; }
+    .cluster-col-head:nth-child(4n+4) { border-left-color: #a07438; }
 
     /* System / entity labels (reused in cluster header) */
     .system-name { font-weight: 700; font-size: 13px; color: #fff; }
@@ -156,8 +160,14 @@
     }
     .cluster-cards-row { display: grid; gap: 6px; }
     .cluster-cell { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+    /* Matching faint left-border accent on card cells — same nth-child colours as header */
+    .cluster-cell:nth-child(4n+1) { border-left: 3px solid rgba(61,98,168,0.3); }
+    .cluster-cell:nth-child(4n+2) { border-left: 3px solid rgba(121,74,152,0.3); }
+    .cluster-cell:nth-child(4n+3) { border-left: 3px solid rgba(58,138,90,0.3); }
+    .cluster-cell:nth-child(4n+4) { border-left: 3px solid rgba(160,116,56,0.3); }
     .cluster-cell-empty {
-      border: 1px dashed #252525; border-radius: 5px; min-height: 50px;
+      border: 1px dashed #2e2e3a; border-radius: 5px; min-height: 50px;
+      background: rgba(255,255,255,0.012);
     }
     .cluster-cell-pending {
       background: #1e1e22; border: 1px solid #2e2e2e; border-radius: 5px;
