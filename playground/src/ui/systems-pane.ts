@@ -326,6 +326,8 @@ export function createSystemsPane(
     const headerRow = document.createElement("div");
     headerRow.className = "cluster-header-row";
     headerRow.style.gridTemplateColumns = gridCols;
+    headerRow.style.padding = "0 6px";    // match cluster-body side padding only (no cluster-group here)
+    headerRow.style.columnGap = "6px";   // match unmapped-cols-row gap
     for (const { connectorId, entity } of sections) {
       const conn = systems.get(connectorId);
       const allRecs = conn?.snapshotFull()[entity] ?? [];
@@ -462,6 +464,8 @@ export function createSystemsPane(
     const headerRow = document.createElement("div");
     headerRow.className = "cluster-header-row";
     headerRow.style.gridTemplateColumns = gridCols;
+    headerRow.style.padding = "0 11px";   // match cluster-body(6px) + cluster-group side-padding(5px)
+    headerRow.style.columnGap = "6px";    // match cluster-cards-row gap
     for (const m of members) {
       const count = memberCounts.get(`${m.connectorId}/${m.entity}`) ?? 0;
       const head = document.createElement("div");
