@@ -52,7 +52,7 @@ available for advanced use and testing. This would reduce the demo glue from ~40
 
 ## § 2 Event Payload and Onboarding Events
 
-See `plans/connectors/PLAN_ENGINE_SYNC_EVENTS.md` for the design of first-class `SyncEvent`
+See `plans/engine/PLAN_ENGINE_SYNC_EVENTS.md` for the design of first-class `SyncEvent`
 emission from the engine, which includes:
 
 - **§ 2** — Moving event construction into the engine and extending `RecordSyncResult` to
@@ -60,8 +60,7 @@ emission from the engine, which includes:
 - **§ 5** — Exposing individual onboarding fanout INSERT events to callers via
   `OnboardResult.inserts`.
 
-This plan originated in this document but is now owned by the connector-integration plan
-so that changes to `RecordSyncResult` (a core SDK type) are centralized.
+These are engine-specific API improvements tracked separately.
 
 ---
 
