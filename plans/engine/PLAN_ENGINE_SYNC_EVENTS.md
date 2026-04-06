@@ -3,7 +3,7 @@
 **Status:** draft  
 **Date:** 2026-04-06  
 **Domain:** Engine API, Observability  
-**Scope:** `packages/engine/src/`, `packages/sdk/src/`, `demo/demo-browser/src/`, `demo/run.ts`  
+**Scope:** `packages/engine/src/`, `packages/sdk/src/`, `playground/src/`, `demo/run.ts`  
 **Depends on:** `plans/engine/PLAN_ENGINE_USABILITY.md` (§ 2 — Silent Onboarding Events)  
 
 ---
@@ -282,4 +282,4 @@ skip it (typical switch/filter patterns).  Fields `sourceData`, `sourceShadow`, 
 shadowsSeeded / uniqueQueued` are unaffected.
 
 `ActivityLogEntry` and `captureSourceShadow()` live only in the browser playground; their
-removal is purely internal to `demo/demo-browser/`.
+removal is purely internal to `playground/`.

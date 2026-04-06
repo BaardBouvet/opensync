@@ -3,7 +3,7 @@
 **Status:** backlog  
 **Date:** 2025-01-30  
 **Domain:** Demo / QA  
-**Scope:** demo/demo-browser  
+**Scope:** playground/  
 **Spec changes planned:** None — this is infrastructure only.
 
 ---
@@ -45,12 +45,12 @@ bun add -d @playwright/test
 bunx playwright install chromium
 ```
 
-Add to `demo/demo-browser/package.json` scripts:
+Add to `playground/package.json` scripts:
 ```json
 "test:e2e": "playwright test"
 ```
 
-Create `demo/demo-browser/playwright.config.ts`:
+Create `playground/playwright.config.ts`:
 ```typescript
 import { defineConfig } from "@playwright/test";
 
@@ -183,12 +183,12 @@ e2e:
     - uses: oven-sh/setup-bun@v2
     - run: bun install
     - run: bunx playwright install --with-deps chromium
-    - run: bun run --cwd demo/demo-browser test:e2e
+    - run: bun run --cwd playground test:e2e
     - uses: actions/upload-artifact@v4
       if: failure()
       with:
         name: playwright-traces
-        path: demo/demo-browser/test-results/
+        path: playground/test-results/
 ```
 
 ---
@@ -196,7 +196,7 @@ e2e:
 ## § 4 File layout
 
 ```
-demo/demo-browser/
+playground/
   playwright.config.ts
   tests/
     e2e/

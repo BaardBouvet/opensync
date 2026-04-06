@@ -66,6 +66,10 @@ bun test packages/sdk/
   ```
   Each line must end with two trailing spaces (Markdown hard break) so they render on separate
   lines in GitHub preview. Additional metadata lines (Domain, Scope, Spec, Depends on, …) may follow.
+- `**Effort:**` is a required field on every new implementation plan (PLAN_*.md). Use t-shirt
+  sizes: `XS` (< 2 h), `S` (half-day), `M` (1–2 days), `L` (3–5 days), `XL` (> 1 week).
+  Omit on GAP_*, REPORT_*, and purely-historical files where effort is not applicable.
+  The Effort column in `plans/INDEX.md` enables at-a-glance comparison during roadmap planning.
 - When a plan is completed, update its `Status:` line to `complete` in the plan file itself
 - Also update the row in `plans/INDEX.md` with the new status
 - If the plan has a corresponding row in `ROADMAP.md`, mark it `done` there too
