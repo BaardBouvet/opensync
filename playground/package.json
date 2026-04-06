@@ -1,5 +1,5 @@
 {
-  "name": "@opensync/demo-browser",
+  "name": "@opensync/playground",
   "version": "0.0.1",
   "private": true,
   "type": "module",

@@ -13,6 +13,17 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Changed
+
+- **`demo-browser/` renamed to `playground/`.** The browser playground package is now at
+  `playground/` and published as `@opensync/playground`. Removes the false parent-child
+  implication with `demo/`. Updated `package.json` workspaces, `AGENTS.md`, `specs/demo.md`,
+  and all active plan Scope lines.
+
+- **`demo-browser/` moved to workspace root.** The browser playground package was nested at
+  `demo/demo-browser/`; it is now a first-class sibling at `demo-browser/`. Updated `package.json`
+  workspaces, `vite.config.ts`, `tsconfig.json`, `AGENTS.md`, and `specs/demo.md` accordingly.
+
 ### Added
 
 - **Browser playground: READ events in boot tick.** The boot tick now shows one READ event per

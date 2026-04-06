@@ -11,7 +11,7 @@
   "include": ["src", "vite.config.ts"],
   "exclude": ["src/**/*.test.ts"],
   "references": [
-    { "path": "../../packages/sdk" },
-    { "path": "../../packages/engine" }
+    { "path": "../packages/sdk" },
+    { "path": "../packages/engine" }
   ]
 }

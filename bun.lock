@@ -74,28 +74,6 @@
         "@opensync/engine": "workspace:*",
       },
     },
-    "demo/demo-browser": {
-      "name": "@opensync/demo-browser",
-      "version": "0.0.1",
-      "dependencies": {
-        "@codemirror/commands": "^6.10.3",
-        "@codemirror/lang-json": "^6.0.1",
-        "@codemirror/lang-yaml": "^6.1.3",
-        "@codemirror/lint": "^6.9.5",
-        "@codemirror/state": "^6.4.1",
-        "@codemirror/theme-one-dark": "^6.1.2",
-        "@codemirror/view": "^6.35.0",
-        "@opensync/engine": "workspace:*",
-        "@opensync/sdk": "workspace:*",
-        "codemirror": "^6.0.1",
-        "sql.js": "^1.12.0",
-        "yaml": "^2.8.3",
-      },
-      "devDependencies": {
-        "@types/sql.js": "^1.4.9",
-        "vite": "^6.3.3",
-      },
-    },
     "dev/connectors/jsonfiles": {
       "name": "@opensync/connector-jsonfiles",
       "version": "0.1.0",
@@ -160,6 +138,28 @@
       "version": "0.1.0",
       "devDependencies": {
         "@types/node": "^25.5.0",
+      },
+    },
+    "playground": {
+      "name": "@opensync/playground",
+      "version": "0.0.1",
+      "dependencies": {
+        "@codemirror/commands": "^6.10.3",
+        "@codemirror/lang-json": "^6.0.1",
+        "@codemirror/lang-yaml": "^6.1.3",
+        "@codemirror/lint": "^6.9.5",
+        "@codemirror/state": "^6.4.1",
+        "@codemirror/theme-one-dark": "^6.1.2",
+        "@codemirror/view": "^6.35.0",
+        "@opensync/engine": "workspace:*",
+        "@opensync/sdk": "workspace:*",
+        "codemirror": "^6.0.1",
+        "sql.js": "^1.12.0",
+        "yaml": "^2.8.3",
+      },
+      "devDependencies": {
+        "@types/sql.js": "^1.4.9",
+        "vite": "^6.3.3",
       },
     },
   },
@@ -268,9 +268,9 @@
 
     "@opensync/demo": ["@opensync/demo@workspace:demo"],
 
-    "@opensync/demo-browser": ["@opensync/demo-browser@workspace:demo/demo-browser"],
-
     "@opensync/engine": ["@opensync/engine@workspace:packages/engine"],
+
+    "@opensync/playground": ["@opensync/playground@workspace:playground"],
 
     "@opensync/sdk": ["@opensync/sdk@workspace:packages/sdk"],
 
