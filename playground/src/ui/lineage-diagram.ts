@@ -448,10 +448,19 @@ function buildEntityHeader(
 function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
   const node = document.createElement("div");
   node.className = "ld-field-node";
+  if (f.isAssoc) node.classList.add("ld-field-node-assoc");
   node.dataset.memberKey = memberKey(f.connectorId, f.entity);
   node.dataset.sourceField = f.sourceField;
   node.dataset.canonicalField = f.canonicalField;
-  node.textContent = f.sourceField;
+  if (f.isAssoc) {
+    const marker = document.createElement("span");
+    marker.className = "ld-assoc-marker";
+    marker.textContent = "⟶";
+    node.appendChild(marker);
+    node.appendChild(document.createTextNode(f.sourceField));
+  } else {
+    node.textContent = f.sourceField;
+  }
   return node;
 }
 
@@ -538,8 +547,15 @@ function buildCentreColumn(lineage: ChannelLineage): HTMLElement {
     chip.className = "ld-canonical-chip";
     chip.dataset.canonicalField = node.fieldName;
     if (node.isIdentity) chip.classList.add("ld-canonical-identity");
+    if (node.isAssoc) chip.classList.add("ld-canonical-chip-assoc");
     const nameSpan = document.createElement("span");
     nameSpan.className = "ld-canonical-name";
+    if (node.isAssoc) {
+      const marker = document.createElement("span");
+      marker.className = "ld-assoc-marker";
+      marker.textContent = "⟶";
+      chip.appendChild(marker);
+    }
     nameSpan.textContent = node.fieldName === "*" ? "(all fields)" : node.fieldName;
     chip.appendChild(nameSpan);
     col.appendChild(chip);

@@ -30,6 +30,7 @@ or in `ESSENCE.md` for project-wide design choices.
 | `poc/` | Pre-POC design intent documents (`PLAN_POC_VN.md`) |
 | `engine/` | Gap analyses and research about the sync engine |
 | `connectors/` | Gap analyses and research about connectors |
+| `ecosystem/` | Scout reports and comparisons with adjacent tools and standards |
 | `infra/` | Deployment, tooling, and infrastructure plans |
 | `testing/` | Test strategy and coverage plans |
 

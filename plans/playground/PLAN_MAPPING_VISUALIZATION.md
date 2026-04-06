@@ -346,7 +346,12 @@ No other spec files need updating.
 
 - Editing field mappings by dragging lines (that is a full graphical editor; separate plan).
 - Displaying expression bodies in the diagram; these remain YAML-only.
-- Association lineage (what entity an association foreign key resolves to); add later.
+- Association predicate mapping in the lineage diagram: render each `assocMappings` entry
+  as an extra row inside its connector entity pill, using a distinct marker (e.g. `⟶` prefix
+  or a small link icon) to distinguish it from field mappings. The connector-local predicate
+  (`source`) lives in the entity's column; the canonical predicate name (`target`) appears in
+  the canonical column as an association row. Spans the same SVG connector lines as field rows.
+  **→ Implemented in v1 (amber colour scheme, `⟶` marker, `ld-field-node-assoc` / `ld-canonical-chip-assoc` CSS classes).**
 - Printing or exporting the diagram.
 
 ---

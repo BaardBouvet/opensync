@@ -512,6 +512,12 @@
     .ld-highlighted { background: rgba(120, 90, 230, 0.28) !important; }
     /* Hidden because it doesn't map to the currently focused canonical */
     .ld-field-filtered { display: none !important; }
+    /* Association predicate row — muted amber tint to distinguish from plain field rows */
+    .ld-field-node-assoc { border-color: #4a3a1a; color: #a09060; }
+    .ld-field-node-assoc:hover { border-color: #7a6030; color: #d0b870; }
+    .ld-field-node-assoc.ld-field-node-focused { border-color: #c8a040; color: #f0d080; }
+    .ld-assoc-marker { color: #7a5a20; margin-right: 4px; font-size: 10px; }
+    .ld-field-node-assoc .ld-assoc-marker { color: #a07030; }
 
     /* Canonical field chips */
     .ld-canonical-chip {
@@ -532,6 +538,17 @@
     .ld-canonical-chip-related {
       border-color: #6a6898; color: #c8b8e8;
       background: #242040;
+    }
+    /* Association predicate canonical chip — warm amber tint */
+    .ld-canonical-chip-assoc {
+      background: #1e1a0e; border-color: #4a3a1a;
+      color: #9a8050;
+    }
+    .ld-canonical-chip-assoc:hover { border-color: #7a6030; color: #d0b870; }
+    .ld-canonical-chip-assoc .ld-assoc-marker { color: #a07030; margin-right: 4px; font-size: 10px; }
+    .ld-canonical-chip-assoc.ld-canonical-chip-focused {
+      border-color: #c8a040; background: #2a2010;
+      box-shadow: 0 0 0 2px rgba(200,160,64,0.2);
     }
     .ld-canonical-identity .ld-canonical-name::after {
       content: " ○"; color: #6060a0; font-size: 9px;

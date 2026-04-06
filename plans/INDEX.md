@@ -93,3 +93,9 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | complete | XS |
 | [meta/REPORT_ASSOCIATION_NAMING.md](meta/REPORT_ASSOCIATION_NAMING.md) | Naming analysis for the `Association` concept — candidates (link, edge, ref, rel, assoc), collision map, migration scope, recommendation | draft | — |
 | [meta/GAP_R2RML_YARRRML.md](meta/GAP_R2RML_YARRRML.md) | Gap analysis: OpenSync vs R2RML / YARRRML / RML — concept mapping, transform expressiveness, identity resolution, what OpenSync can learn, what only OpenSync does | reference | — |
+
+## ecosystem/ — Related tools, frameworks, and standards in the broader integration space
+
+| File | What it covers | Status | Effort |
+|------|---------------|--------|--------|
+| [ecosystem/REPORT_ECOSYSTEM_SCOUT.md](ecosystem/REPORT_ECOSYSTEM_SCOUT.md) | Scout report: landscape of adjacent tools (Airbyte, Fivetran, Meltano/Singer, n8n, Debezium, Kafka Connect, Estuary, Electric SQL, Nango, Camel, R2RML, YARRRML, and more) — category map, differentiation analysis, open questions | draft | — |

@@ -6,6 +6,8 @@ import type { ChannelConfig } from "@opensync/engine";
 export interface CanonicalNode {
   fieldName: string;
   isIdentity: boolean;
+  // True when this canonical node represents an association predicate (assocMappings).
+  isAssoc: boolean;
 }
 
 export interface ConnectorFieldNode {
@@ -16,6 +18,8 @@ export interface ConnectorFieldNode {
   // Canonical-side name (e.g. "name"). "*" for pass-through members.
   canonicalField: string;
   direction: "bidirectional" | "forward_only" | "reverse_only";
+  // True when this node represents an association predicate mapping (assocMappings).
+  isAssoc: boolean;
 }
 
 export interface ChannelLineage {
@@ -30,7 +34,8 @@ export interface ChannelLineage {
 // Spec: specs/playground.md § 11.2
 export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
   const identitySet = new Set(channel.identityFields ?? []);
-  const canonicalSet = new Set<string>();
+  // Map from canonical name → { isAssoc } so fields are listed first, assoc predicates second.
+  const canonicalMap = new Map<string, { isAssoc: boolean }>();
   const inboundFields: ConnectorFieldNode[] = [];
   const outboundFields: ConnectorFieldNode[] = [];
 
@@ -45,17 +50,19 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
         sourceField: "*",
         canonicalField: "*",
         direction: "bidirectional",
+        isAssoc: false,
       });
     } else {
       for (const f of member.inbound) {
         const canonicalField = f.target;
-        canonicalSet.add(canonicalField);
+        if (!canonicalMap.has(canonicalField)) canonicalMap.set(canonicalField, { isAssoc: false });
         inboundFields.push({
           connectorId,
           entity,
           sourceField: f.source ?? f.target,
           canonicalField,
           direction: f.direction ?? "bidirectional",
+          isAssoc: false,
         });
       }
     }
@@ -67,28 +74,57 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
         sourceField: "*",
         canonicalField: "*",
         direction: "bidirectional",
+        isAssoc: false,
       });
     } else {
       for (const f of member.outbound) {
-        canonicalSet.add(f.target);
+        if (!canonicalMap.has(f.target)) canonicalMap.set(f.target, { isAssoc: false });
         outboundFields.push({
           connectorId,
           entity,
           sourceField: f.source ?? f.target,
           canonicalField: f.target,
           direction: f.direction ?? "bidirectional",
+          isAssoc: false,
+        });
+      }
+    }
+
+    // Association predicate mappings — emitted after regular fields so they appear
+    // at the bottom of the entity's expanded pill, visually grouped below fields.
+    if (member.assocMappings) {
+      for (const a of member.assocMappings) {
+        if (!canonicalMap.has(a.target)) canonicalMap.set(a.target, { isAssoc: true });
+        inboundFields.push({
+          connectorId,
+          entity,
+          sourceField: a.source,
+          canonicalField: a.target,
+          direction: "bidirectional",
+          isAssoc: true,
+        });
+        outboundFields.push({
+          connectorId,
+          entity,
+          sourceField: a.source,
+          canonicalField: a.target,
+          direction: "bidirectional",
+          isAssoc: true,
         });
       }
     }
   }
 
-  // If all members are pass-through, add the synthetic "*" canonical node.
-  if (canonicalSet.size === 0) canonicalSet.add("*");
+  // If all members are pass-through with no assoc mappings, add the synthetic "*" canonical node.
+  if (canonicalMap.size === 0) canonicalMap.set("*", { isAssoc: false });
 
-  const canonicalFields: CanonicalNode[] = Array.from(canonicalSet).map((name) => ({
-    fieldName: name,
-    isIdentity: identitySet.has(name),
-  }));
+  const canonicalFields: CanonicalNode[] = Array.from(canonicalMap.entries()).map(
+    ([name, info]) => ({
+      fieldName: name,
+      isIdentity: identitySet.has(name),
+      isAssoc: info.isAssoc,
+    }),
+  );
 
   return { channelId: channel.id, canonicalFields, inboundFields, outboundFields };
 }
