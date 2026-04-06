@@ -3,14 +3,14 @@
 **Status:** backlog  
 **Date:** 2026-04-06  
 **Domain:** Demo / Architecture  
-**Scope:** demo/demo-browser  
+**Scope:** playground/  
 **Spec changes planned:** None — this is internal demo plumbing only.
 
 ---
 
 ## Problem
 
-The playground app (`demo/demo-browser`) is built with imperative DOM mutation scattered
+The playground app (`playground/`) is built with imperative DOM mutation scattered
 across `main.ts` and the `ui/` modules. Module-level mutable state (`engineState`,
 `systemsPane`, `devTools`, `isDirty`, etc.) is read and written from many places.
 There is no single source of truth for "what the UI should look like right now."
@@ -230,7 +230,7 @@ expect(dom.querySelector(".status")?.textContent).toBe("● running");
 ## § 7 File layout after migration
 
 ```
-demo/demo-browser/src/
+playground/src/
   model.ts          — AppModel, Msg, initialModel(), update()
   dispatch.ts       — dispatch loop, runEffect()
   render.ts         — top-level render(model, prev)

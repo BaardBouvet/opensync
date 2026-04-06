@@ -1,9 +1,9 @@
 # Plan: Mapping Lineage Visualization in the Playground
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Domain:** demo / playground UI  
-**Scope:** `demo/demo-browser` only — no engine changes  
+**Scope:** `playground/` only — no engine changes  
 **Spec:** `specs/playground.md`  
 **Depends on:** none  
 
@@ -138,6 +138,38 @@ to distinguish it from explicit mappings.
 
 A horizontal annotation strip below the canonical spine lists the identity fields as
 highlighted chips: `○ domain` — these are the fields used for record matching.
+
+---
+
+## Data Sources
+
+The diagram is derived entirely from the `ScenarioDefinition` object — the same value that
+`editor-pane.ts` already holds after a boot or config apply. No engine query, no sql.js read,
+and no import from `@opensync/engine` is needed.
+
+| Diagram element | Source |
+|---|---|
+| Channel IDs | `scenario.channels[].id` |
+| Connector + entity per member | `member.connectorId`, `member.entity` |
+| Field renames | `member.inbound[].{ source, target }` |
+| Flow direction | `member.inbound[].direction` (default: bidirectional) |
+| Identity fields | `channel.identityFields` |
+
+`buildChannelLineage()` (Step 2) is therefore a pure function: `ChannelConfig → ChannelLineage`.
+It has no side effects and requires no async call.
+
+**Consistency guarantee:** the `Diagram` tab always reflects the *applied* config — whatever
+was last passed to `boot()`. If the user has typed unsaved edits in the YAML editor, the
+diagram does not update until they click "Apply". This keeps the diagram and the running
+engine in sync with each other at all times.
+
+What the engine holds that the diagram deliberately does **not** use:
+
+- Actual record data → shown in the cluster view.
+- Identity map rows (which records matched to which canonical UUID) → shown in the dev-tools
+  panel.
+- Shadow state / LWW resolution timestamps → out of scope; belongs in a future resolution
+  trace feature.
 
 ---
 
@@ -281,7 +313,7 @@ Add `§ 2.4` (editor-pane tab modes) and `§ 9` (Field Lineage Diagram) to
 
 ### Step 6 — CSS
 
-New classes under `.ld-*` namespace in the demo-browser stylesheet:
+New classes under `.ld-*` namespace in the playground stylesheet:
 
 | Class | Purpose |
 |---|---|

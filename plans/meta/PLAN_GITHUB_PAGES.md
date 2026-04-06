@@ -3,7 +3,7 @@
 **Status:** draft  
 **Date:** 2026-04-06  
 **Domain:** Infrastructure, Demo  
-**Scope:** `demo/demo-browser/`, `.github/workflows/`, `demo/demo-browser/vite.config.ts`  
+**Scope:** `playground/`, `.github/workflows/`, `playground/vite.config.ts`  
 
 ---
 
@@ -54,15 +54,15 @@ any path prefix.  The workflow should accept a `BASE_PATH` input to override.
 
 Create `.github/workflows/deploy-playground.yml`.
 
-**Trigger:** push to `main` when any file under `demo/demo-browser/` or
+**Trigger:** push to `main` when any file under `playground/` or
 `packages/engine/src/` changes, or when manually triggered (`workflow_dispatch`).
 
 **Steps:**
 1. `actions/checkout@v4`
 2. `oven-sh/setup-bun@v2` — install Bun
 3. `bun install` — install all workspace deps (includes sql.js, vite, etc.)
-4. `cd demo/demo-browser && bun run build` — produces `demo/demo-browser/dist/`
-5. `actions/upload-pages-artifact@v3` — upload `demo/demo-browser/dist/` as the Pages artifact
+4. `cd playground && bun run build` — produces `playground/dist/`
+5. `actions/upload-pages-artifact@v3` — upload `playground/dist/` as the Pages artifact
 6. `actions/deploy-pages@v4` — deploy to GitHub Pages
 
 **Permissions required** on the workflow job:
@@ -77,13 +77,13 @@ permissions:
 
 ### § 3.3 `bun run build` script
 
-The build currently runs from `demo/demo-browser/` with `bun run build`.  The workspace
+The build currently runs from `playground/` with `bun run build`.  The workspace
 root `package.json` does not have a top-level `build:playground` script.  Add one so the
 workflow can also be triggered from the root:
 
 ```json
 "scripts": {
-  "build:playground": "cd demo/demo-browser && bun run build"
+  "build:playground": "cd playground && bun run build"
 }
 ```
 
@@ -110,7 +110,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "demo/demo-browser/**"
+      - "demo-browser/**"
       - "packages/engine/src/**"
       - "packages/sdk/src/**"
   workflow_dispatch:
@@ -140,12 +140,12 @@ jobs:
         run: bun install
 
       - name: Build playground
-        run: cd demo/demo-browser && bun run build
+        run: cd demo-browser && bun run build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: demo/demo-browser/dist
+          path: demo-browser/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
@@ -170,7 +170,7 @@ After the workflow completes:
 
 If a custom domain is added (e.g. `play.opensync.dev`):
 
-1. Add a `CNAME` file to `demo/demo-browser/public/` with the domain name.
+1. Add a `CNAME` file to `demo-browser/public/` with the domain name.
 2. Configure the DNS record to point to `<org>.github.io`.
 3. Set `base: "/"` in `vite.config.ts` (or via `VITE_BASE` env var in the workflow).
 4. Enable HTTPS in repository Settings → Pages.
