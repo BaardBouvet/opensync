@@ -24,11 +24,22 @@ export interface FieldMapping {
 
 export type FieldMappingList = FieldMapping[];
 
+/** Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.2
+ * Maps a connector-local association predicate to a canonical name.
+ * Absent assocMappings on a ChannelMember → no associations forwarded. */
+export interface AssocPredicateMapping {
+  source: string;   // connector-local predicate name
+  target: string;   // canonical predicate name (routing key; never stored)
+}
+
 export interface ChannelMember {
   connectorId: string;
   entity: string;
   inbound?: FieldMappingList;
   outbound?: FieldMappingList;
+  /** Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.2 — declared association predicates.
+   * Absent → no associations forwarded from/to this connector. */
+  assocMappings?: AssocPredicateMapping[];
 }
 
 export interface ChannelConfig {
@@ -155,6 +166,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       entity: entry.entity,
       inbound,
       outbound,
+      assocMappings: entry.associations,
     });
   }
 

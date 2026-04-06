@@ -23,6 +23,7 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 - `OnboardResult.inserts` entries now carry `afterAssociations` (the remapped associations that were written to the target connector during onboarding). Previously these were missing from onboard INSERT events.
 - Boot READ events in the playground now include `sourceAssociations` (associations on each record in the initial snapshot), making them visible in the event log detail.
 - Playground event log (`devtools.ts`) now renders association changes as diff rows alongside field changes. A `buildAssocDiff` helper compares before/after association arrays by predicate and shows `entity/targetId → entity/newTargetId` for each changed link. The "(no field changes)" label is replaced by "(no changes)" and only appears when both field data and associations are identical.
+- **Association predicate mapping** (`assocMappings` on `ChannelMember`): each connector may now declare an `associations` list in its channel mapping entry that maps local predicate names to a canonical name (e.g. CRM `companyId` and ERP `orgId` both map to canonical `companyRef`). The engine translates predicates at dispatch time — source-local → canonical → target-local — so each system receives its own predicate name. Absent `assocMappings` on a member means no associations are forwarded (strict by design). The canonical name is a routing key only; it is never stored in shadow state, so changing mappings never invalidates existing shadows. T45 regression test covers the cross-predicate rename path. (PLAN_PREDICATE_MAPPING.md)
 - Playground event log INSERT events now render field data as a green table (same style as initial READ) instead of a raw JSON blob; association rows follow below the field table.
 - Playground event log initial READ events (no prior shadow) now show associations below the field table.
 - `RecordSyncResult` now carries structured payload fields: `sourceData` (source record after inbound mapping), `sourceShadow` (engine's prior shadow for diff display), `after` (canonical values written to the target), and `before` (target's pre-write shadow for UPDATE events).  All fields are optional — callers that don't use them are unaffected.
@@ -34,8 +35,6 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 - Browser playground: `emitEvents()` reads `before`/`after`/`sourceData`/`sourceShadow` directly from `RecordSyncResult` — no longer calls `captureSourceShadow()` or queries shadow_state before each ingest.
 - Browser playground: onboard INSERT events now come from `onboardResult.inserts` instead of a `transaction_log` back-query.
 - `InMemoryConnector` no longer implements an internal activity log (`ActivityLogEntry`, `getActivityLog()`, `clearActivityLog()` removed).
-
-### Changed
 - `plans/` reorganised into subsystem folders: `plans/demo/` for CLI demo runner plans, `plans/playground/` (new) for browser playground plans, `plans/meta/` trimmed to genuinely cross-cutting concerns only.
 
 ---

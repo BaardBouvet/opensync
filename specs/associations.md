@@ -186,16 +186,19 @@ The ERP connector's equivalent would use `accounts`. Neither connector knows the
 
 For each resolved association the engine performs these steps at dispatch time:
 
-1. **Canonical UUID lookup**: look up `(sourceConnectorId, assoc.targetId)` in `identity_map`
-   to get the canonical UUID for the referenced record. No entity type is involved — the
-   identity map is keyed by connector instance and external ID only.
-2. **Target local ID lookup**: look up `(canonicalUUID, targetConnectorId)` in `identity_map`
+1. **Inbound filtering**: keep only associations whose `predicate` is declared in the source
+   connector's `assocMappings` list (see § 7.5). Missing declaration → drop all associations.
+2. **Canonical UUID lookup**: look up `(sourceConnectorId, assoc.targetId)` in `identity_map`
+   to get the canonical UUID for the referenced record.
+3. **Target local ID lookup**: look up `(canonicalUUID, targetConnectorId)` in `identity_map`
    to get the target connector's local ID.
-3. **Entity name translation**: call `_translateTargetEntity(assoc.targetEntity, fromConnectorId, toConnectorId)` —
+4. **Entity name translation**: call `_translateTargetEntity(assoc.targetEntity, fromConnectorId, toConnectorId)` —
    walk the channel config to find which channel has `fromConnector` with entity `assoc.targetEntity`,
    then return `toConnector`'s entity name in that same channel. This translates `company` → `accounts`
    without either connector knowing about the other.
-4. **Emit**: pass `{ predicate, targetEntity: <translated name>, targetId: <target local ID> }` in
+5. **Predicate translation**: look up the predicate through the canonical name in `assocMappings`
+   (local → canonical in source, canonical → local in target). Predicates with no mapping → dropped.
+6. **Emit**: pass `{ predicate: <target-local name>, targetEntity: <translated name>, targetId: <target local ID> }` in
    `UpdateRecord.associations` to the target connector.
 
 ### § 7.3 FK injection is the connector's responsibility
@@ -214,6 +217,46 @@ list of the channel mapping config. They are not plain data fields — the engin
 canonical value for them in shadow state; the identity remapping in § 7.2 supersedes any
 field-level mapping. Including them in `fields` would produce a stale unmapped local ID in
 the canonical record, which is meaningless to any other system.
+
+### § 7.5 Predicate mapping via `assocMappings`
+
+Each connector member in a channel mapping may declare an optional `associations` list that
+maps connector-local predicate names to a canonical (channel-internal) name:
+
+```yaml
+# mappings/contacts.yaml
+- connector: crm
+  channel: contacts
+  entity: contacts
+  associations:
+    - source: companyId   # CRM-local predicate name
+      target: companyRef  # canonical name (routing key only; never stored anywhere)
+
+- connector: erp
+  channel: contacts
+  entity: employees
+  associations:
+    - source: orgId       # ERP-local predicate name
+      target: companyRef  # same canonical → same conceptual edge
+
+- connector: hr
+  channel: contacts
+  entity: people
+  associations:
+    - source: orgRef
+      target: companyRef
+```
+
+**Rules:**
+- Absent `associations` on a mapping entry → **no associations forwarded** from or to that
+  connector. Omitting the list is safe and strict by design: a connector that has not declared
+  its predicates cannot participate in association sync.
+- Only predicates that appear in the `associations` list are forwarded. Unlisted predicates
+  from a connector that has an `associations` list are silently dropped.
+- The canonical name is a routing key only — it is **never stored** in shadow state. The
+  shadow always stores the connector's own local predicate name.
+- Changing or adding a predicate mapping never invalidates existing shadows. No migration
+  is needed when mapping config is updated.
 
 ## Design Rationale
 

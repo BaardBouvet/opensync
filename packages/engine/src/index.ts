@@ -25,6 +25,7 @@ export type {
   ConflictConfig,
   FieldMapping,
   FieldMappingList,
+  AssocPredicateMapping,
 } from "./config/loader.js";
 
 export { openDb } from "./db/index.js";

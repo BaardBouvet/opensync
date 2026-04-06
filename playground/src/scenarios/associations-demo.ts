@@ -64,6 +64,7 @@ const scenario: ScenarioDefinition = {
             { source: "name",  target: "name" },
             { source: "email", target: "email" },
           ],
+          assocMappings: [{ source: "companyId", target: "companyRef" }],
         },
         {
           connectorId: "erp",
@@ -76,6 +77,7 @@ const scenario: ScenarioDefinition = {
             { source: "fullName", target: "name" },
             { source: "email",    target: "email" },
           ],
+          assocMappings: [{ source: "orgId", target: "companyRef" }],
         },
         {
           connectorId: "hr",
@@ -88,6 +90,7 @@ const scenario: ScenarioDefinition = {
             { source: "displayName", target: "name" },
             { source: "email",       target: "email" },
           ],
+          assocMappings: [{ source: "orgRef", target: "companyRef" }],
         },
       ],
     },

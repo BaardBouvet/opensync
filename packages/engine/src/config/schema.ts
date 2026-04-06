@@ -47,11 +47,17 @@ export const FieldMappingEntrySchema = z.object({
   direction: FieldDirectionSchema.optional(),
 });
 
+export const AssocPredicateMappingSchema = z.object({
+  source: z.string(),   // connector-local predicate name
+  target: z.string(),   // canonical predicate name (routing key only; never stored)
+});
+
 export const MappingEntrySchema = z.object({
   connector: z.string(),
   channel: z.string(),
   entity: z.string(),
   fields: z.array(FieldMappingEntrySchema).optional(),
+  associations: z.array(AssocPredicateMappingSchema).optional(),
 });
 
 export const MappingsFileSchema = z.object({
@@ -61,3 +67,4 @@ export const MappingsFileSchema = z.object({
 
 export type MappingEntry = z.infer<typeof MappingEntrySchema>;
 export type FieldMappingEntry = z.infer<typeof FieldMappingEntrySchema>;
+export type AssocPredicateMappingEntry = z.infer<typeof AssocPredicateMappingSchema>;

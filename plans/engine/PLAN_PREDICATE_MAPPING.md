@@ -1,6 +1,6 @@
 # Engine: Association Predicate Mapping
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Effort:** M  
 **Domain:** Engine, Config  

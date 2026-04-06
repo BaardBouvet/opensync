@@ -828,10 +828,19 @@ describe("T29: first propagation of association → update (not suppressed)", ()
     const iA = makeInstance("system-a", dirA);
     const iB = makeInstance("system-b", dirB);
     const db = openDb(":memory:");
-    const engine = new SyncEngine(makeConfig([iA, iB], [
-      { connectorId: "system-a", entity: "contacts" },
-      { connectorId: "system-b", entity: "contacts" },
-    ]), db);
+    const engine = new SyncEngine({
+      connectors: [iA, iB],
+      channels: [{
+        id: "ch",
+        members: [
+          { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }] },
+          { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }] },
+        ],
+        identityFields: ["email"],
+      }],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
 
     await engine.ingest("ch", "system-a", { collectOnly: true });
     await engine.ingest("ch", "system-b", { collectOnly: true });
@@ -970,8 +979,8 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
             { connectorId: "system-b", entity: "accounts" },
           ], identityFields: ["domain"] },
         { id: "contacts", members: [
-            { connectorId: "system-a", entity: "contacts" },
-            { connectorId: "system-b", entity: "contacts" },
+            { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
@@ -1043,7 +1052,7 @@ describe("T32: deferred row removed after successful retry", () => {
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1103,7 +1112,7 @@ describe("T33: deferred row retained when source record deleted before retry", (
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1171,7 +1180,7 @@ describe("T34: deferred retry updates association for record inserted without it
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1263,7 +1272,7 @@ describe("T35: targetEntity is translated to the target connector's entity name 
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1339,7 +1348,7 @@ describe("T36: record with unresolvable association is inserted immediately with
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1427,7 +1436,7 @@ describe("T37: deferred retry adds the association once the company is synced", 
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
         { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identityFields: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts"  }, { connectorId: "sb", entity: "contacts"  }], identityFields: ["email"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1495,7 +1504,7 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts"]), makeInst("sb", dirB, ["contacts"])],
       channels: [
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts" }, { connectorId: "sb", entity: "contacts" }], identityFields: ["email"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }] }], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
       readTimeoutMs: 10_000,
@@ -1945,9 +1954,9 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
         {
           id: "contacts",
           members: [
-            { connectorId: "sa", entity: "contacts" },
-            { connectorId: "sb", entity: "contacts" },
-            { connectorId: "sc", entity: "contacts" },
+            { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "sc", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
           identityFields: ["email"],
         },
@@ -2029,8 +2038,8 @@ describe("T44: RecordSyncResult association payload fields", () => {
           { connectorId: "sb", entity: "companies" },
         ], identityFields: ["domain"] },
         { id: "contacts", members: [
-          { connectorId: "sa", entity: "contacts" },
-          { connectorId: "sb", entity: "contacts" },
+          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
         ], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
@@ -2104,8 +2113,8 @@ describe("T44: RecordSyncResult association payload fields", () => {
           { connectorId: "sb", entity: "companies" },
         ], identityFields: ["domain"] },
         { id: "contacts", members: [
-          { connectorId: "sa", entity: "contacts" },
-          { connectorId: "sb", entity: "contacts" },
+          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
         ], identityFields: ["email"] },
       ],
       conflict: { strategy: "lww" },
@@ -2146,3 +2155,93 @@ describe("T44: RecordSyncResult association payload fields", () => {
   });
 });
 
+// ─── T45: Association predicate mapping — cross-system rename ─────────────────
+// Regression for: _remapAssociations passed predicate unchanged, so ERP received
+// CRM's "companyId" instead of its own "orgId".
+// Fix: assocMappings on each ChannelMember maps local predicate ↔ canonical name;
+// outbound dispatch translates source→canonical→target predicate.
+// Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4
+
+describe("T45: association predicate is translated from source name to target name on dispatch", () => {
+  it("CRM contact with 'companyId' is written to ERP with 'orgId' predicate", async () => {
+    const dirA = makeTempDir(); // CRM: contacts with companyId, companies
+    const dirB = makeTempDir(); // ERP: employees with orgId, accounts
+
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    // ERP starts with no contacts, one account
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e_seed", data: { name: "Seed", email: "seed@erp.example.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "accounts.json"), [
+      { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [
+        makeInst("crm", dirA, ["contacts", "companies"]),
+        makeInst("erp", dirB, ["contacts", "accounts"]),
+      ],
+      channels: [
+        { id: "companies", members: [
+          { connectorId: "crm", entity: "companies" },
+          { connectorId: "erp", entity: "accounts" },
+        ], identityFields: ["domain"] },
+        { id: "contacts", members: [
+          { connectorId: "crm", entity: "contacts",
+            assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          { connectorId: "erp", entity: "contacts",
+            assocMappings: [{ source: "orgId", target: "companyRef" }] },
+        ], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    // Onboard companies first so acc1/co1 identity link exists
+    for (const connId of ["crm", "erp"]) {
+      await engine.ingest("companies", connId, { collectOnly: true });
+    }
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // Onboard contacts — Alice is unique to CRM and will be inserted into ERP
+    for (const connId of ["crm", "erp"]) {
+      await engine.ingest("contacts", connId, { collectOnly: true });
+    }
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // ERP's contacts file should have Alice with predicate "orgId" (not "companyId")
+    const erpContacts = readJson(join(dirB, "contacts.json")) as Array<{
+      id: string;
+      data: { email: string };
+      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+    }>;
+    const alice = erpContacts.find((r) => r.data.email === "alice@example.com");
+    expect(alice).toBeDefined();
+    expect(alice!.associations?.length).toBeGreaterThan(0);
+    // Predicate must be the ERP-local name
+    expect(alice!.associations![0].predicate).toBe("orgId");
+    // Target must be remapped to the ERP-side account ID
+    expect(alice!.associations![0].targetId).toBe("acc1");
+
+    // Incremental ingest from CRM → no spurious UPDATEs to ERP (echo detection correct)
+    const result = await engine.ingest("contacts", "crm");
+    const updatesToErp = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "erp");
+    expect(updatesToErp).toHaveLength(0);
+  });
+});

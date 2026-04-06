@@ -584,10 +584,13 @@ export class SyncEngine {
           else if (!dropId) dbLinkIdentity(this.db, winnerId, side.connectorId, side.externalId);
         }
         for (const side of match.sides) {
-          const sideEntity = memberByConnector.get(side.connectorId)!.entity;
-          const sideAssoc = matchSideAssoc.get(`${side.connectorId}/${side.externalId}`);
-          const sideAssocSentinel = sideAssoc?.length
-            ? JSON.stringify([...sideAssoc].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+          const sideMember = memberByConnector.get(side.connectorId)!;
+          const sideEntity = sideMember.entity;
+          // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — filter to declared predicates before storing sentinel
+          const sideAssocRaw = matchSideAssoc.get(`${side.connectorId}/${side.externalId}`);
+          const sideAssocFiltered = this._filterInboundAssociations(sideAssocRaw, sideMember);
+          const sideAssocSentinel = sideAssocFiltered.length
+            ? JSON.stringify([...sideAssocFiltered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
             : undefined;
           const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, sideAssocSentinel);
           dbSetShadow(this.db, side.connectorId, sideEntity, side.externalId, winnerId!, fd);
@@ -649,7 +652,7 @@ export class SyncEngine {
 
         // Remap associations from source side to target (mirrors step 2 pattern).
         const remappedAssoc = srcConnForAssoc && srcAssoc?.length
-          ? this._remapAssociations(srcAssoc, srcConnForAssoc, targetMember.connectorId)
+          ? this._remapAssociations(srcAssoc, srcConnForAssoc, targetMember.connectorId, channelId)
           : [];
         const assocToInsert = (remappedAssoc !== null && !("error" in remappedAssoc) && remappedAssoc.length > 0)
           ? remappedAssoc
@@ -746,7 +749,7 @@ export class SyncEngine {
         // Attempt to remap associations before inserting so we can include them
         const sourceAssoc = sourceAssocCache.get(unique.externalId);
         const remappedAssoc = sourceAssoc?.length
-          ? this._remapAssociations(sourceAssoc, unique.connectorId, targetMember.connectorId)
+          ? this._remapAssociations(sourceAssoc, unique.connectorId, targetMember.connectorId, channelId)
           : [];
 
         const assocToInsert = (remappedAssoc !== null && !("error" in remappedAssoc) && remappedAssoc.length > 0)
@@ -1034,12 +1037,60 @@ export class SyncEngine {
     return this._getOrCreateCanonical(connectorId, externalId);
   }
 
+  // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4
+  // Find the first channel that contains both connectors, return their ChannelMember objects.
+  private _findMemberPair(fromId: string, toId: string): { fromMember: ChannelMember; toMember: ChannelMember } | undefined {
+    for (const ch of this.channels.values()) {
+      const fromMember = ch.members.find((m) => m.connectorId === fromId);
+      const toMember = ch.members.find((m) => m.connectorId === toId);
+      if (fromMember && toMember) return { fromMember, toMember };
+    }
+    return undefined;
+  }
+
+  // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3
+  // Keep only associations whose predicate is declared in member.assocMappings.
+  // Absent assocMappings → no associations forwarded (strict by design).
+  private _filterInboundAssociations(
+    associations: Association[] | undefined,
+    member: ChannelMember,
+  ): Association[] {
+    if (!associations?.length) return [];
+    if (!member.assocMappings) return [];
+    return associations.filter((a) => member.assocMappings!.some((m) => m.source === a.predicate));
+  }
+
   // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md — translate entity name from source
   // connector namespace to target connector namespace when remapping associations.
   // Finds the channel that has fromConnectorId with entity `entityName`, then returns the
   // entity name used by toConnectorId in that same channel. Returns entityName unchanged
   // when no translation is found (safe fallback).
-  // Spec: plans/engine/PLAN_EAGER_ASSOCIATION_MODE.md §3.2
+  //
+  // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4 — helpers for predicate mapping.
+
+  /** Find the channel (optionally scoped by channelId) containing both connectors and return their ChannelMember objects. */
+  private _findMemberPair(fromId: string, toId: string, channelId?: string): { fromMember: ChannelMember; toMember: ChannelMember } | undefined {
+    const search: Iterable<ChannelConfig> = channelId
+      ? ([this.channels.get(channelId)].filter(Boolean) as ChannelConfig[])
+      : this.channels.values();
+    for (const ch of search) {
+      const fromMember = ch.members.find((m) => m.connectorId === fromId);
+      const toMember = ch.members.find((m) => m.connectorId === toId);
+      if (fromMember && toMember) return { fromMember, toMember };
+    }
+    return undefined;
+  }
+
+  /** Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — keep only associations whose
+   * predicate is declared in member.assocMappings. Absent assocMappings → empty. */
+  private _filterInboundAssociations(
+    associations: Association[] | undefined,
+    member: ChannelMember,
+  ): Association[] {
+    if (!associations?.length) return [];
+    if (!member.assocMappings) return [];
+    return associations.filter((a) => member.assocMappings!.some((m) => m.source === a.predicate));
+  }
   // Like _remapAssociations but never returns null. Entries whose target is not yet in the
   // identity map are silently dropped rather than blocking the whole record. Returns { error }
   // only for unknown targetEntity — that is always a config mistake, not a timing issue.
@@ -1047,20 +1098,36 @@ export class SyncEngine {
     associations: Association[] | undefined,
     fromId: string,
     toId: string,
+    channelId?: string,
   ): Association[] | { error: string } {
     if (!associations?.length) return [];
+    // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4 — absent source assocMappings → no associations forwarded
+    const pair = this._findMemberPair(fromId, toId, channelId);
+    if (pair && !pair.fromMember.assocMappings) return [];
     const deduped = new Map<string, Association>();
     for (const a of associations) deduped.set(a.predicate, a);
     const out: Association[] = [];
     for (const assoc of deduped.values()) {
-      if (!assoc.targetId) { out.push({ ...assoc }); continue; }
+      let targetPredicate = assoc.predicate;
+      if (pair?.fromMember.assocMappings) {
+        const canonical = pair.fromMember.assocMappings.find((m) => m.source === assoc.predicate)?.target;
+        if (canonical === undefined) continue;
+        if (pair.toMember.assocMappings) {
+          const local = pair.toMember.assocMappings.find((m) => m.target === canonical)?.source;
+          if (local === undefined) continue;
+          targetPredicate = local;
+        } else {
+          continue;
+        }
+      }
+      if (!assoc.targetId) { out.push({ ...assoc, predicate: targetPredicate }); continue; }
       if (!this._entityKnownInShadow(assoc.targetEntity)) return { error: `Unknown targetEntity "${assoc.targetEntity}"` };
       const canonId = dbGetCanonicalId(this.db, fromId, assoc.targetId);
       if (!canonId) continue; // not yet in identity map — drop for now, deferred row handles the update
       const mapped = dbGetExternalId(this.db, canonId, toId);
       if (mapped === undefined) continue; // not yet in target — drop
       const translatedEntity = this._translateTargetEntity(assoc.targetEntity, fromId, toId);
-      out.push({ ...assoc, targetEntity: translatedEntity, targetId: mapped });
+      out.push({ ...assoc, predicate: targetPredicate, targetEntity: translatedEntity, targetId: mapped });
     }
     return out;
   }
@@ -1092,20 +1159,36 @@ export class SyncEngine {
     associations: Association[] | undefined,
     fromId: string,
     toId: string,
+    channelId?: string,
   ): Association[] | null | { error: string } {
     if (!associations?.length) return [];
+    // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4 — absent source assocMappings → no associations forwarded
+    const pair = this._findMemberPair(fromId, toId, channelId);
+    if (pair && !pair.fromMember.assocMappings) return [];
     const deduped = new Map<string, Association>();
     for (const a of associations) deduped.set(a.predicate, a);
     const out: Association[] = [];
     for (const assoc of deduped.values()) {
-      if (!assoc.targetId) { out.push({ ...assoc }); continue; }
+      let targetPredicate = assoc.predicate;
+      if (pair?.fromMember.assocMappings) {
+        const canonical = pair.fromMember.assocMappings.find((m) => m.source === assoc.predicate)?.target;
+        if (canonical === undefined) continue; // not in source allowlist → drop
+        if (pair.toMember.assocMappings) {
+          const local = pair.toMember.assocMappings.find((m) => m.target === canonical)?.source;
+          if (local === undefined) continue; // not mapped on target → drop
+          targetPredicate = local;
+        } else {
+          continue; // target has no assocMappings → drop
+        }
+      }
+      if (!assoc.targetId) { out.push({ ...assoc, predicate: targetPredicate }); continue; }
       if (!this._entityKnownInShadow(assoc.targetEntity)) return { error: `Unknown targetEntity "${assoc.targetEntity}"` };
       const canonId = dbGetCanonicalId(this.db, fromId, assoc.targetId);
       if (!canonId) return null;
       const mapped = dbGetExternalId(this.db, canonId, toId);
       if (mapped === undefined) return null;
       const translatedEntity = this._translateTargetEntity(assoc.targetEntity, fromId, toId);
-      out.push({ ...assoc, targetEntity: translatedEntity, targetId: mapped });
+      out.push({ ...assoc, predicate: targetPredicate, targetEntity: translatedEntity, targetId: mapped });
     }
     return out;
   }
@@ -1252,7 +1335,13 @@ export class SyncEngine {
 
       const assocSentinel = record.associations === undefined
         ? undefined
-        : JSON.stringify([...record.associations].sort((a, b) => a.predicate.localeCompare(b.predicate)));
+        // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — shadow stores only declared local predicates
+        : (() => {
+            const filtered = this._filterInboundAssociations(record.associations, sourceMember);
+            return filtered.length
+              ? JSON.stringify([...filtered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+              : undefined;
+          })();
 
       const shadowRow = dbGetShadowRow(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
       const existingShadow = shadowRow?.fieldData;
@@ -1295,7 +1384,7 @@ export class SyncEngine {
         const tw = this.wired.get(targetMember.connectorId);
         if (!tw) continue;
 
-        let remap = this._remapAssociations(record.associations, sourceMember.connectorId, targetMember.connectorId);
+        let remap = this._remapAssociations(record.associations, sourceMember.connectorId, targetMember.connectorId, channelId);
         if (remap !== null && "error" in remap) {
           results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: remap.error });
           hadErrors = true;
@@ -1309,7 +1398,7 @@ export class SyncEngine {
           deferredTargets.add(targetMember.connectorId);
           // Fall through with partial remap — dispatch the record without the unresolvable
           // association. The deferred retry will add it once the identity link is established.
-          const partial = this._remapAssociationsPartial(record.associations, sourceMember.connectorId, targetMember.connectorId);
+          const partial = this._remapAssociationsPartial(record.associations, sourceMember.connectorId, targetMember.connectorId, channelId);
           if ("error" in partial) {
             results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: partial.error });
             hadErrors = true;

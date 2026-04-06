@@ -224,8 +224,32 @@ fields:
 
 ### Associations
 
-Associations (foreign-key style links between entities) are synced automatically — no declaration
-needed in the mapping. The engine remaps `targetId` across connectors using its identity map.
+Associations (foreign-key style links between entities) are remapped across connectors using
+the identity map. To enable forwarding, each connector's mapping entry must declare an optional
+`associations` list mapping its local predicate names to a canonical name:
+
+```yaml
+# mappings/contacts.yaml (excerpt)
+- connector: crm
+  channel: contacts
+  entity: contacts
+  fields:
+    - source: name
+      target: name
+  associations:
+    - source: companyId   # CRM-local predicate
+      target: companyRef  # canonical routing key — never stored in shadow state
+
+- connector: erp
+  channel: contacts
+  entity: employees
+  associations:
+    - source: orgId       # ERP-local predicate
+      target: companyRef  # same canonical → same edge
+```
+
+Absent `associations` on a mapping entry → no associations are forwarded from or to that
+connector. See `specs/associations.md § 7.5` for full rules.
 
 ---
 
