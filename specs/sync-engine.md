@@ -378,7 +378,7 @@ interface RecordSyncResult {
   targetConnectorId: string;
   targetId:          string;
   error?:            string;
-  // ── Payload fields ────────────────────────────────────────────────────────
+  // ── Field payload ─────────────────────────────────────────────────────────
   /** READ: source record field values after inbound mapping.  Present for every
    *  non-skip result (one READ per unique sourceId per ingest pass). */
   sourceData?:   Record<string, unknown>;
@@ -389,6 +389,16 @@ interface RecordSyncResult {
   after?:  Record<string, unknown>;
   /** UPDATE: target's previous field values from shadow_state before the write. */
   before?: Record<string, unknown>;
+  // ── Association payload ───────────────────────────────────────────────────
+  /** READ: associations on the incoming source record. */
+  sourceAssociations?:       Association[];
+  /** READ: associations stored in the source shadow before this ingest pass
+   *  (parsed from the __assoc__ sentinel). */
+  sourceShadowAssociations?: Association[];
+  /** INSERT/UPDATE: remapped associations written to the target connector. */
+  afterAssociations?:        Association[];
+  /** UPDATE: associations stored in the target shadow before the write. */
+  beforeAssociations?:       Association[];
 }
 
 interface IngestResult {
@@ -403,16 +413,18 @@ interface IngestResult {
 
 | action | Meaning | Populated fields |
 |--------|---------|-----------------|
-| `"read"` | Engine read a source record that differs from its last known state (`targetConnectorId` = `""`, `targetId` = `sourceId`). One per unique non-skip `sourceId` per ingest pass. | `sourceData`, `sourceShadow?` |
-| `"insert"` | A new record was written to a target connector. | `after` |
-| `"update"` | An existing target record was updated. | `before`, `after` |
+| `"read"` | Engine read a source record that differs from its last known state (`targetConnectorId` = `""`, `targetId` = `sourceId`). One per unique non-skip `sourceId` per ingest pass. | `sourceData`, `sourceShadow?`, `sourceAssociations?`, `sourceShadowAssociations?` |
+| `"insert"` | A new record was written to a target connector. | `after`, `afterAssociations?` |
+| `"update"` | An existing target record was updated. | `before`, `beforeAssociations?`, `after`, `afterAssociations?` |
 | `"skip"` | No write was needed — incoming data already matches shadow state. | — |
 | `"defer"` | Association could not be remapped yet; a deferred row was written for retry. | — |
 | `"error"` | A write failed. | `error` |
 
 `sourceData` and `sourceShadow` are populated by the engine using a `fieldDataToRecord` helper
 that strips `__`-prefixed meta entries (e.g. `__assoc__`) from `FieldData` and extracts `.val`
-from each remaining entry.  `before` is populated from the *target* connector's pre-write shadow state, not the source shadow.
+from each remaining entry.  `before` is populated from the *target* connector's pre-write shadow
+state, not the source shadow.  All four association fields are absent (not `[]`) when there are
+no associations — callers can use `?? []` to compare them.
 
 `onboard()` result:
 

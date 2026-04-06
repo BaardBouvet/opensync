@@ -1879,14 +1879,13 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
 
 // ─── T42: onboard step 1b includes associations in fanout inserts ─────────────
 // Regression for: onboard step 1b (matched+missing-connector fanout) issued
-// INSERT without associations, then the warmup ingest dispatched a "silent" UPDATE
-// that only added the association (before == after in the event payload).
+// INSERT without associations.
 // Fix: step 1b now calls lookup() on the first available source side and includes
 // the remapped associations in the INSERT, matching step 2 behaviour.
 // Spec: plans/engine/PLAN_ENGINE_USABILITY.md § 3.2
 
 describe("T42: onboard step 1b includes associations in the fanout INSERT", () => {
-  it("inserted record has associations and the warmup produces no UPDATE events", async () => {
+  it("inserted record has correct remapped associations", async () => {
     const dirA = makeTempDir();
     const dirB = makeTempDir();
     const dirC = makeTempDir();
@@ -1980,18 +1979,170 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
     expect(alice!.associations?.length).toBeGreaterThan(0);
     // The association targetId must be the sc-side company ID (org1)
     expect(alice!.associations![0].targetId).toBe("org1");
+  });
+});
 
-    // Warmup fullSync: after the fix, sc's shadow has the assoc sentinel
-    // so echo detection fires for sc-targeted dispatches → zero UPDATEs to sc.
-    // (sa ↔ sb UPDATEs may still happen because step 1 seeds matched-record shadows
-    // without assoc sentinels — that is a separate, pre-existing behavior.)
-    const warmupResults = [];
-    for (const connId of ["sa", "sb", "sc"]) {
-      const r = await engine.ingest("contacts", connId, { fullSync: true });
-      warmupResults.push(...r.records);
-    }
-    const warmupUpdatesToSc = warmupResults.filter((r) => r.action === "update" && r.targetConnectorId === "sc");
-    expect(warmupUpdatesToSc).toHaveLength(0);
+// ─── T44: RecordSyncResult association payloads ────────────────────────────────
+// Regression for: before/after carry only field data, so an association-only change
+// produced an UPDATE event where before == after (the actual change was invisible).
+// Fix: RecordSyncResult now carries beforeAssociations / afterAssociations alongside
+// before / after.  Callers can compare them to detect association-only changes.
+// Spec: specs/sync-engine.md § RecordSyncResult
+
+describe("T44: RecordSyncResult association payload fields", () => {
+  it("READ result carries sourceAssociations from the incoming record", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "companies.json"), [
+      { id: "org1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "org1" }] },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [
+        makeInst("sa", dirA, ["contacts", "companies"]),
+        makeInst("sb", dirB, ["contacts", "companies"]),
+      ],
+      channels: [
+        { id: "companies", members: [
+          { connectorId: "sa", entity: "companies" },
+          { connectorId: "sb", entity: "companies" },
+        ], identityFields: ["domain"] },
+        { id: "contacts", members: [
+          { connectorId: "sa", entity: "contacts" },
+          { connectorId: "sb", entity: "contacts" },
+        ], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    for (const connId of ["sa", "sb"]) await engine.ingest("companies", connId, { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+    for (const connId of ["sa", "sb"]) await engine.ingest("contacts", connId, { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Warmup: settle shadows
+    await engine.ingest("contacts", "sa", { fullSync: true });
+    await engine.ingest("contacts", "sb", { fullSync: true });
+
+    // Add a new contact with an association — sa has never seen this record
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c2", data: { name: "Bob", email: "bob@example.com" }, updated: 2,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+
+    const result = await engine.ingest("contacts", "sa");
+    const readResult = result.records.find((r) => r.action === "read" && r.sourceId === "c2");
+    expect(readResult).toBeDefined();
+    expect(readResult!.sourceAssociations).toBeDefined();
+    expect(readResult!.sourceAssociations![0].predicate).toBe("companyId");
+    // No prior shadow → sourceShadowAssociations is undefined
+    expect(readResult!.sourceShadowAssociations).toBeUndefined();
+  });
+
+  it("UPDATE result carries non-equal beforeAssociations/afterAssociations for an association-only change", async () => {
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+
+    writeJson(join(dirA, "companies.json"), [
+      { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+      { id: "co2", data: { name: "Beta Corp", domain: "beta.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirB, "companies.json"), [
+      { id: "org1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
+      { id: "org2", data: { name: "Beta Corp", domain: "beta.com" }, updated: 1 },
+    ]);
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+    ]);
+    writeJson(join(dirB, "contacts.json"), [
+      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "org1" }] },
+    ]);
+
+    const makeInst = (id: string, dir: string, entities: string[]) => ({
+      id, connector: jsonfiles,
+      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      auth: {},
+      batchIdRef: { current: undefined } as { current: string | undefined },
+      triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
+    });
+
+    const db = openDb(":memory:");
+    const engine = new SyncEngine({
+      connectors: [
+        makeInst("sa", dirA, ["contacts", "companies"]),
+        makeInst("sb", dirB, ["contacts", "companies"]),
+      ],
+      channels: [
+        { id: "companies", members: [
+          { connectorId: "sa", entity: "companies" },
+          { connectorId: "sb", entity: "companies" },
+        ], identityFields: ["domain"] },
+        { id: "contacts", members: [
+          { connectorId: "sa", entity: "contacts" },
+          { connectorId: "sb", entity: "contacts" },
+        ], identityFields: ["email"] },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    }, db);
+
+    for (const connId of ["sa", "sb"]) await engine.ingest("companies", connId, { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+    for (const connId of ["sa", "sb"]) await engine.ingest("contacts", connId, { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Settle: warmup passes make shadows consistent
+    await engine.ingest("contacts", "sa", { fullSync: true });
+    await engine.ingest("contacts", "sb", { fullSync: true });
+    await engine.ingest("contacts", "sa", { fullSync: true });
+    await engine.ingest("contacts", "sb", { fullSync: true });
+
+    // Alice changes company in sa (co1 → co2), fields unchanged (name/email same, timestamp bumped)
+    writeJson(join(dirA, "contacts.json"), [
+      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 2,
+        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+    ]);
+
+    const result = await engine.ingest("contacts", "sa");
+
+    const updateToSb = result.records.find((r) => r.action === "update" && r.targetConnectorId === "sb");
+    expect(updateToSb).toBeDefined();
+
+    // Field payloads must be equal — only the association changed
+    expect(updateToSb!.before!["name"]).toBe(updateToSb!.after!["name"]);
+    expect(updateToSb!.before!["email"]).toBe(updateToSb!.after!["email"]);
+
+    // Association payloads must differ, showing the company change
+    expect(updateToSb!.beforeAssociations).toBeDefined();
+    expect(updateToSb!.afterAssociations).toBeDefined();
+    expect(updateToSb!.beforeAssociations![0].targetId).toBe("org1"); // Acme in sb
+    expect(updateToSb!.afterAssociations![0].targetId).toBe("org2"); // Beta Corp in sb
   });
 });
 

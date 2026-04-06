@@ -67,6 +67,15 @@ export interface RecordSyncResult {
   after?: Record<string, unknown>;
   /** UPDATE: target's previous field values from shadow_state before the write. */
   before?: Record<string, unknown>;
+  // ── Association payload fields ─────────────────────────────────────────────
+  /** READ: associations on the incoming source record. */
+  sourceAssociations?: Association[];
+  /** READ: associations stored in the source shadow before this ingest pass. */
+  sourceShadowAssociations?: Association[];
+  /** INSERT/UPDATE: remapped associations written to the target connector. */
+  afterAssociations?: Association[];
+  /** UPDATE: associations stored in the target shadow before the write. */
+  beforeAssociations?: Association[];
 }
 
 export interface IngestResult {
@@ -134,6 +143,19 @@ function fieldDataToRecord(fd: FieldData): Record<string, unknown> {
     if (!k.startsWith("__")) out[k] = v.val;
   }
   return out;
+}
+
+/** Parse the sorted-JSON assoc sentinel stored as __assoc__ back to Association[].  Returns
+ * undefined if no sentinel is present or the array would be empty. */
+function parseSentinelAssociations(fd: FieldData): Association[] | undefined {
+  const raw = fd["__assoc__"]?.val;
+  if (typeof raw !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Association[];
+    return parsed.length ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ─── ConflictError — signals a 412 Precondition Failed ───────────────────────
@@ -527,6 +549,25 @@ export class SyncEngine {
     // 1. Merge matched provisional canonicals
     // Build a map of match index → final canonical ID so step 1b can propagate
     // matched records to connectors not present in match.sides.
+    //
+    // Spec: plans/engine/PLAN_ENGINE_USABILITY.md § 3 — pre-fetch each side's own
+    // associations so the seeded shadow includes the assoc sentinel, ensuring the
+    // first incremental poll sees no spurious diff for matched records.
+    const matchSideAssoc = new Map<string, Association[] | undefined>(); // "connId/extId" → assoc
+    for (const match of report.matched) {
+      for (const side of match.sides) {
+        const key = `${side.connectorId}/${side.externalId}`;
+        if (matchSideAssoc.has(key)) continue;
+        const sideWired = this.wired.get(side.connectorId);
+        const sideMember = memberByConnector.get(side.connectorId);
+        const sideEntityDef = sideWired?.entities.find((e) => e.name === sideMember?.entity);
+        if (sideEntityDef?.lookup) {
+          const recs = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
+          matchSideAssoc.set(key, recs.find((r) => r.id === side.externalId)?.associations);
+        }
+      }
+    }
+
     const matchCanonicals = new Map<number, string>();
     this.db.transaction(() => {
       for (let mi = 0; mi < report.matched.length; mi++) {
@@ -544,7 +585,11 @@ export class SyncEngine {
         }
         for (const side of match.sides) {
           const sideEntity = memberByConnector.get(side.connectorId)!.entity;
-          const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, undefined);
+          const sideAssoc = matchSideAssoc.get(`${side.connectorId}/${side.externalId}`);
+          const sideAssocSentinel = sideAssoc?.length
+            ? JSON.stringify([...sideAssoc].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+            : undefined;
+          const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, sideAssocSentinel);
           dbSetShadow(this.db, side.connectorId, sideEntity, side.externalId, winnerId!, fd);
           linked++;
           shadowsSeeded++;
@@ -561,9 +606,7 @@ export class SyncEngine {
     // 1b. Propagate each matched record to channel members not in match.sides.
     // This handles partial N-way matches (record in A+B but not C).
     // Spec: plans/engine/PLAN_ENGINE_USABILITY.md § 3.2 — call lookup() on the first
-    // available source side so associations are included in the fanout insert, eliminating
-    // the post-boot UPDATE burst that previously occurred because the shadow had no
-    // __assoc__ sentinel and the warmup re-dispatched the same record.
+    // available source side so associations are included in the fanout insert.
     const matchAssocCache = new Map<string, Association[] | undefined>(); // "connId/extId" → assoc
     for (let mi = 0; mi < report.matched.length; mi++) {
       const match = report.matched[mi]!;
@@ -652,7 +695,7 @@ export class SyncEngine {
             }
           })();
           // Spec: specs/sync-engine.md § OnboardResult
-          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: match.sides[0]!.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: match.canonicalData });
+          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: match.sides[0]!.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: match.canonicalData, afterAssociations: assocToInsert?.length ? assocToInsert : undefined });
           uniqueQueued++;
           breaker.recordResult(false);
         } else if (insertError) {
@@ -745,7 +788,7 @@ export class SyncEngine {
             }
           })();
           // Spec: specs/sync-engine.md § OnboardResult
-          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: unique.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: unique.rawData });
+          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: unique.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: unique.rawData, afterAssociations: assocToInsert?.length ? assocToInsert : undefined });
           uniqueQueued++;
           breaker.recordResult(false);
         } else if (insertError) {
@@ -1082,7 +1125,7 @@ export class SyncEngine {
     sourceMember: ChannelMember,
     sourceId: string,
   ): Promise<
-    | { type: "ok"; action: "insert" | "update"; targetId: string; newFieldData: FieldData; after: Record<string, unknown> }
+    | { type: "ok"; action: "insert" | "update"; targetId: string; newFieldData: FieldData; after: Record<string, unknown>; afterAssociations?: Association[] }
     | { type: "error"; error: string }
     | { type: "skip" }
   > {
@@ -1169,7 +1212,8 @@ export class SyncEngine {
       ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
       : undefined;
     const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, remappedSentinel);
-    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData, after: resolvedCanonical };
+    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData,
+      after: resolvedCanonical, afterAssociations: associations?.length ? associations : undefined };
   }
 
   // Spec: specs/sync-engine.md § Pipeline Steps
@@ -1236,6 +1280,8 @@ export class SyncEngine {
         targetId: record.id,
         sourceData: canonical,
         sourceShadow: existingShadow ? fieldDataToRecord(existingShadow) : undefined,
+        sourceAssociations: record.associations?.length ? record.associations : undefined,
+        sourceShadowAssociations: existingShadow ? parseSentinelAssociations(existingShadow) : undefined,
       });
 
       const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields);
@@ -1308,8 +1354,9 @@ export class SyncEngine {
 
         // Spec: specs/sync-engine.md § RecordSyncResult — capture before/after payloads.
         const beforeData = targetShadow ? fieldDataToRecord(targetShadow) : undefined;
+        const beforeAssoc = targetShadow ? parseSentinelAssociations(targetShadow) : undefined;
         outcomes.push({
-          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, after: dispatchResult.after },
+          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, beforeAssociations: beforeAssoc, after: dispatchResult.after, afterAssociations: dispatchResult.afterAssociations },
           shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
           txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: canonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
         });
