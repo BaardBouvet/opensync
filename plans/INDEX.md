@@ -78,3 +78,4 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_MOVE_DEMO_BROWSER.md](meta/PLAN_MOVE_DEMO_BROWSER.md) | Move demo-browser/ to workspace root as a sibling of demo/ | complete | — |
 | [meta/PLAN_RELEASE_PROCEDURE.md](meta/PLAN_RELEASE_PROCEDURE.md) | Release procedure: tag-triggered GitHub Pages deploy, GitHub Release creation, human checklist; npm publish deferred to M1 | backlog | S |
 | [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
+| [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | backlog | XS |
