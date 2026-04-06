@@ -1,6 +1,6 @@
 # Remove sql-wasm Binaries from Git History
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Effort:** XS  
 **Domain:** Repository hygiene  

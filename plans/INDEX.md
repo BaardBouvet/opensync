@@ -35,7 +35,6 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md](engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md) | Strict association mode (opt-in) + deadlock detection/breakDeadlock() — prerequisite: eager default must be in place first | backlog | — |
 | [engine/PLAN_ENGINE_USABILITY.md](engine/PLAN_ENGINE_USABILITY.md) | Gap analysis: engine API friction for callers — boot protocol, silent events, step-1b associations, fan-out guard scope | backlog | — |
 | [engine/PLAN_DELETE_PROPAGATION.md](engine/PLAN_DELETE_PROPAGATION.md) | Opt-in delete propagation: explicit signal (record.deleted = true) + mark-and-sweep; per-channel config, circuit breaker integration | draft | — |
-| [engine/PLAN_ENGINE_SYNC_EVENTS.md](engine/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from the engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | draft | — |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
 
 ## connectors/ — Connector research and cleanup plans
@@ -43,6 +42,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | File | What it covers | Status | Effort |
 |------|---------------|--------|--------|
 | [connectors/PLAN_CONNECTOR_CLEANUP.md](connectors/PLAN_CONNECTOR_CLEANUP.md) | Connector code cleanup and standardisation | backlog | — |
+| [connectors/PLAN_ENGINE_SYNC_EVENTS.md](connectors/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | draft | — |
 | [connectors/PLAN_MOCK_SERVERS.md](connectors/PLAN_MOCK_SERVERS.md) | Extract MockCrmServer + MockErpServer into standalone servers/ packages with connector tests | complete | — |
 | [connectors/PLAN_SDK_HELPERS.md](connectors/PLAN_SDK_HELPERS.md) | SDK helpers implementation plan | backlog | — |
 | [connectors/REPORT_SEMANTIC_SOURCES.md](connectors/REPORT_SEMANTIC_SOURCES.md) | Research: semantic source descriptions | exploration | — |
@@ -85,4 +85,4 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_PLANS_REORG.md](meta/PLAN_PLANS_REORG.md) | Reorganise plans/ into subsystem folders (demo/, playground/, meta/) | complete | XS |
 | [meta/PLAN_RELEASE_PROCEDURE.md](meta/PLAN_RELEASE_PROCEDURE.md) | Release procedure: tag-triggered GitHub Pages deploy, GitHub Release creation, human checklist; npm publish deferred to M1 | backlog | S |
 | [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
-| [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | backlog | XS |
+| [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | complete | XS |
