@@ -405,7 +405,7 @@
       height: 100%; overflow-y: auto; overflow-x: auto;
     }
     .ld-container {
-      padding: 40px 24px 40px; display: flex; flex-direction: column; gap: 0;
+      padding: 40px 24px; display: flex; flex-direction: column; gap: 0;
       width: 100%; box-sizing: border-box;
     }
 
@@ -458,57 +458,88 @@
     .ld-entity-group { display: flex; flex-direction: column; gap: 2px; }
     .ld-entity-header {
       display: flex; align-items: center; justify-content: space-between; gap: 6px;
-      background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px;
-      padding: 4px 10px; cursor: pointer; user-select: none;
+      background: #1f1f28; border: 1px solid #2e2e44;
+      border-radius: 5px; padding: 5px 8px;
+      font-size: 11px; font-family: monospace; color: #a0a0c0;
+      cursor: pointer; user-select: none;
+      transition: border-color 0.12s, color 0.12s;
     }
-    .ld-entity-header:hover { background: #1e1e36; }
-    .ld-entity-name {
-      font-size: 12px; font-family: monospace; font-weight: 600;
-      color: #a78bfa;
-    }
-    .ld-connector-id {
-      font-size: 10px; color: #4a4a6a; font-family: monospace;
-    }
-    .ld-toggle { font-size: 11px; color: #555; flex-shrink: 0; }
+    .ld-entity-header:hover { border-color: #5a5a8a; color: #d0d0f0; }
+    .ld-entity-header.expanded { border-color: #6060a0; color: #d0d0f0; }
+    .ld-entity-header-passthrough { cursor: default; }
+    .ld-entity-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ld-chevron { font-size: 9px; color: #555; flex-shrink: 0; }
+    .ld-entity-header.expanded .ld-chevron { color: #a78bfa; }
 
-    /* Field rows */
-    .ld-fields { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
-    .ld-field {
-      display: flex; align-items: center; gap: 6px;
-      padding: 2px 8px; border-radius: 3px;
-      font-size: 11px; font-family: monospace;
+    /* Individual field pills */
+    .ld-fields-list { display: flex; flex-direction: column; gap: 2px; padding-left: 8px; }
+    .ld-field-node {
+      background: #151520; border: 1px solid #252535;
+      border-radius: 4px; padding: 3px 8px;
+      font-size: 10px; font-family: monospace; color: #7070a0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      cursor: pointer; transition: border-color 0.12s, color 0.12s;
     }
-    .ld-field:hover { background: #1a1a2a; }
-    .ld-field-name { color: #9ca3af; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ld-field-name.ld-identity { color: #fbbf24; font-weight: 600; }
-    .ld-field-arrow { color: #374151; font-size: 10px; }
-    .ld-field-rename { color: #6b7280; font-size: 10px; font-style: italic; }
-    .ld-field-target { color: #60a5fa; flex: 1; }
-    .ld-field-target.ld-identity { color: #fbbf24; font-weight: 600; }
+    .ld-field-node:hover { border-color: #4a4a7a; color: #a0a0c0; }
+    /* Selected field — border only (one at a time) */
+    .ld-field-node-focused { border-color: #a78bfa; color: #d0c0ff; }
+    /* Highlighted field — background hint (opposite-side peers, or all when canonical clicked) */
+    .ld-highlighted { background: rgba(120, 90, 230, 0.28) !important; }
+    /* Hidden because it doesn't map to the currently focused canonical */
+    .ld-field-filtered { display: none !important; }
 
-    /* Canonical fields (centre column) */
-    .ld-canonical-field {
-      display: flex; align-items: center; gap: 4px;
-      padding: 2px 8px; border-radius: 3px; cursor: pointer;
-      font-size: 11px; font-family: monospace;
+    /* Canonical field chips */
+    .ld-canonical-chip {
+      background: #1a1a2e; border: 1px solid #3030558a;
+      border-radius: 5px; padding: 5px 10px;
+      font-size: 11px; font-family: monospace; color: #9090c0;
+      cursor: pointer; user-select: none;
+      text-align: center; align-self: stretch; box-sizing: border-box;
+      transition: border-color 0.12s, color 0.12s, background 0.12s;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
     }
-    .ld-canonical-field:hover { background: #1a1a2a; }
-    .ld-canonical-field.ld-focused { background: #1a2a1a; }
-    .ld-canonical-name { color: #34d399; flex: 1; }
-    .ld-canonical-name.ld-identity { color: #fbbf24; font-weight: 600; }
-    .ld-canonical-dot { width: 5px; height: 5px; border-radius: 50%; background: #374151; flex-shrink: 0; }
-    .ld-canonical-dot.ld-identity { background: #92400e; }
+    .ld-canonical-chip:hover { border-color: #7070c0; color: #d0d0f0; }
+    .ld-canonical-chip-focused {
+      border-color: #a78bfa; color: #e0d0ff;
+      background: #22203a; box-shadow: 0 0 0 2px rgba(167,139,250,0.2);
+    }
+    /* Canonical chip highlighted because a connector field mapping to it is selected */
+    .ld-canonical-chip-related {
+      border-color: #6a6898; color: #c8b8e8;
+      background: #242040;
+    }
+    .ld-canonical-identity .ld-canonical-name::after {
+      content: " ○"; color: #6060a0; font-size: 9px;
+    }
+    .ld-chip-arrow { display: none; }
+    .ld-alias { display: none; }
 
-    /* Highlighted fields — lit up when a canonical field is focused */
-    .ld-field.ld-lit .ld-field-name,
-    .ld-field.ld-lit .ld-field-target { color: #facc15; }
-    .ld-field.ld-dim .ld-field-name,
-    .ld-field.ld-dim .ld-field-target { color: #2a2a3a; }
-    .ld-field.ld-dim .ld-field-arrow,
-    .ld-field.ld-dim .ld-field-rename { color: #1e1e2e; }
+    /* Identity strip */
+    .ld-identity {
+      font-size: 9px; color: #505070; font-family: monospace;
+      padding: 4px 2px 0; letter-spacing: 0.3px;
+    }
 
-    /* Collapsed entity — just the header, no fields */
-    .ld-entity-group.ld-collapsed .ld-fields { display: none; }
+    /* Dimmed state — elements not participating in focused canonical */
+    .ld-dimmed { opacity: 0.2; transition: opacity 0.15s; }
+
+    /* SVG overlay */
+    .ld-lines {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      pointer-events: none; overflow: visible;
+      z-index: 1;
+    }
+
+    /* SVG lines (rendered as <path> elements) */
+    .ld-line {
+      stroke: #3a3a60; stroke-width: 1.5; fill: none;
+      opacity: 0.45;
+      transition: opacity 0.12s, stroke 0.12s;
+    }
+    .ld-line-passthrough { stroke-dasharray: 4 3; }
+    .ld-line-focused { stroke: #a78bfa; stroke-width: 2; opacity: 1; }
+    .ld-line-dimmed { opacity: 0.08; }
   </style>
 </head>
 <body>
