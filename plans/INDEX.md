@@ -61,6 +61,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [demo/PLAN_NOTIFICATION_POLL.md](demo/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | draft | — |
 | [demo/PLAN_AGENT_PANEL.md](demo/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
 | [demo/PLAN_URL_HISTORY.md](demo/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
+| [demo/PLAN_VERSION_BADGE.md](demo/PLAN_VERSION_BADGE.md) | Version badge in topbar + update notification when a newer GitHub Release is available, linking to release notes | backlog | S |
 
 ## meta/ — Project meta documents
 
