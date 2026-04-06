@@ -26,7 +26,12 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
-- **Playground: field lineage diagram moved to `lineage` pseudo-tab (right pane).** The field
+- **GitHub Actions workflow to deploy playground to GitHub Pages.** Added
+  `.github/workflows/deploy-playground.yml`; triggers on push to `main` when files under
+  `playground/`, `packages/engine/src/`, or `packages/sdk/src/` change, and on
+  `workflow_dispatch`. Also added `build:playground` script to root `package.json`.
+
+- **Playground: field lineage diagram moved to `lineage` pseudo-tab (right pane).**** The field
   lineage diagram is now accessible via a `lineage` pseudo-tab at the end of the channel tab bar
   in the right pane. A thin separator visually distinguishes the two view pseudo-tabs (`unmapped`,
   `lineage`) from the channel tabs; both are rendered in italic to reinforce that they are
