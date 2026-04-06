@@ -3,11 +3,7 @@ name: Deploy Playground to GitHub Pages
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "playground/**"
-      - "packages/engine/src/**"
-      - "packages/sdk/src/**"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
