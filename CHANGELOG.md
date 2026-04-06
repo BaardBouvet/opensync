@@ -26,6 +26,12 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Fixed
 
+- **Playground devtools: shadow_state row selection persists across poll ticks.** Row
+  selection was previously tracked by DOM reference, which was destroyed on every
+  `innerHTML = ""` re-render (every ~2 s poll tick). Selection is now tracked by a
+  composite key (`connector_id/entity_name/external_id`); the highlight class and right-panel
+  field detail are re-applied after every re-render.
+
 - **Playground devtools: shadow_state tab now shows actual field data.** The `shadow_state`
   table has always stored a `canonical_data` JSON column with the last-synced field values,
   but the tab was only displaying metadata columns. The tab is now a split view: the left
