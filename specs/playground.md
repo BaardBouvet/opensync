@@ -367,11 +367,8 @@ After `startEngine()` is called:
    (initial read; all fields are displayed in full green in the dev tools diff view).
 4. **INSERT events** from `onboardResult.inserts` are emitted with `phase: "onboard"`,
    each carrying `after` from the `RecordSyncResult` (canonical data written during fanout).
-5. A warmup ingest pass runs all channel members once with `{ fullSync: true }`.  Its main
-   purpose is to propagate association sentinels that `onboard()` step 1b omits.  The new
-   `emitEvents` helper emits `"read"` and dispatch events from `result.records` directly.
-6. The UI is refreshed once to show the fully-resolved initial state.
-7. The automatic poll interval starts (if auto mode is enabled).
+5. The UI is refreshed once to show the fully-resolved initial state.
+6. The automatic poll interval starts (if auto mode is enabled).
 
 ### § 8.3 Poll loop
 

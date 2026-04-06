@@ -34,7 +34,11 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_EAGER_ASSOCIATION_MODE.md](engine/PLAN_EAGER_ASSOCIATION_MODE.md) | Change default dispatch to eager: insert immediately without unresolvable associations, deferred retry adds them later; fixes latency and circular-ref stall | complete | — |
 | [engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md](engine/PLAN_CIRCULAR_ASSOCIATION_DEADLOCK.md) | Strict association mode (opt-in) + deadlock detection/breakDeadlock() — prerequisite: eager default must be in place first | backlog | — |
 | [engine/PLAN_ENGINE_USABILITY.md](engine/PLAN_ENGINE_USABILITY.md) | Gap analysis: engine API friction for callers — boot protocol, silent events, step-1b associations, fan-out guard scope | backlog | — |
+| [engine/PLAN_ASSOCIATION_EVENTS.md](engine/PLAN_ASSOCIATION_EVENTS.md) | Extend RecordSyncResult with association arrays (sourceAssociations, sourceShadowAssociations, beforeAssociations, afterAssociations) so association-only changes are visible in event payloads | complete | S |
+| [engine/PLAN_PREDICATE_MAPPING.md](engine/PLAN_PREDICATE_MAPPING.md) | Map association predicates through a canonical name in channel config (companyId/orgId/orgRef → companyRef); translate inbound to canonical, outbound to connector-local | backlog | M |
 | [engine/PLAN_DELETE_PROPAGATION.md](engine/PLAN_DELETE_PROPAGATION.md) | Opt-in delete propagation: explicit signal (record.deleted = true) + mark-and-sweep; per-channel config, circuit breaker integration | draft | — |
+| [engine/PLAN_PREDICATE_MAPPING.md](engine/PLAN_PREDICATE_MAPPING.md) | Association predicate renaming in mapping entries (`source`/`target` like fields); canonical name in shadow sentinel; outbound translation at dispatch | backlog | M |
+| [engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md](engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md) | Declare canonical field and association schema on channel definitions; validation that mapping targets match declared canonicals | draft | M |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
 
 ## connectors/ — Connector research and cleanup plans
@@ -51,6 +55,8 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/PLAN_JSONFILES_LOG_FORMAT.md](connectors/PLAN_JSONFILES_LOG_FORMAT.md) | jsonfiles immutable log format: append-only writes, deduplicated reads | complete | — |
 | [connectors/GAP_SESAM_JSON_PROTOCOLS.md](connectors/GAP_SESAM_JSON_PROTOCOLS.md) | Gap analysis: Sesam JSON Pull + Push protocol alignment with OpenSync connector SDK | draft | — |
 | [connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md](connectors/PLAN_NON_LOCAL_ASSOCIATIONS.md) | Association targets outside the source connector's own channel — semantic type URIs, cross-channel entity name translation, stable URI passthrough | draft | — |
+| [connectors/PLAN_ASSOCIATION_SCHEMA.md](connectors/PLAN_ASSOCIATION_SCHEMA.md) | Declare supported predicates on EntityDefinition via `associationSchema`; engine pre-flight checks and write-side dispatch filtering | draft | M |
+| [connectors/PLAN_FIELD_READONLY.md](connectors/PLAN_FIELD_READONLY.md) | `readonly` flag on `FieldDescriptor` for server-computed fields; engine strips on insert+update paths, pre-flight warning on mappings that target readonly fields | backlog | S |
 
 ## demo/ — CLI demo runner plans
 

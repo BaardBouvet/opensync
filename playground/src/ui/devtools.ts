@@ -168,10 +168,53 @@ export function createDevTools(
     }
   }
 
+  // ── Association diff helper ───────────────────────────────────────────────
+
+  type AssocEntry = { predicate: string; targetEntity: string; targetId: string };
+
+  function buildAssocDiff(before: AssocEntry[], after: AssocEntry[]): HTMLElement {
+    // Pair by predicate; fall back to index for multi-valued predicates.
+    const allPredicates = new Set([...before.map((a) => a.predicate), ...after.map((a) => a.predicate)]);
+    const table = document.createElement("table");
+    table.className = "te-diff-table";
+    for (const pred of allPredicates) {
+      const bEntry = before.find((a) => a.predicate === pred);
+      const aEntry = after.find((a) => a.predicate === pred);
+      if (bEntry?.targetId === aEntry?.targetId) continue;
+      const tr = document.createElement("tr");
+      const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = pred;
+      const tdOld = document.createElement("td"); tdOld.className = "te-diff-old";
+      tdOld.textContent = bEntry ? `${bEntry.targetEntity}/${bEntry.targetId}` : "—";
+      const tdArr = document.createElement("td"); tdArr.className = "te-diff-arrow"; tdArr.textContent = "→";
+      const tdNew = document.createElement("td"); tdNew.className = "te-diff-new";
+      tdNew.textContent = aEntry ? `${aEntry.targetEntity}/${aEntry.targetId}` : "—";
+      tr.append(tdKey, tdOld, tdArr, tdNew);
+      table.appendChild(tr);
+    }
+    return table;
+  }
+
+  /** Render a list of associations as new (green) rows — used for INSERT and initial READ. */
+  function buildAssocList(assocs: AssocEntry[]): HTMLElement {
+    const table = document.createElement("table");
+    table.className = "te-diff-table";
+    for (const a of assocs) {
+      const tr = document.createElement("tr");
+      const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = a.predicate;
+      const tdVal = document.createElement("td"); tdVal.className = "te-diff-new";
+      tdVal.textContent = `${a.targetEntity}/${a.targetId}`;
+      tr.append(tdKey, tdVal);
+      table.appendChild(tr);
+    }
+    return table;
+  }
+
   // ── Event item (collapsible) ──────────────────────────────────────────────
 
   function buildEventItem(ev: SyncEvent): HTMLElement {
-    const hasData = ev.data !== undefined || ev.after !== undefined || ev.before !== undefined;
+    const hasData = ev.data !== undefined || ev.after !== undefined || ev.before !== undefined
+      || ev.sourceAssociations !== undefined || ev.sourceShadowAssociations !== undefined
+      || ev.beforeAssociations !== undefined || ev.afterAssociations !== undefined;
 
     const wrapper = document.createElement("div");
     wrapper.className = "te-item";
@@ -237,38 +280,63 @@ export function createDevTools(
         const payload = ev.data ?? ev.after;
         if (ev.action === "READ" && payload) {
           if (ev.before !== undefined) {
-            // READ with prior shadow state: show only changed fields as a diff table.
+            // READ with prior shadow state: show only changed fields/associations as a diff.
             const allKeys = new Set([...Object.keys(ev.before), ...Object.keys(payload)]);
             const changed = [...allKeys].filter((k) => {
               const a = JSON.stringify((ev.before ?? {})[k]);
               const b = JSON.stringify((payload as Record<string, unknown>)[k]);
               return a !== b;
             });
-            if (changed.length === 0) {
+            const assocChanged = JSON.stringify(ev.sourceShadowAssociations ?? []) !== JSON.stringify(ev.sourceAssociations ?? []);
+            if (changed.length === 0 && !assocChanged) {
               const note = document.createElement("div");
               note.className = "te-detail-note";
-              note.textContent = "(no field changes)";
+              note.textContent = "(no changes)";
               detail.appendChild(note);
             } else {
-              const table = document.createElement("table");
-              table.className = "te-diff-table";
-              for (const k of changed) {
-                const oldVal = (ev.before ?? {})[k];
-                const newVal = (payload as Record<string, unknown>)[k];
-                const tr = document.createElement("tr");
-                const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = k;
-                const tdOld = document.createElement("td"); tdOld.className = "te-diff-old";
-                tdOld.textContent = oldVal === undefined ? "—" : typeof oldVal === "string" ? oldVal : JSON.stringify(oldVal);
-                const tdArr = document.createElement("td"); tdArr.className = "te-diff-arrow"; tdArr.textContent = "→";
-                const tdNew = document.createElement("td"); tdNew.className = "te-diff-new";
-                tdNew.textContent = newVal === undefined ? "—" : typeof newVal === "string" ? newVal : JSON.stringify(newVal);
-                tr.append(tdKey, tdOld, tdArr, tdNew);
-                table.appendChild(tr);
+              if (changed.length > 0) {
+                const table = document.createElement("table");
+                table.className = "te-diff-table";
+                for (const k of changed) {
+                  const oldVal = (ev.before ?? {})[k];
+                  const newVal = (payload as Record<string, unknown>)[k];
+                  const tr = document.createElement("tr");
+                  const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = k;
+                  const tdOld = document.createElement("td"); tdOld.className = "te-diff-old";
+                  tdOld.textContent = oldVal === undefined ? "—" : typeof oldVal === "string" ? oldVal : JSON.stringify(oldVal);
+                  const tdArr = document.createElement("td"); tdArr.className = "te-diff-arrow"; tdArr.textContent = "→";
+                  const tdNew = document.createElement("td"); tdNew.className = "te-diff-new";
+                  tdNew.textContent = newVal === undefined ? "—" : typeof newVal === "string" ? newVal : JSON.stringify(newVal);
+                  tr.append(tdKey, tdOld, tdArr, tdNew);
+                  table.appendChild(tr);
+                }
+                detail.appendChild(table);
               }
-              detail.appendChild(table);
+              if (assocChanged) {
+                detail.appendChild(buildAssocDiff(ev.sourceShadowAssociations ?? [], ev.sourceAssociations ?? []));
+              }
             }
           } else {
-            // READ with no prior shadow state (initial boot read): show all fields in green.
+            // READ with no prior shadow state (initial boot read): show all fields in green,
+            // then associations if present.
+            const table = document.createElement("table");
+            table.className = "te-diff-table";
+            for (const [k, v] of Object.entries(payload)) {
+              const tr = document.createElement("tr");
+              const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = k;
+              const tdVal = document.createElement("td"); tdVal.className = "te-diff-new";
+              tdVal.textContent = typeof v === "string" ? v : JSON.stringify(v);
+              tr.append(tdKey, tdVal);
+              table.appendChild(tr);
+            }
+            detail.appendChild(table);
+            if (ev.sourceAssociations?.length) {
+              detail.appendChild(buildAssocList(ev.sourceAssociations));
+            }
+          }
+        } else if (ev.action === "INSERT") {
+          // INSERT: field table in green + associations if present
+          if (payload) {
             const table = document.createElement("table");
             table.className = "te-diff-table";
             for (const [k, v] of Object.entries(payload)) {
@@ -281,14 +349,12 @@ export function createDevTools(
             }
             detail.appendChild(table);
           }
-        } else {
-          // INSERT: full JSON payload
-          const pre = document.createElement("pre");
-          pre.className = "te-json";
-          pre.textContent = JSON.stringify(payload, null, 2);
-          detail.appendChild(pre);
+          if (ev.afterAssociations?.length) {
+            detail.appendChild(buildAssocList(ev.afterAssociations));
+          }
         }
-      } else if (ev.action === "UPDATE" && (ev.before !== undefined || ev.after !== undefined)) {
+      } else if (ev.action === "UPDATE" && (ev.before !== undefined || ev.after !== undefined
+          || ev.beforeAssociations !== undefined || ev.afterAssociations !== undefined)) {
         const allKeys = new Set([
           ...Object.keys(ev.before ?? {}),
           ...Object.keys(ev.after ?? {}),
@@ -298,28 +364,34 @@ export function createDevTools(
           const b = JSON.stringify((ev.after ?? {})[k]);
           return a !== b;
         });
-        if (changed.length === 0) {
+        const assocChanged = JSON.stringify(ev.beforeAssociations ?? []) !== JSON.stringify(ev.afterAssociations ?? []);
+        if (changed.length === 0 && !assocChanged) {
           const note = document.createElement("div");
           note.className = "te-detail-note";
-          note.textContent = "(no field changes)";
+          note.textContent = "(no changes)";
           detail.appendChild(note);
         } else {
-          const table = document.createElement("table");
-          table.className = "te-diff-table";
-          for (const k of changed) {
-            const oldVal = (ev.before ?? {})[k];
-            const newVal = (ev.after ?? {})[k];
-            const tr = document.createElement("tr");
-            const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = k;
-            const tdOld = document.createElement("td"); tdOld.className = "te-diff-old";
-            tdOld.textContent = oldVal === undefined ? "—" : typeof oldVal === "string" ? oldVal : JSON.stringify(oldVal);
-            const tdArr = document.createElement("td"); tdArr.className = "te-diff-arrow"; tdArr.textContent = "→";
-            const tdNew = document.createElement("td"); tdNew.className = "te-diff-new";
-            tdNew.textContent = newVal === undefined ? "—" : typeof newVal === "string" ? newVal : JSON.stringify(newVal);
-            tr.append(tdKey, tdOld, tdArr, tdNew);
-            table.appendChild(tr);
+          if (changed.length > 0) {
+            const table = document.createElement("table");
+            table.className = "te-diff-table";
+            for (const k of changed) {
+              const oldVal = (ev.before ?? {})[k];
+              const newVal = (ev.after ?? {})[k];
+              const tr = document.createElement("tr");
+              const tdKey = document.createElement("td"); tdKey.className = "te-diff-key"; tdKey.textContent = k;
+              const tdOld = document.createElement("td"); tdOld.className = "te-diff-old";
+              tdOld.textContent = oldVal === undefined ? "—" : typeof oldVal === "string" ? oldVal : JSON.stringify(oldVal);
+              const tdArr = document.createElement("td"); tdArr.className = "te-diff-arrow"; tdArr.textContent = "→";
+              const tdNew = document.createElement("td"); tdNew.className = "te-diff-new";
+              tdNew.textContent = newVal === undefined ? "—" : typeof newVal === "string" ? newVal : JSON.stringify(newVal);
+              tr.append(tdKey, tdOld, tdArr, tdNew);
+              table.appendChild(tr);
+            }
+            detail.appendChild(table);
           }
-          detail.appendChild(table);
+          if (assocChanged) {
+            detail.appendChild(buildAssocDiff(ev.beforeAssociations ?? [], ev.afterAssociations ?? []));
+          }
         }
       }
 

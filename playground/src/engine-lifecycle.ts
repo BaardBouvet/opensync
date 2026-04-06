@@ -61,6 +61,14 @@ export interface SyncEvent {
   before?: Record<string, unknown>;
   /** For INSERT/UPDATE: state after the write. */
   after?: Record<string, unknown>;
+  /** For READ: associations on the incoming source record. */
+  sourceAssociations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+  /** For READ: associations from the source shadow before this ingest. */
+  sourceShadowAssociations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+  /** For UPDATE: associations stored in the target shadow before the write. */
+  beforeAssociations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+  /** For INSERT/UPDATE: remapped associations written to the target. */
+  afterAssociations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
 }
 
 // ─── Cluster types ────────────────────────────────────────────────────────────
@@ -178,6 +186,7 @@ export async function startEngine(
             sourceId: rec.id.slice(0, 8),
             targetId: rec.id.slice(0, 8),
             data: rec.data as Record<string, unknown>,
+            sourceAssociations: rec.associations?.length ? rec.associations : undefined,
             phase: "onboard",
           });
         }
@@ -197,26 +206,10 @@ export async function startEngine(
           sourceId: r.sourceId.slice(0, 8),
           targetId: r.targetId.slice(0, 8),
           after: r.after,
+          afterAssociations: r.afterAssociations,
           phase: "onboard",
         });
       }
-    }
-  }
-
-  // 4c. Warmup ingest: propagate associations that onboard() step-1b didn't include.
-  // Matched-but-missing-connector fanout inserts do not carry associations; a normal
-  // incremental ingest would skip seed records (their watermarks are ≤ the collectOnly
-  // watermark). fullSync re-reads every record so echo-detection compares the actual
-  // assocSentinel: shadow has undefined (collectOnly never stores it), incoming has a
-  // sorted JSON string → they differ → fan-out dispatch runs and sets the association.
-  // Watermarks are NOT advanced for fullSync runs, so the first regular poll still picks
-  // up only records that changed after collectOnly.
-  // NOTE: onRefresh() is NOT called here — startEngine() hasn't returned yet, so the
-  // caller's engineState variable is still null. boot() handles the first UI refresh.
-  for (const ch of config.channels) {
-    for (const member of ch.members) {
-      const result = await engine.ingest(ch.id, member.connectorId, { fullSync: true });
-      emitEvents(result.records, ch, member.connectorId, onEvent, "onboard");
     }
   }
 
@@ -368,6 +361,8 @@ function emitEvents(
         targetId: r.sourceId.slice(0, 8),
         data: r.sourceData,
         before: r.sourceShadow,
+        sourceAssociations: r.sourceAssociations,
+        sourceShadowAssociations: r.sourceShadowAssociations,
         phase,
       });
     } else {
@@ -383,7 +378,9 @@ function emitEvents(
         sourceId: r.sourceId.slice(0, 8),
         targetId: r.targetId.slice(0, 8),
         before: r.before,
+        beforeAssociations: r.beforeAssociations,
         after: r.after,
+        afterAssociations: r.afterAssociations,
         phase,
       });
     }
