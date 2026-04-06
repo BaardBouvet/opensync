@@ -43,6 +43,21 @@ Right pane, lower area. Shows internal engine state for debugging. Height is use
 a drag handle (`#devtools-resize-handle`) between the systems view and the dev tools
 (60–500 px, default 160 px).
 
+### § 2.4 Lineage pseudo-tab
+
+A **lineage** button appears at the right end of the channel tab bar in the right pane (after
+the `unmapped` pseudo-tab, separated from the channel tabs by a thin vertical divider). Both
+`unmapped` and `lineage` are rendered in italic to visually distinguish them as diagnostic
+views rather than channel selectors.
+
+Clicking `lineage` replaces the channel cluster view with the field lineage diagram (§ 11).
+The tab is highlighted in blue when active.
+
+Switching to `lineage` does not alter state and does not trigger a reload. The diagram state
+(expanded entities, focused canonical field) persists as long as the `lineage` tab remains
+mounted. Selecting a channel tab or `unmapped` returns to the corresponding cluster view.
+Poll-tick refreshes do not rebuild the diagram while the `lineage` tab is active.
+
 ---
 
 ## § 3 Scenario system
@@ -404,3 +419,100 @@ immediately, which is why syncs appear instantaneous — the poll is not waiting
 
 Switching scenarios or resetting respects the current toggle state: if auto mode is off when
 the new engine boots, it is immediately paused after `startEngine()` returns.
+
+---
+
+## § 11 Field Lineage Diagram
+
+### § 11.1 Purpose
+
+The **lineage** pseudo-tab in the channel tab bar (§ 2.4) renders the active `ScenarioDefinition`
+as an interactive field-lineage graph. It shows which connector fields flow into the canonical
+model and back out to other connectors, making field renames and channel topology visible
+without reading YAML.
+
+The diagram occupies the full width of the right pane, which gives enough horizontal space
+for a three-connector scenario to render clearly.
+
+### § 11.2 Data source
+
+The diagram is derived entirely from the in-memory `ScenarioDefinition`. It does not query
+the sql.js database or the engine. `buildChannelLineage()` is a pure function:
+`ChannelConfig → ChannelLineage`. No engine import is required.
+
+### § 11.3 Three-column layout
+
+Each channel renders as a three-column flow graph inside a `<div class="ld-graph">`:
+
+```
+LEFT column          CENTRE column       RIGHT column
+(ld-col-left)        (ld-col-centre)     (ld-col-right)
+─────────────        ──────────────      ─────────────
+entity pills  ──── canonical pills ────  entity pills
+              SVG line overlay (absolute)
+```
+
+A transparent `<svg class="ld-lines">` overlay (`position: absolute; inset: 0;
+pointer-events: none`) is drawn on top of the columns. SVG `<line>` elements connect
+left-column elements to canonical pills (inbound direction) and canonical pills to
+right-column elements (outbound direction). Coordinates are computed via
+`getBoundingClientRect()` relative to the `.ld-graph` container.
+
+### § 11.4 Overview state (default)
+
+- **Left column:** one collapsed entity header pill per channel member.
+- **Centre column:** one canonical field pill per unique canonical field in the channel.
+- **Right column:** one collapsed entity header pill per channel member (outbound side).
+
+In the overview, each entity header pill is connected by SVG lines to every canonical field
+pill it participates in. Lines are shown at low opacity (`.ld-line` default style).
+
+### § 11.5 Entity expansion
+
+Clicking an entity header pill expands it to show individual connector field pills
+(`.ld-field-node`), one per `inbound` mapping entry. SVG lines are redrawn from each
+field pill to its canonical field pill. Renames become visible because the field pill label
+(connector-side name) may differ from the canonical pill label.
+
+Multiple entities may be expanded at once, on either or both sides. Clicking the header
+again collapses it.
+
+### § 11.6 Canonical field focus
+
+Clicking a canonical field pill enters **field focus** mode for that field:
+
+- All SVG lines whose `data-canonical-field` does not match the focused field receive class
+  `ld-line-dimmed` (~15% opacity).
+- Lines matching the focused field receive class `ld-line-focused` (full opacity, accent
+  colour).
+- Entity header and field pills that do not participate in the focused field receive class
+  `ld-dimmed`.
+- An alias annotation appears below the canonical pill listing all connector-side field
+  names for that canonical field (e.g. `name · accountName · orgName`).
+- Direction indicators (`→`, `←`, `↔`) appear as SVG `<text>` elements on focused lines.
+
+Clicking the same canonical pill again, or pressing Escape, returns to the overview state.
+
+Focus is implemented via CSS class toggling only — no DOM re-render is triggered. This
+keeps interaction latency at zero.
+
+### § 11.7 Pass-through members
+
+A channel member with no `inbound` list is a pass-through connector. Its entity pill
+connects to a synthetic canonical pill labelled `(all fields)` with dashed lines
+(`.ld-line-passthrough`).
+
+### § 11.8 Identity fields
+
+A `<div class="ld-identity">` strip below the canonical spine lists identity fields as
+highlighted chips (e.g. `○ domain`).
+
+### § 11.9 Resize handling
+
+A `ResizeObserver` on the diagram host section redraws all SVG lines whenever the container
+is resized (e.g. user drags `#resize-handle`).
+
+### § 11.10 Re-render on config apply
+
+When the user saves and reloads config, `renderLineageDiagram()` is called fresh the next
+time the user opens the `lineage` tab.

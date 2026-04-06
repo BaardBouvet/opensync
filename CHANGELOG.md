@@ -26,6 +26,16 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ### Added
 
+- **Playground: field lineage diagram moved to `lineage` pseudo-tab (right pane).** The field
+  lineage diagram is now accessible via a `lineage` pseudo-tab at the end of the channel tab bar
+  in the right pane. A thin separator visually distinguishes the two view pseudo-tabs (`unmapped`,
+  `lineage`) from the channel tabs; both are rendered in italic to reinforce that they are
+  diagnostic views, not channels. The tab label was changed from the earlier `map` (too similar
+  to a channel name) to `lineage`. Poll-tick refreshes no longer rebuild the diagram while the
+  `lineage` tab is active, which fixes the collapse/focus-reset bug caused by `innerHTML = ""`
+  being called on every 2-second poll tick. The unused `.editor-tab-strip` CSS has been removed.
+  Specs §2.4 and §11 updated accordingly.
+
 - **Browser playground: READ events in boot tick.** The boot tick now shows one READ event per
   record collected from each connector during the initial `collectOnly` pass.  These events have
   no `before` field and display all fields in green (new records).
