@@ -122,6 +122,17 @@ One column per channel member (fixed width 260 px). Each header shows:
 - `+ New` button — opens the new-record modal (§ 6.2) for that connector/entity combination.
   The button is inline in the header, to the right of the count badge.
 
+The `cluster-header-row` element is set with `column-gap: 6px` (matching the cards-row gap)
+and left/right padding that aligns its columns with the card columns below it:
+- Channel cluster view: `padding: 0 11px` (matching `cluster-body` 6 px + `cluster-group`
+  side padding 5 px)
+- Unmapped view: `padding: 0 6px` (matching `cluster-body` 6 px only — no `cluster-group`
+  nesting in the unmapped layout)
+
+Each `cluster-col-head` carries a `border-left` accent colour (cycling through 4 muted tones
+per `nth-child` position). The matching `cluster-cell` at the same nth-child position carries
+the same colour at 30 % opacity, visually linking each header cell to its card column.
+
 ### § 4.3 Cluster groups
 
 Each identity cluster is rendered as a bordered group box with:
@@ -231,15 +242,18 @@ switches and resets behind a confirmation prompt.
 
 ## § 7 Dev tools panel
 
-Three tabs:
+Five tabs:
 
 | Tab | Contents |
 |---|---|
 | Log | Tick-grouped event viewer (see § 7.1) |
 | identity_map | Table snapshot of `identity_map` rows from the sql.js DB |
-| shadow_state | Table snapshot of `shadow_state` rows from the sql.js DB |
+| shadow_state | Split view — metadata table on the left, field detail panel on the right (see § 7.2) |
+| watermarks | Table snapshot of `watermarks` rows from the sql.js DB (see § 7.3) |
+| channels | Table snapshot of `channel_onboarding_status` rows from the sql.js DB (see § 7.4) |
 
-The DB tables are refreshed after each poll pass.
+All DB tabs are refreshed after each poll pass. Re-rendering a DB tab preserves the current
+scroll position and, where applicable, the selected row (§ 7.2).
 
 ### § 7.1 Log tab — tick viewer
 
@@ -280,6 +294,51 @@ panel (`te-detail`) shows data based on action type:
 | DEFER / ERROR | No data panel |
 
 **Clear button:** Inside the `ticks-toolbar` area of the Log tab, not in the tab bar.
+
+### § 7.2 shadow_state tab — split view
+
+The `shadow_state` tab uses a two-panel split layout:
+
+```
+┌──────────────────────────────────┬───────────────────┐
+│  shadow-left                     │  shadow-right     │
+│                                  │                   │
+│  Metadata table                  │  Field detail for │
+│  (connector_id, entity_name,     │  selected row     │
+│   external_id, canonical_id,     │                   │
+│   deleted_at)                    │  key → value rows │
+│                                  │  from             │
+│  Click a row to select           │  canonical_data   │
+└──────────────────────────────────┴───────────────────┘
+```
+
+**Left panel (`shadow-left`):** Renders the metadata columns of `shadow_state`. The
+`canonical_data` column (JSON blob) is intentionally omitted from the table — it is shown
+in the right panel instead.
+
+**Right panel (`shadow-right`):** Initially shows `← click a row to inspect fields`. When
+a metadata row is clicked, the right panel shows the parsed `canonical_data` fields as
+monospace `key → value` rows (values in blue). The panel title shows
+`connectorId / entityName / externalId…` (8-char prefix).
+
+**Selection persistence:** The selected row is tracked by its composite key
+(`connector_id / entity_name / external_id`), not by DOM reference. Re-renders (triggered
+by poll ticks while the tab is active) re-apply the highlight class and refresh the right
+panel with the latest `canonical_data` from the database — without clearing the selection.
+
+### § 7.3 watermarks tab
+
+Shows the `watermarks` table: `connector_id`, `entity_name`, `since`. The `since` value is
+the opaque cursor passed as the `after` parameter to each connector's incremental read on
+the next poll. Watching this value advance after each manual sync tick or realtime tick
+makes the incremental-read boundary directly observable.
+
+### § 7.4 channels tab
+
+Shows the `channel_onboarding_status` table: `channel_id`, `entity`, `marked_ready_at`.
+A channel that has completed onboarding has a row here. This is useful for confirming
+whether a channel has been fully onboarded during the boot sequence, and is relevant when
+using the manual sync button (which only runs poll ticks, not onboarding).
 
 ## § 8 Engine integration
 

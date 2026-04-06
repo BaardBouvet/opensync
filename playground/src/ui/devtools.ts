@@ -481,25 +481,38 @@ export function createDevTools(
   }
 
   // ── Shadow state split view ───────────────────────────────────────────────
-  let selectedShadowRow: HTMLElement | null = null;
+  // Track selection by data key, not DOM ref — survives re-renders on poll ticks.
+  let selectedShadowKey: string | null = null;
+
+  function shadowRowKey(r: { connector_id: string; entity_name: string; external_id: string }): string {
+    return `${r.connector_id}/${r.entity_name}/${r.external_id}`;
+  }
 
   function renderShadowState(): void {
     const rows = getDbState().shadowState;
     shadowLeft.innerHTML = "";
-    shadowRight.innerHTML = "";
-
-    const hint = document.createElement("div");
-    hint.className = "shadow-right-empty";
-    hint.textContent = "\u2190 click a row to inspect fields";
-    shadowRight.appendChild(hint);
-    selectedShadowRow = null;
 
     if (rows.length === 0) {
+      shadowRight.innerHTML = "";
+      const hint = document.createElement("div");
+      hint.className = "shadow-right-empty";
+      hint.textContent = "\u2190 click a row to inspect fields";
+      shadowRight.appendChild(hint);
+      selectedShadowKey = null;
       const empty = document.createElement("div");
       empty.className = "db-table-empty";
       empty.textContent = "(empty)";
       shadowLeft.appendChild(empty);
       return;
+    }
+
+    // If nothing is selected yet, show the hint; otherwise keep the current detail.
+    if (selectedShadowKey === null) {
+      shadowRight.innerHTML = "";
+      const hint = document.createElement("div");
+      hint.className = "shadow-right-empty";
+      hint.textContent = "\u2190 click a row to inspect fields";
+      shadowRight.appendChild(hint);
     }
 
     const cols = ["connector_id", "entity_name", "external_id", "canonical_id", "deleted_at"] as const;
@@ -525,10 +538,16 @@ export function createDevTools(
         td.textContent = v === null || v === undefined ? "\u2014" : String(v);
         tr.appendChild(td);
       }
-      tr.addEventListener("click", () => {
-        if (selectedShadowRow) selectedShadowRow.classList.remove("shadow-row-selected");
+      // Re-apply selection highlight if this row was previously selected.
+      if (shadowRowKey(r) === selectedShadowKey) {
         tr.classList.add("shadow-row-selected");
-        selectedShadowRow = tr;
+        // Re-render the detail panel with fresh data for this row.
+        showShadowDetail(r);
+      }
+      tr.addEventListener("click", () => {
+        tbody.querySelectorAll<HTMLElement>("tr.shadow-row-selected").forEach((el) => el.classList.remove("shadow-row-selected"));
+        tr.classList.add("shadow-row-selected");
+        selectedShadowKey = shadowRowKey(r);
         showShadowDetail(r);
       });
       tbody.appendChild(tr);
