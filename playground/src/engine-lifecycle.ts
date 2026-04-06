@@ -9,7 +9,7 @@ import type { ResolvedConfig, ConnectorInstance, ChannelConfig } from "@opensync
 import type { RecordSyncResult, Db } from "@opensync/engine";
 import { openBrowserDb } from "./db-sqljs.js";
 import { createInMemoryConnector } from "./inmemory.js";
-import type { InMemoryConnector, ActivityLogEntry } from "./inmemory.js";
+import type { InMemoryConnector } from "./inmemory.js";
 import type { ScenarioDefinition } from "./scenarios/index.js";
 import { FIXED_SEED, FIXED_SYSTEMS } from "./lib/systems.js";
 
@@ -132,6 +132,7 @@ export async function startEngine(
   const engine = new SyncEngine(config, db);
 
   // 4. Onboard any uninitialised channels
+  const onboardResults = new Map<string, Awaited<ReturnType<SyncEngine["onboard"]>>>();
   for (const ch of config.channels) {
     if (engine.channelStatus(ch.id) !== "uninitialized") continue;
 
@@ -148,19 +149,21 @@ export async function startEngine(
     );
 
     const report = await engine.discover(ch.id, snapshotAt);
-    await engine.onboard(ch.id, report);
+    const onboardResult = await engine.onboard(ch.id, report);
+    onboardResults.set(ch.id, onboardResult);
   }
 
   // 4b. Emit onboarding READ + INSERT events.
-  // First: emit one READ per source record from each connector (what was collected during
-  // the collectOnly pass).  These have no `before` because they are initial reads —
-  // all fields are shown as new (green) in the UI.
-  // Then: emit INSERT events from the transaction_log for each fanout write onboard() made.
-  // The boot tick separator is emitted first so all events group under the onboard tick.
+  // READs: one per record in each source connector's current snapshot (no `before` — initial
+  // read, no prior shadow state).
+  // INSERTs: from onboardResult.inserts (fanout writes made by onboard()).
   onTickStart?.("onboard");
   {
-    // READs — one per record in each source connector's current snapshot
     for (const ch of config.channels) {
+      const onboardRes = onboardResults.get(ch.id);
+      if (!onboardRes) continue; // channel was already initialized
+
+      // READs
       for (const member of ch.members) {
         const snap = connectors.get(member.connectorId)?.snapshotFull()[member.entity] ?? [];
         for (const rec of snap) {
@@ -175,52 +178,28 @@ export async function startEngine(
             sourceId: rec.id.slice(0, 8),
             targetId: rec.id.slice(0, 8),
             data: rec.data as Record<string, unknown>,
-            // No `before` — initial read, record has no prior shadow state.
             phase: "onboard",
           });
         }
       }
-    }
 
-    // INSERTs — one per fanout write in transaction_log
-    const onboardRows = db
-      .prepare<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string }>(
-        `SELECT connector_id, entity_name, external_id, canonical_id
-         FROM transaction_log WHERE action = 'insert' ORDER BY synced_at ASC`,
-      )
-      .all();
-    for (const row of onboardRows) {
-      const ch = config.channels.find((c) =>
-        c.members.some((m) => m.connectorId === row.connector_id && m.entity === row.entity_name),
-      );
-      if (!ch) continue;
-      // Infer source connector: another identity_map entry for the same canonical
-      const other = db
-        .prepare<{ connector_id: string }>(
-          `SELECT connector_id FROM identity_map WHERE canonical_id = ? AND connector_id != ? LIMIT 1`,
-        )
-        .get(row.canonical_id, row.connector_id);
-      const srcConnId = other?.connector_id ?? "onboard";
-      const srcMember = ch.members.find((m) => m.connectorId === srcConnId);
-      const tgtMember = ch.members.find((m) => m.connectorId === row.connector_id);
-      // Look up the actual record data from the target connector so the event is expandable.
-      const tgtConn = connectors.get(row.connector_id);
-      const tgtRec = tgtConn?.snapshotFull()[row.entity_name]?.find((r) => r.id === row.external_id);
-      onEvent({
-        ts: hhmm(),
-        channel: ch.id,
-        sourceConnector: srcConnId,
-        sourceEntity: srcMember?.entity ?? "?",
-        targetConnector: row.connector_id,
-        targetEntity: row.entity_name,
-        action: "INSERT",
-        sourceId: "(onboard)",
-        targetId: row.external_id.slice(0, 8),
-        after: tgtRec?.data,
-        phase: "onboard",
-      });
-      // Suppress unused tgtMember reference (used for future extension)
-      void tgtMember;
+      // INSERTs from onboard()
+      for (const r of onboardRes.inserts) {
+        const srcMember = ch.members.find((m) => m.connectorId !== r.targetConnectorId);
+        onEvent({
+          ts: hhmm(),
+          channel: ch.id,
+          sourceConnector: srcMember?.connectorId ?? "onboard",
+          sourceEntity: srcMember?.entity ?? "?",
+          targetConnector: r.targetConnectorId,
+          targetEntity: r.entity,
+          action: "INSERT",
+          sourceId: r.sourceId.slice(0, 8),
+          targetId: r.targetId.slice(0, 8),
+          after: r.after,
+          phase: "onboard",
+        });
+      }
     }
   }
 
@@ -237,7 +216,7 @@ export async function startEngine(
   for (const ch of config.channels) {
     for (const member of ch.members) {
       const result = await engine.ingest(ch.id, member.connectorId, { fullSync: true });
-      emitEvents(result.records, ch, member.connectorId, onEvent, connectors, "onboard", false);
+      emitEvents(result.records, ch, member.connectorId, onEvent, "onboard");
     }
   }
 
@@ -251,13 +230,8 @@ export async function startEngine(
     onTickStart?.("poll");
     for (const ch of config.channels) {
       for (const member of ch.members) {
-        const sourceEntity = ch.members.find((m) => m.connectorId === member.connectorId)?.entity;
-        // Snapshot shadow state BEFORE ingest — used to compute READ event diffs.
-        const sourceShadow = sourceEntity
-          ? captureSourceShadow(db, member.connectorId, sourceEntity)
-          : new Map<string, Record<string, unknown>>();
         const result = await engine.ingest(ch.id, member.connectorId);
-        emitEvents(result.records, ch, member.connectorId, onEvent, connectors, "poll", true, sourceShadow);
+        emitEvents(result.records, ch, member.connectorId, onEvent, "poll");
       }
     }
     onRefresh();
@@ -371,56 +345,17 @@ function computeClusters(
 
 // ─── Emit helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Snapshot the recorded field values for every external_id of a connector+entity
- * from the shadow_state table.  Called *before* engine.ingest() so READ events can
- * show only the fields that actually changed compared to what the engine last knew.
- */
-function captureSourceShadow(
-  db: Db,
-  connectorId: string,
-  entityName: string,
-): Map<string, Record<string, unknown>> {
-  const rows = db
-    .prepare<{ external_id: string; canonical_data: string }>(
-      "SELECT external_id, canonical_data FROM shadow_state WHERE connector_id = ? AND entity_name = ?",
-    )
-    .all(connectorId, entityName);
-  const map = new Map<string, Record<string, unknown>>();
-  for (const row of rows) {
-    const fd = JSON.parse(row.canonical_data) as Record<string, { val: unknown }>;
-    const data: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(fd)) {
-      if (!k.startsWith("__")) data[k] = v.val; // skip __assoc__ and other meta fields
-    }
-    map.set(row.external_id, data);
-  }
-  return map;
-}
-
 function emitEvents(
   records: RecordSyncResult[],
   ch: ChannelConfig,
   sourceConnectorId: string,
   onEvent: (ev: SyncEvent) => void,
-  connectors: Map<string, InMemoryConnector>,
   phase?: SyncEvent["phase"],
-  includeReads = false,
-  sourceShadows?: Map<string, Record<string, unknown>>,
 ): void {
   const sourceEntity = ch.members.find((m) => m.connectorId === sourceConnectorId)?.entity;
-  const sourceSnap = sourceEntity
-    ? (connectors.get(sourceConnectorId)?.snapshotFull()[sourceEntity] ?? [])
-    : [];
-
-  // Emit one READ event per unique source record with at least one non-skip dispatch.
-  if (includeReads) {
-    const emittedReads = new Set<string>();
-    for (const r of records) {
-      if (r.action === "skip") continue;
-      if (emittedReads.has(r.sourceId)) continue;
-      emittedReads.add(r.sourceId);
-      const srcRec = sourceSnap.find((rec) => rec.id === r.sourceId);
+  for (const r of records) {
+    if (r.action === "skip") continue;
+    if (r.action === "read") {
       onEvent({
         ts: hhmm(),
         channel: ch.id,
@@ -431,41 +366,26 @@ function emitEvents(
         action: "READ",
         sourceId: r.sourceId.slice(0, 8),
         targetId: r.sourceId.slice(0, 8),
-        data: srcRec?.data,
-        before: sourceShadows?.get(r.sourceId), // shadow state before this ingest (for diff)
+        data: r.sourceData,
+        before: r.sourceShadow,
+        phase,
+      });
+    } else {
+      const targetMember = ch.members.find((m) => m.connectorId === r.targetConnectorId);
+      onEvent({
+        ts: hhmm(),
+        channel: ch.id,
+        sourceConnector: sourceConnectorId,
+        sourceEntity: r.entity,
+        targetConnector: r.targetConnectorId,
+        targetEntity: targetMember?.entity ?? r.entity,
+        action: r.action.toUpperCase(),
+        sourceId: r.sourceId.slice(0, 8),
+        targetId: r.targetId.slice(0, 8),
+        before: r.before,
+        after: r.after,
         phase,
       });
     }
-  }
-
-  // Emit dispatch events (insert / update / defer / error).
-  for (const r of records) {
-    if (r.action === "skip") continue;
-    const targetMember = ch.members.find((m) => m.connectorId === r.targetConnectorId);
-    // Look up the most-recent matching activity log entry for before/after data.
-    let actEntry: ActivityLogEntry | undefined;
-    if (r.action === "insert" || r.action === "update") {
-      const log = connectors.get(r.targetConnectorId)?.getActivityLog() ?? [];
-      for (let i = log.length - 1; i >= 0; i--) {
-        if (log[i]!.id === r.targetId && log[i]!.op === r.action) {
-          actEntry = log[i];
-          break;
-        }
-      }
-    }
-    onEvent({
-      ts: hhmm(),
-      channel: ch.id,
-      sourceConnector: sourceConnectorId,
-      sourceEntity: r.entity,
-      targetConnector: r.targetConnectorId,
-      targetEntity: targetMember?.entity ?? r.entity,
-      action: r.action.toUpperCase(),
-      sourceId: r.sourceId.slice(0, 8),
-      targetId: r.targetId.slice(0, 8),
-      before: actEntry?.before,
-      after: actEntry?.after,
-      phase,
-    });
   }
 }

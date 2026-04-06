@@ -75,6 +75,30 @@ interface PipelineResult {
 
 Stored in the `sync_jobs` table alongside job metadata. The combination of job results + request journal + transaction log gives a complete picture of any sync operation.
 
+## Structured SyncEvent Payloads
+
+`ingest()` returns `IngestResult.records: RecordSyncResult[]`.  Each result carries structured
+payload fields so callers can render rich event logs without additional DB queries.
+
+See `specs/sync-engine.md § RecordSyncResult` for the full type definition.
+
+### Event types and their payloads
+
+| action | sourceData | sourceShadow | before | after |
+|--------|-----------|-------------|--------|-------|
+| `read` | ✓ incoming canonical values | ✓ last known shadow (diff source) | — | — |
+| `insert` | — | — | — | ✓ written canonical values |
+| `update` | — | — | ✓ previous target shadow | ✓ written canonical values |
+| `skip` | — | — | — | — |
+| `defer` | — | — | — | — |
+| `error` | — | — | — | — |
+
+`sourceData` and `sourceShadow` together enable "what changed" display:
+- New records: `sourceData` is populated, `sourceShadow` is `undefined` → all fields are new.
+- Changed records: both are populated → caller computes `Object.keys(sourceData).filter(k => sourceData[k] !== sourceShadow[k])`.
+
+`before` and `after` on `update` results enable "field diff" display on target writes.
+
 ## Structured Logging
 
 All engine output uses structured JSON logging (pino).

@@ -1,6 +1,6 @@
 # Engine: First-class SyncEvent Emission
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Domain:** Engine API, Observability, Connector Integration  
 **Scope:** `packages/engine/src/`, `packages/sdk/src/`, `playground/src/`, `demo/run.ts`  

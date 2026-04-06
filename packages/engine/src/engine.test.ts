@@ -481,3 +481,164 @@ describe("T9: Gap 8 — onboard() blocked when CB is open", () => {
     await expect(engine.onboard("contacts", report)).rejects.toThrow(/circuit breaker OPEN/i);
   });
 });
+
+// ─── T10: RecordSyncResult payload fields — READ / before / after ─────────────
+
+describe("T10: RecordSyncResult payload fields", () => {
+  it("ingest emits a 'read' result with sourceData for each non-skip source record", async () => {
+    crm.seed([
+      { id: "c1", name: "Alice Liddell", email: "alice@example.com" },
+      { id: "c2", name: "Bob Martin", email: "bob@example.com" },
+    ]);
+    erp.seed([
+      { id: "e1", name: "Alice Liddell", email: "alice@example.com" },
+      { id: "e2", name: "Bob Martin", email: "bob@example.com" },
+    ]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await runOnboarding(engine);
+
+    // Seed a new CRM record  — engine has no prior knowledge of it
+    crm.seed([{ id: "c3", name: "Carol White", email: "carol@example.com" }]);
+
+    const result = await engine.ingest("contacts", "crm");
+
+    const readResults = result.records.filter((r) => r.action === "read");
+    expect(readResults.length).toBe(1);
+
+    const readResult = readResults[0]!;
+    expect(readResult.sourceId).toBe("c3");
+    expect(readResult.targetConnectorId).toBe("");
+    // sourceData should contain the canonical fields (after inbound mapping)
+    expect(readResult.sourceData).toBeDefined();
+    expect(readResult.sourceData!["email"]).toBe("carol@example.com");
+    // sourceShadow is undefined — engine has never seen this record
+    expect(readResult.sourceShadow).toBeUndefined();
+  });
+
+  it("sourceShadow reflects prior engine state when a known record is updated", async () => {
+    crm.seed([{ id: "c1", name: "Alice Liddell", email: "alice@example.com" }]);
+    erp.seed([{ id: "e1", name: "Alice Liddell", email: "alice@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await runOnboarding(engine);
+
+    // Settle the channel (first incremental makes shadows consistent)
+    await engine.ingest("contacts", "crm");
+    await engine.ingest("contacts", "erp");
+
+    // Now update Alice in ERP — engine must reflect the change
+    await fetch(`${erp.baseUrl}/__mutate-employee/e1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Alice Smith" }),
+    });
+
+    const result = await engine.ingest("contacts", "erp");
+
+    const readResult = result.records.find((r) => r.action === "read" && r.sourceId === "e1");
+    expect(readResult).toBeDefined();
+    // sourceData has the new name
+    expect(readResult!.sourceData!["name"]).toBe("Alice Smith");
+    // sourceShadow has the old name (pre-ingest shadow)
+    expect(readResult!.sourceShadow!["name"]).toBe("Alice Liddell");
+  });
+
+  it("INSERT result carries after payload", async () => {
+    crm.seed([
+      { id: "c1", name: "Alice Liddell", email: "alice@example.com" },
+      { id: "c2", name: "Bob Martin", email: "bob@example.com" },
+    ]);
+    erp.seed([
+      { id: "e1", name: "Alice Liddell", email: "alice@example.com" },
+      { id: "e2", name: "Bob Martin", email: "bob@example.com" },
+    ]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await runOnboarding(engine);
+
+    crm.seed([{ id: "c3", name: "Carol White", email: "carol@example.com" }]);
+    const result = await engine.ingest("contacts", "crm");
+
+    const insertResult = result.records.find(
+      (r) => r.action === "insert" && r.targetConnectorId === "erp",
+    );
+    expect(insertResult).toBeDefined();
+    expect(insertResult!.after).toBeDefined();
+    expect(insertResult!.after!["email"]).toBe("carol@example.com");
+    // INSERT has no 'before'
+    expect(insertResult!.before).toBeUndefined();
+  });
+
+  it("UPDATE result carries before and after payloads", async () => {
+    crm.seed([{ id: "c1", name: "Alice Liddell", email: "alice@example.com" }]);
+    erp.seed([{ id: "e1", name: "Alice Liddell", email: "alice@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await runOnboarding(engine);
+    await engine.ingest("contacts", "crm");
+    await engine.ingest("contacts", "erp");
+
+    // Update Alice in ERP — the next ERP ingest will produce an UPDATE to CRM
+    await fetch(`${erp.baseUrl}/__mutate-employee/e1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Alice Smith" }),
+    });
+
+    const result = await engine.ingest("contacts", "erp");
+    const updateResult = result.records.find(
+      (r) => r.action === "update" && r.targetConnectorId === "crm",
+    );
+    expect(updateResult).toBeDefined();
+    // 'after' contains the written canonical values (new name)
+    expect(updateResult!.after).toBeDefined();
+    expect(updateResult!.after!["name"]).toBe("Alice Smith");
+    // 'before' contains prior target (CRM) shadow values (old name)
+    expect(updateResult!.before).toBeDefined();
+    expect(updateResult!.before!["name"]).toBe("Alice Liddell");
+  });
+
+  it("OnboardResult.inserts contains one entry per fanout write", async () => {
+    // CRM has Alice; ERP has Zara — neither matches the other, so both are unique-per-side
+    // and each gets propagated to the other system during onboarding.
+    crm.seed([{ id: "c1", name: "Alice Liddell", email: "alice@example.com" }]);
+    erp.seed([{ id: "e1", name: "Zara Unknown", email: "zara@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+
+    await engine.ingest("contacts", "crm", { collectOnly: true });
+    await engine.ingest("contacts", "erp", { collectOnly: true });
+    const report = await engine.discover("contacts");
+
+    const onboardResult = await engine.onboard("contacts", report);
+
+    // Two unique-per-side records → two fanout inserts (Alice to ERP, Zara to CRM)
+    expect(onboardResult.inserts.length).toBe(2);
+    const erpInsert = onboardResult.inserts.find((r) => r.targetConnectorId === "erp");
+    expect(erpInsert).toBeDefined();
+    expect(erpInsert!.action).toBe("insert");
+    expect(erpInsert!.sourceId).toBe("c1");
+    expect(erpInsert!.after).toBeDefined();
+    expect(erpInsert!.after!["email"]).toBe("alice@example.com");
+  });
+
+  it("onboard dryRun returns inserts: []", async () => {
+    crm.seed([{ id: "c1", name: "Alice Liddell", email: "alice@example.com" }]);
+    erp.seed([{ id: "e1", name: "Alice Liddell", email: "alice@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await engine.ingest("contacts", "crm", { collectOnly: true });
+    await engine.ingest("contacts", "erp", { collectOnly: true });
+    const report = await engine.discover("contacts");
+
+    const result = await engine.onboard("contacts", report, { dryRun: true });
+    expect(result.inserts).toEqual([]);
+  });
+});

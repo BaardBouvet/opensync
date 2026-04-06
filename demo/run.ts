@@ -150,16 +150,19 @@ while (true) {
     for (const member of ch.members) {
       const result = await engine.ingest(ch.id, member.connectorId);
       for (const r of result.records) {
-        if (r.action === "skip") continue;
+        if (r.action === "skip" || r.action === "read") continue;
         const tag =
           r.action === "insert" ? "INSERT" :
           r.action === "update" ? "UPDATE" :
-          r.action === "delete" ? "DELETE" :
           r.action === "defer"  ? "DEFER " : r.action.toUpperCase();
         const src = r.sourceId.slice(0, 8);
         const tgt = r.targetId ? r.targetId.slice(0, 8) : "?";
         const dir = `${member.connectorId}→${r.targetConnectorId}`;
-        console.log(`[${ts()}] ${dir}  ${tag}  ${r.entity}  ${src}… → ${tgt}…`);
+        const changedKeys = r.action === "update" && r.before && r.after
+          ? Object.keys(r.after).filter((k) => JSON.stringify(r.before![k]) !== JSON.stringify(r.after![k]))
+          : undefined;
+        const fieldHint = changedKeys?.length ? `  [${changedKeys.join(", ")}]` : "";
+        console.log(`[${ts()}] ${dir}  ${tag}  ${r.entity}  ${src}… → ${tgt}…${fieldHint}`);
       }
     }
   }

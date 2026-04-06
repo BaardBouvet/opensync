@@ -26,7 +26,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/GAP_ENGINE_SCALING.md](engine/GAP_ENGINE_SCALING.md) | Gap analysis: engine scaling behaviour — which operations are O(delta) vs O(total data) | reference | — |
 | [engine/PLAN_CONFIG_VALIDATION.md](engine/PLAN_CONFIG_VALIDATION.md) | Config cross-reference validation (channels, connectors, auth) | backlog | — |
 | [engine/PLAN_DB_MIGRATIONS.md](engine/PLAN_DB_MIGRATIONS.md) | Post-release database migration infrastructure plan | deferred — post-release | — |
-| [engine/PLAN_ENGINE_SYNC_EVENTS.md](engine/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | draft | — |
+| [engine/PLAN_ENGINE_SYNC_EVENTS.md](engine/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | complete | — |
 | [engine/PLAN_NOOP_UPDATE_SUPPRESSION.md](engine/PLAN_NOOP_UPDATE_SUPPRESSION.md) | Suppress target dispatches when resolved values already match target shadow (LWW always-fires bug) — always on | complete | — |
 | [engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md](engine/PLAN_SUPPRESS_NOOP_UPDATES_SWITCH.md) | Per-channel opt-out for noop update suppression (for channels with external target writers) | backlog | — |
 | [engine/PLAN_ECHO_DETECTION_SWITCH.md](engine/PLAN_ECHO_DETECTION_SWITCH.md) | Per-channel opt-out for echo detection (for channels needing unconditional target healing) | backlog | — |

@@ -350,43 +350,26 @@ Each system runs as an `InMemoryConnector` — an in-process implementation of t
 - `updateRecord(entity, id, data, associations?)` — merge patch
 - `softDeleteRecord(entity, id)` — hide from engine without hard-deleting
 - `restoreRecord(entity, id)` — un-hide and bump watermark
-- `getActivityLog()` / `clearActivityLog()` — access the write activity log
 
-**Activity log:** Every engine-driven `insert` or `update` call through `makeEntity`
-appends an `ActivityLogEntry` to the connector's internal `activityLog` array:
-
-```typescript
-interface ActivityLogEntry {
-  op: "insert" | "update";
-  entity: string;
-  id: string;          // external ID in this connector
-  at: string;          // ISO timestamp
-  after: Record<string, unknown>;
-  before?: Record<string, unknown>;  // only for updates
-}
-```
-
-The `emitEvents` helper uses the activity log to attach `before`/`after` payloads to `INSERT`
-and `UPDATE` `SyncEvent`s so the dev tools panel can display diffs.
-
-The log is never cleared automatically; it accumulates across polls. Searches scan from the
-most recent entry backwards, so the correct entry is found even after many polls.
+The connector is a dumb pipe: it does not track engine-driven writes.  All `before`/`after`
+payloads for `INSERT` and `UPDATE` events come directly from `RecordSyncResult` (see
+`specs/sync-engine.md § RecordSyncResult`).
 
 ### § 8.2 Boot sequence
 
 After `startEngine()` is called:
 
 1. All channels that report `"uninitialized"` are onboarded (`collectOnly → discover → onboard`).
+   The `OnboardResult` (including `inserts`) is stored per channel.
 2. A single boot tick is opened (`onTickStart("onboard")`).
 3. **READ events** are emitted for every record in every connector's current snapshot —
    one `SyncEvent { action: "READ", data: rec.data }` per record, with no `before` field
-   (the records are new; all fields are displayed in full green in the dev tools diff view).
-4. **INSERT events** from `transaction_log` (fanout writes from `onboard()`) are emitted with
-   `phase: "onboard"`, each carrying `after: record.data` from the target connector snapshot.
+   (initial read; all fields are displayed in full green in the dev tools diff view).
+4. **INSERT events** from `onboardResult.inserts` are emitted with `phase: "onboard"`,
+   each carrying `after` from the `RecordSyncResult` (canonical data written during fanout).
 5. A warmup ingest pass runs all channel members once with `{ fullSync: true }`.  Its main
-   purpose is to propagate association sentinels that `onboard()` step 1b omits.  In most
-   scenarios the warmup produces only skip results (noop suppression eliminates redundant
-   writes) so it contributes no events to the boot tick.
+   purpose is to propagate association sentinels that `onboard()` step 1b omits.  The new
+   `emitEvents` helper emits `"read"` and dispatch events from `result.records` directly.
 6. The UI is refreshed once to show the fully-resolved initial state.
 7. The automatic poll interval starts (if auto mode is enabled).
 
@@ -396,11 +379,10 @@ When auto mode is active, a `setInterval` fires every 2 000 ms.  Each tick:
 
 1. Calls `onTickStart("poll")` to open a new tick group in the dev tools.
 2. For each channel member:
-   a. Snapshots the connector's current shadow state from `shadow_state` table (used to
-      compute READ event diffs — see § 7.1).
-   b. Calls `engine.ingest(channelId, connectorId)`.
-   c. Calls `emitEvents(result.records, …, sourceShadows)` which emits `READ`, `INSERT`,
-      `UPDATE`, or `DEFER` events as appropriate.
+   a. Calls `engine.ingest(channelId, connectorId)`.
+   b. Calls `emitEvents(result.records, ch, connectorId, onEvent, "poll")` which iterates
+      `RecordSyncResult` entries — emitting `READ`, `INSERT`, `UPDATE`, `DEFER`, or `ERROR`
+      events using `r.sourceData`, `r.sourceShadow`, `r.before`, and `r.after` directly.
 3. Calls `onRefresh()` to re-render the UI.
 
 Manual record mutations call `pollOnce()` immediately after the mutation without waiting
@@ -435,16 +417,17 @@ interface SyncEvent {
   sourceId: string;         // first 8 chars of external ID
   targetId: string;
   phase?: "onboard" | "poll";
-  data?: Record<string, unknown>;   // READ: full source record
-  before?: Record<string, unknown>; // READ: shadow state before this ingest
-                                    // UPDATE: state before the write
-  after?: Record<string, unknown>;  // INSERT/UPDATE: state after the write
+  data?: Record<string, unknown>;   // READ: full source record (from RecordSyncResult.sourceData)
+  before?: Record<string, unknown>; // READ: shadow before ingest (RecordSyncResult.sourceShadow)
+                                    // UPDATE: state before the write (RecordSyncResult.before)
+  after?: Record<string, unknown>;  // INSERT/UPDATE: state after the write (RecordSyncResult.after)
 }
 ```
 
-`before` for READ events is populated by `captureSourceShadow()`, which queries the
-`shadow_state` table *before* `engine.ingest()` runs.  Comparing `before` vs `data` gives
-the field-level diff displayed in the dev tools expanded row.
+All payload fields come directly from `RecordSyncResult`: `r.sourceData`, `r.sourceShadow`,
+`r.before`, `r.after`.  No shadow-state query is needed before or after `engine.ingest()`.
+Comparing `before` vs `data` (for READ events) gives the field-level diff displayed in the
+dev tools expanded row.
 
 ---
 

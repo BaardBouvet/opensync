@@ -32,17 +32,6 @@ export interface RecordWithMeta extends ReadRecord {
   softDeleted: boolean; // true when UI-marked as deleted (hidden from engine read)
 }
 
-/** One entry in the per-connector activity log.
- * Captures ONLY engine-driven writes (fan-out inserts and updates), not UI mutations. */
-export interface ActivityLogEntry {
-  op: "insert" | "update";
-  entity: string;
-  id: string;
-  at: string;  // ISO timestamp
-  after: Record<string, unknown>;
-  before?: Record<string, unknown>; // only present for updates
-}
-
 export interface InMemoryConnector {
   connector: Connector;
   /** Replace the full record list for one entity (bulk overwrite). */
@@ -61,10 +50,6 @@ export interface InMemoryConnector {
   softDeleteRecord(entity: string, id: string): void;
   /** Restore a soft-deleted record (engine will pick it up on next poll). */
   restoreRecord(entity: string, id: string): void;
-  /** Engine-driven write log (fan-out inserts and updates only, not UI edits). */
-  getActivityLog(): ActivityLogEntry[];
-  /** Clear the activity log (called on scenario reset). */
-  clearActivityLog(): void;
 }
 
 // ─── Entity factory ───────────────────────────────────────────────────────────
@@ -76,7 +61,6 @@ function makeEntity(
   modifiedAt: Map<string, number>,  // shared with connector level — id → ts
   softDeleted: Set<string>,         // ids to exclude from engine read
   bump: () => number,               // monotonic counter shared across all entities
-  activityLog: ActivityLogEntry[],  // shared activity log — engine writes only
 ): EntityDefinition {
   // Assign initial watermarks and timestamps to seed records.
   const seedTs = Date.now();
@@ -131,8 +115,6 @@ function makeEntity(
         store.set(entityName, [...existing, newRecord]);
         watermarks.set(id, bump());
         modifiedAt.set(id, Date.now());
-        // Engine-driven write — capture in activity log.
-        activityLog.push({ op: "insert", entity: entityName, id, at: new Date().toISOString(), after: { ...record.data } });
         yield { id, data: record.data };
       }
     },
@@ -162,8 +144,6 @@ function makeEntity(
         store.set(entityName, next);
         watermarks.set(record.id, bump());
         modifiedAt.set(record.id, Date.now());
-        // Engine-driven write — capture in activity log.
-        activityLog.push({ op: "update", entity: entityName, id: record.id, at: new Date().toISOString(), before: { ...prev.data }, after: mergedData });
         yield { id: record.id, data: updated.data };
       }
     },
@@ -210,9 +190,6 @@ export function createInMemoryConnector(
 
   const allSoftDeleted = new Map<string, Set<string>>();
 
-  // Activity log: records engine-driven writes only (not UI mutations).
-  const activityLog: ActivityLogEntry[] = [];
-
   const entities = Object.keys(seed).map((name) => {
     const wms  = new Map<string, number>();
     const mods = new Map<string, number>();
@@ -220,7 +197,7 @@ export function createInMemoryConnector(
     allWatermarks.set(name, wms);
     allModifiedAt.set(name, mods);
     allSoftDeleted.set(name, sds);
-    return makeEntity(name, store, wms, mods, sds, bump, activityLog);
+    return makeEntity(name, store, wms, mods, sds, bump);
   });
 
   const connector: Connector = {
@@ -333,13 +310,6 @@ export function createInMemoryConnector(
       }
     },
 
-    getActivityLog(): ActivityLogEntry[] {
-      return activityLog;
-    },
-
-    clearActivityLog(): void {
-      activityLog.length = 0;
-    },
   };
 }
 

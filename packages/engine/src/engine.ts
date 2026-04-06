@@ -48,7 +48,8 @@ import { makeWiredInstance } from "./auth/context.js";
 
 // ─── Public result types ──────────────────────────────────────────────────────
 
-export type SyncAction = "insert" | "update" | "skip" | "defer" | "error";
+// Spec: specs/sync-engine.md § RecordSyncResult
+export type SyncAction = "read" | "insert" | "update" | "skip" | "defer" | "error";
 
 export interface RecordSyncResult {
   entity: string;
@@ -57,6 +58,15 @@ export interface RecordSyncResult {
   targetConnectorId: string;
   targetId: string;
   error?: string;
+  // ── Payload fields ────────────────────────────────────────────────────────
+  /** READ: source record field values after inbound mapping. Present for non-skip reads. */
+  sourceData?: Record<string, unknown>;
+  /** READ: engine's last known field values for the source record (shadow before this ingest). */
+  sourceShadow?: Record<string, unknown>;
+  /** INSERT/UPDATE: resolved canonical field values written to the target. */
+  after?: Record<string, unknown>;
+  /** UPDATE: target's previous field values from shadow_state before the write. */
+  before?: Record<string, unknown>;
 }
 
 export interface IngestResult {
@@ -94,6 +104,8 @@ export interface OnboardResult {
   linked: number;
   shadowsSeeded: number;
   uniqueQueued: number;
+  /** Individual fanout INSERT records produced during onboarding. */
+  inserts: RecordSyncResult[];
 }
 
 export type ChannelStatus = "uninitialized" | "collected" | "ready";
@@ -110,6 +122,18 @@ export interface AddConnectorReport {
   newFromJoiner: Array<{ externalId: string; data: Record<string, unknown> }>;
   missingInJoiner: Array<{ canonicalId: string; data: Record<string, unknown> }>;
   summary: { totalInJoiner: number; linked: number; newFromJoiner: number; missingInJoiner: number };
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Spec: specs/sync-engine.md § RecordSyncResult — materialise FieldData to a plain
+ * Record by extracting .val from each entry, skipping __-prefixed meta keys. */
+function fieldDataToRecord(fd: FieldData): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(fd)) {
+    if (!k.startsWith("__")) out[k] = v.val;
+  }
+  return out;
 }
 
 // ─── ConflictError — signals a 412 Precondition Failed ───────────────────────
@@ -486,7 +510,7 @@ export class SyncEngine {
     if (dryRun) {
       for (const m of report.matched) { linked += m.sides.length; shadowsSeeded += m.sides.length; }
       uniqueQueued = report.uniquePerSide.length;
-      return { linked, shadowsSeeded, uniqueQueued };
+      return { linked, shadowsSeeded, uniqueQueued, inserts: [] };
     }
 
     // Gap 2: check circuit breaker before any writes (Gap 8 safety pipeline)
@@ -532,6 +556,7 @@ export class SyncEngine {
     // batchId covers both matched-record propagation (1b) and unique-per-side (2)
     // so all onboarding inserts share the same audit batch.
     const batchId = crypto.randomUUID();
+    const inserts: RecordSyncResult[] = [];
 
     // 1b. Propagate each matched record to channel members not in match.sides.
     // This handles partial N-way matches (record in A+B but not C).
@@ -578,6 +603,8 @@ export class SyncEngine {
               dataAfter: fd,
             });
           })();
+          // Spec: specs/sync-engine.md § OnboardResult
+          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: match.sides[0]!.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: match.canonicalData });
           uniqueQueued++;
           breaker.recordResult(false);
         } else if (insertError) {
@@ -669,6 +696,8 @@ export class SyncEngine {
               dbInsertDeferred(this.db, unique.connectorId, memberByConnector.get(unique.connectorId)!.entity, unique.externalId, targetMember.connectorId);
             }
           })();
+          // Spec: specs/sync-engine.md § OnboardResult
+          inserts.push({ entity: targetMember.entity, action: "insert", sourceId: unique.externalId, targetConnectorId: targetMember.connectorId, targetId: newId!, after: unique.rawData });
           uniqueQueued++;
           breaker.recordResult(false);
         } else if (insertError) {
@@ -680,7 +709,7 @@ export class SyncEngine {
     // 4. Mark channel ready
     dbSetChannelReady(this.db, channelId, report.entity);
 
-    return { linked, shadowsSeeded, uniqueQueued };
+    return { linked, shadowsSeeded, uniqueQueued, inserts };
   }
 
   // ─── getChannelIdentityMap ────────────────────────────────────────────────
@@ -1005,7 +1034,7 @@ export class SyncEngine {
     sourceMember: ChannelMember,
     sourceId: string,
   ): Promise<
-    | { type: "ok"; action: "insert" | "update"; targetId: string; newFieldData: FieldData }
+    | { type: "ok"; action: "insert" | "update"; targetId: string; newFieldData: FieldData; after: Record<string, unknown> }
     | { type: "error"; error: string }
     | { type: "skip" }
   > {
@@ -1092,7 +1121,7 @@ export class SyncEngine {
       ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
       : undefined;
     const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, remappedSentinel);
-    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData };
+    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData, after: resolvedCanonical };
   }
 
   // Spec: specs/sync-engine.md § Pipeline Steps
@@ -1148,6 +1177,18 @@ export class SyncEngine {
           continue;
         }
       }
+
+      // Spec: specs/sync-engine.md § RecordSyncResult — one READ result per non-skip source
+      // record, carrying the source data and the engine's prior shadow for diff display.
+      results.push({
+        entity: sourceMember.entity,
+        action: "read",
+        sourceId: record.id,
+        targetConnectorId: "",
+        targetId: record.id,
+        sourceData: canonical,
+        sourceShadow: existingShadow ? fieldDataToRecord(existingShadow) : undefined,
+      });
 
       const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields);
 
@@ -1217,8 +1258,10 @@ export class SyncEngine {
         }
         if (dispatchResult.type === "skip") continue;
 
+        // Spec: specs/sync-engine.md § RecordSyncResult — capture before/after payloads.
+        const beforeData = targetShadow ? fieldDataToRecord(targetShadow) : undefined;
         outcomes.push({
-          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId },
+          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, after: dispatchResult.after },
           shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
           txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: canonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
         });

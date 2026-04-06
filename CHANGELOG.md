@@ -13,6 +13,17 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Added
+- `RecordSyncResult` now carries structured payload fields: `sourceData` (source record after inbound mapping), `sourceShadow` (engine's prior shadow for diff display), `after` (canonical values written to the target), and `before` (target's pre-write shadow for UPDATE events).  All fields are optional — callers that don't use them are unaffected.
+- New `action: "read"` variant on `SyncAction` / `RecordSyncResult`.  One READ result is prepended per non-echo-detected source record per ingest pass, before any dispatch results.
+- `OnboardResult.inserts: RecordSyncResult[]` — individual fanout INSERT records from `onboard()`, eliminating the need for callers to back-query `transaction_log`.
+- `demo/run.ts` now prints changed field keys alongside UPDATE log lines.
+
+### Changed
+- Browser playground: `emitEvents()` reads `before`/`after`/`sourceData`/`sourceShadow` directly from `RecordSyncResult` — no longer calls `captureSourceShadow()` or queries shadow_state before each ingest.
+- Browser playground: onboard INSERT events now come from `onboardResult.inserts` instead of a `transaction_log` back-query.
+- `InMemoryConnector` no longer implements an internal activity log (`ActivityLogEntry`, `getActivityLog()`, `clearActivityLog()` removed).
+
 ### Changed
 - `plans/` reorganised into subsystem folders: `plans/demo/` for CLI demo runner plans, `plans/playground/` (new) for browser playground plans, `plans/meta/` trimmed to genuinely cross-cutting concerns only.
 

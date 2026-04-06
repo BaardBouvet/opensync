@@ -368,17 +368,63 @@ class SyncEngine {
 `ingest()` result:
 
 ```typescript
+// Spec: § RecordSyncResult
+type SyncAction = "read" | "insert" | "update" | "skip" | "defer" | "error";
+
+interface RecordSyncResult {
+  entity:            string;
+  action:            SyncAction;
+  sourceId:          string;
+  targetConnectorId: string;
+  targetId:          string;
+  error?:            string;
+  // ── Payload fields ────────────────────────────────────────────────────────
+  /** READ: source record field values after inbound mapping.  Present for every
+   *  non-skip result (one READ per unique sourceId per ingest pass). */
+  sourceData?:   Record<string, unknown>;
+  /** READ: engine's last known field values for the source record (shadow_state
+   *  at the start of this ingest pass, with __-prefixed meta keys stripped). */
+  sourceShadow?: Record<string, unknown>;
+  /** INSERT/UPDATE: resolved canonical field values written to the target. */
+  after?:  Record<string, unknown>;
+  /** UPDATE: target's previous field values from shadow_state before the write. */
+  before?: Record<string, unknown>;
+}
+
 interface IngestResult {
   channelId:   string;
   connectorId: string;
-  records: Array<{
-    entity:            string;
-    action:            "insert" | "update" | "skip" | "defer" | "error";
-    sourceId:          string;
-    targetConnectorId: string;
-    targetId:          string;
-    error?:            string;
-  }>;
+  records:     RecordSyncResult[];
+  snapshotAt?: number;  // collectOnly only — pass to discover()
+}
+```
+
+### § RecordSyncResult.action semantics
+
+| action | Meaning | Populated fields |
+|--------|---------|-----------------|
+| `"read"` | Engine read a source record that differs from its last known state (`targetConnectorId` = `""`, `targetId` = `sourceId`). One per unique non-skip `sourceId` per ingest pass. | `sourceData`, `sourceShadow?` |
+| `"insert"` | A new record was written to a target connector. | `after` |
+| `"update"` | An existing target record was updated. | `before`, `after` |
+| `"skip"` | No write was needed — incoming data already matches shadow state. | — |
+| `"defer"` | Association could not be remapped yet; a deferred row was written for retry. | — |
+| `"error"` | A write failed. | `error` |
+
+`sourceData` and `sourceShadow` are populated by the engine using a `fieldDataToRecord` helper
+that strips `__`-prefixed meta entries (e.g. `__assoc__`) from `FieldData` and extracts `.val`
+from each remaining entry.  `before` is populated from the *target* connector's pre-write shadow state, not the source shadow.
+
+`onboard()` result:
+
+```typescript
+interface OnboardResult {
+  linked:         number;
+  shadowsSeeded:  number;
+  uniqueQueued:   number;
+  /** Individual fanout INSERT records produced during onboarding.
+   *  Each entry carries `action: "insert"`, `sourceId` (source external ID),
+   *  `targetConnectorId`, `targetId` (newly assigned ID), and `after` (canonical data). */
+  inserts: RecordSyncResult[];
 }
 ```
 
