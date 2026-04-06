@@ -5,5 +5,4 @@ demo/data/
 
 # sql.js WASM files — generated at build time by vite.config.ts; do not commit
 playground/public/sql-wasm*.wasm
-plans/internal/
 
