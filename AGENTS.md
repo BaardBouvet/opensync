@@ -89,9 +89,11 @@ bun test packages/sdk/
 - **During development:** add concise bullets under `## [Unreleased]`, grouped under `### Added`, `### Fixed`, or `### Changed`. One bullet per thing; keep it short.
 - **When cutting a release:** distill the `[Unreleased]` bullets into a polished release entry with:
   - A short intro paragraph (1–3 sentences) summarising the theme of the release.
-  - Named sub-sections — use whichever of these apply and omit the rest:
-    `### Highlights`, `### New Features`, `### Improvements`, `### Fixes`, `### Playground`, `### Testing & Quality`.
-  - One `- **Bold label** — one-sentence description.` bullet per item under each sub-section.
+  - Named component sections — use whichever of the three core components had changes and
+    omit the rest: `### Sync Engine`, `### Browser Playground`, `### Connector SDK`.
+  - Within each component, add sub-sections as needed: `#### Added`, `#### Fixed`,
+    `#### Testing & Quality`. Omit empty sub-sections.
+  - One `- **Bold label** — one-sentence description.` bullet per item.
   - Remove all the temporary working notes. See `[0.2.0]` as the canonical example of the finished style.
 
 **Bug-fix discipline (TDD):**

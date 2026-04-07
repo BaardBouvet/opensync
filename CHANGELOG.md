@@ -10,73 +10,75 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ---
 
+## [Unreleased]
+
+---
+
 ## [0.2.0] — 2026-04-07
 
 The field-mapping pipeline release. The engine now has a complete, OSI-mapping-compatible
 transformation layer between raw connector records and the canonical model. A new `array-demo`
-playground scenario exercises the headline features — webshop purchases with nested line items
-syncing bidirectionally with a flat ERP — and a clutch of engine correctness fixes make the
-whole stack more reliable.
+playground scenario exercises the headline features end-to-end — webshop purchases with nested
+line items syncing bidirectionally with a flat ERP.
 
-### Highlights
+### Sync Engine
 
-- **Array expansion and collapse** — source records with JSON array fields expand into
-  individual child entity records on ingest (`array_path`, `element_key`, `scalar: true`).
-  Changes from flat connectors write back to the correct element in the parent array via
-  `array_parent_map`. Multi-level chains, element filters, and three ordering strategies
-  (CRDT ordinal, CRDT linked-list, `order_by`) are all supported.
+- **Array expansion and collapse** — JSON array fields expand into individual child entity
+  records on ingest (`array_path`, `element_key`, `scalar: true`). Changes from flat
+  connectors write back to the correct element via `array_parent_map`. Multi-level chains,
+  element filters, and three ordering strategies (CRDT ordinal, CRDT linked-list, `order_by`)
+  are all supported.
 - **Transitive identity closure** — `discover()` and `_resolveCanonical()` now use a
-  union-find algorithm. Records linked pairwise (A=B by email, B=C by taxId) are correctly
-  collapsed into one entity regardless of chain length.
-- **Association predicate mapping** — `assocMappings` on a channel member translates local
-  predicate names to a canonical routing key (e.g. CRM `companyId` and ERP `orgId` both map
-  to `companyRef`). Each target receives its own predicate name; the canonical key is never
-  stored in shadow state.
-
-### New Features
-
-- **Field expressions** — `expression` and `reverseExpression` on a mapping entry compute or
-  combine canonical fields from the raw source record (forward) and decompose canonical fields
-  back into multiple connector fields (reverse).
-- **Normalize** — a per-field `normalize` function applied to both sides of the noop diff
-  prevents precision-loss connectors (phone formatting, float rounding, date truncation) from
-  triggering infinite update loops.
-- **Defaults** — `default` (static value) and `defaultExpression` (function of the partial
-  canonical record) fill absent or null source fields during the forward pass.
-- **Atomic field groups** — the `group` label on related mapping entries ensures they resolve
-  from the same winning source, preventing incoherent mixes like ERP winning `street` while
-  CRM wins `city`.
-- **Reverse-required guard** — `reverseRequired: true` suppresses dispatch to a target
-  connector when a named field is absent after outbound mapping.
+  union-find algorithm; records linked pairwise (A=B by email, B=C by taxId) collapse into
+  one entity regardless of chain length.
+- **Compound identity groups** — `identityGroups` replaces `identityFields` for
+  AND-within-group / OR-across-groups semantics; all fields in a group must match
+  simultaneously.
+- **Association predicate mapping** — `assocMappings` translates local predicate names to a
+  canonical routing key so each system receives its own name (e.g. CRM `companyId` and ERP
+  `orgId` both map to `companyRef`).
+- **Field expressions** — `expression` / `reverseExpression` compute or combine canonical
+  fields from raw source records (forward) and decompose them back into connector fields
+  (reverse).
+- **Normalize** — a per-field `normalize` function on both sides of the noop diff prevents
+  precision-loss connectors (phone formatting, float rounding) from causing infinite update
+  loops.
+- **Defaults** — `default` (static) and `defaultExpression` (function of partial canonical)
+  fill absent or null source fields during the forward pass.
+- **Atomic field groups** — the `group` label ensures related fields (e.g. an address block)
+  all resolve from the same winning source.
+- **Reverse-required guard** — `reverseRequired: true` suppresses dispatch when a named field
+  is absent after outbound mapping.
 - **Resolution strategies** — `bool_or` latches a field to `true` once any source sets it
-  truthy (useful for deletion flags). `resolve` accepts an arbitrary per-field reducer function.
-- **Compound identity groups** — `identityGroups` replaces `identityFields` for AND-within-
-  group / OR-across-groups semantics; all fields in a group must match simultaneously.
-- **Target-centric noop suppression** — a new `written_state` table records field values last
-  written per target connector; outbound dispatches are suppressed when nothing has changed
-  from the target's perspective, even if the canonical record changed.
-- **`RecordSyncResult` payloads** — results now carry `sourceData`, `sourceShadow`, `before`,
-  `after`, and association arrays. Association-only changes (contact moves company, fields
-  unchanged) now produce a visible `"read"` result.
+  truthy; `resolve` accepts an arbitrary per-field reducer function.
+- **Target-centric noop suppression** — `written_state` table records values last written per
+  target connector; dispatches are suppressed when nothing has changed from the target's
+  perspective.
+- **`RecordSyncResult` payloads** — results carry `sourceData`, `sourceShadow`, `before`,
+  `after`, and association arrays; association-only changes now produce a visible `"read"`
+  result.
 
-### Fixes
+#### Fixed
 
 - `onboard()` step 1b now includes remapped associations in fanout INSERTs, eliminating bogus
   empty-looking UPDATE events during warmup.
 - `onboard()` step 1 pre-fetches each side's associations before seeding shadow state, fixing
   spurious READ + UPDATE events for records with associations.
-- Removed warmup `{ fullSync: true }` ingest pass from `startEngine()`; it was a compensating
-  workaround for the onboard association bug and is no longer needed.
-- Records with empty canonical data (`{}`) now fan out correctly to target connectors; the
-  zero-key noop guard no longer fires for brand-new INSERTs.
-- Engine child identity link — array-expanded children now have their source connector ID
-  recorded in `identity_map` and a `shadow_state` row written.
-- `_resolveCanonical` now searches shadow state across all entity names used by other channel
-  members, fixing silent duplicate canonicals when connectors use different entity names.
-- Playground Ctrl/Cmd+Enter to save was silently swallowed in both the YAML config editor and
-  the JSON record editor; custom save bindings are now registered before `defaultKeymap`.
+- Removed the warmup `{ fullSync: true }` ingest pass; it was a compensating workaround for
+  the onboard association bug and is no longer needed.
+- Records with empty canonical data (`{}`) now fan out correctly; the zero-key noop guard no
+  longer fires for brand-new INSERTs.
+- Array-expanded children now have their source connector ID recorded in `identity_map` and a
+  `shadow_state` row written, fixing empty order-line cards in the playground.
+- `_resolveCanonical` now searches across all entity names used by other channel members,
+  fixing silent duplicate canonicals when connectors use different entity names.
 
-### Playground
+#### Testing & Quality
+
+- T42–T46: regression guards for onboard association bugs, empty canonical fanout.
+- NA2 updated, NA11–NA12 added: source-child identity link and cross-entity-name lookup.
+
+### Browser Playground
 
 - **`array-demo` scenario** — live end-to-end demo of array expansion/collapse; sub-object
   cards are read-only with a `⊂ entity.arrayPath` annotation and a `↑ parent: <id>` badge
@@ -85,24 +87,15 @@ whole stack more reliable.
   countdown bar and a two-phase flash (edited card instantly; synced copies ~800 ms later).
 - **Lineage diagram** — array-source entity labels, parent-field pills, expression fan-in
   arrows, `(expression)` placeholder pills, and a resolver `ƒ` badge on canonical chips.
-- **Association diffs in event log** — association changes render as diff rows; an
-  association-only change is no longer shown as "(no field changes)".
+- **Association diffs in event log** — association changes render as diff rows alongside field
+  changes; association-only changes are no longer shown as "(no field changes)".
 - **UI polish** — tab activity dots, alphabetical column order, resizable shadow panel, flash
   fix for sub-object watermarks.
 
-### Testing & Quality
+#### Fixed
 
-- T42: regression guard for onboard step 1b missing-association fanout INSERT.
-- T43: regression guard for onboard step 1 missing `__assoc__` sentinel in shadow seed.
-- T44: association-only change produces separate before/after association arrays in result.
-- T45: cross-predicate association rename path (CRM `companyId` → canonical → ERP `orgId`).
-- T46: empty canonical data record fans out correctly on first INSERT.
-- NA2 updated, NA11–NA12 added: source-child identity link and cross-entity-name canonical
-  lookup in array channels.
-
----
-
-## [Unreleased]
+- Ctrl/Cmd+Enter to save was silently swallowed in the YAML config editor and JSON record
+  editor; custom bindings are now registered before `defaultKeymap`.
 
 ---
 
