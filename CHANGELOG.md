@@ -11,7 +11,67 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ---
 
+## [0.2.0] — 2026-04-07
+
+### Fixed
+
+- **Engine — array sub-object cards were empty in the playground.** The engine now records
+  the source connector's child external ID in `identity_map` and writes a `shadow_state` row
+  (entity = logical child entity name) for each expanded array element. This makes
+  `getChannelIdentityMap` return a non-null slot for array-source members so the cluster view
+  renders webshop order-line cards with their actual field values.
+- **Engine — identity matching failed across channels with different entity names.**
+  `_resolveCanonical` now searches `shadow_state` across all entity names used by other channel
+  members (not just the source member's own entity). Without this, connectors using different
+  entity names (e.g. `order_lines` vs `orderLines`) silently skipped identity matching and
+  created duplicate canonical IDs instead of linking correctly.
+- **Playground — ERP orderLines were missing on boot.** The ERP seed now includes an explicit
+  `orderLines: []` entry so the in-memory connector registers the entity definition. Records
+  are populated by the engine from webshop expansion during the warmup ingest pass.
+- **Playground — array-demo collapse wrote wrong fields back to webshop.** The webshop member's
+  `outbound` field mapping had `source`/`target` swapped. `applyMapping` outbound reads
+  `data[m.target]` (canonical name) and writes `result[m.source]` (connector name). With the
+  mapping inverted only `sku` (same name on both sides) was ever written back to the purchase's
+  `lines` array; `quantity`, `linePrice`, and `purchaseRef` were silently dropped on every
+  ERP→webshop collapse.
+- **Playground — array sub-object cards flashed on every poll tick.** `updateWatermarks()`
+  only covers records that appear in `snapshotFull()` (real entities). Synthesized sub-object
+  records never appeared there, so `lastWatermarks` had no entry and `prevWm === undefined`
+  every tick. Fixed by writing the watermark into `lastWatermarks` immediately after each
+  card render in the cluster loop.
+
+### Added
+
+- **Playground — parent record link on array sub-object cards.** Each webshop `order_lines`
+  card now shows a teal `↑ purchases: <id>` badge that navigates to and highlights the parent
+  `purchases` record, matching the association-badge interaction pattern.
+- **Playground — tab activity dots.** Non-active channel tabs show a pulsing green dot when
+  they contain new or updated records since the last render pass. The dot clears immediately
+  when the tab is clicked. This makes it easy to notice that editing a `purchases` record
+  propagates to the `order-lines` channel.
+- **Playground — column order is now alphabetical by connector ID.** Previously the display
+  order was inherited from the engine's ingest ordering (which may differ between channels).
+  Columns are now sorted by `connectorId` for visual consistency across channel tabs.
+- **Playground — array sub-object cards are read-only.** The Edit and Delete buttons are
+  hidden on cards produced by array expansion. In their place a small annotation
+  `⊂ <entity>.<arrayPath>` is shown, with a tooltip explaining that the parent record should
+  be edited. The `+ New` button is also hidden in the column header.
+- **Playground — shadow_state detail panel is resizable.** A 5 px drag handle between the
+  metadata table and the field detail panel in the `shadow_state` dev-tools tab allows the
+  right panel width to be adjusted (160–600 px).
+
+### Changed
+
+- **Playground array-demo scenario** now uses `identityGroups: [{ fields: ["orderRef", "lineNo"] }]`
+  (compound AND group) instead of `identityFields: ["orderRef", "lineNo"]` (two separate
+  single-field OR groups). Both fields must match simultaneously to link records; this
+  prevents `L01` from matching across different orders.
+
+---
+
 ## [Unreleased]
+
+### Fixed
 
 ### Added
 
@@ -34,6 +94,15 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
   parent-field pills with `↑` suffix and dashed connector lines, `(expression)` placeholder
   pills, expression fan-in arrows, and resolver `ƒ` badge on canonical chips.
   Spec: `specs/playground.md §11.12–11.13`.
+
+### Fixed
+
+- Engine: removed `node:crypto` dependency from `core/array-expander.ts`; replaced with a
+  pure-JS SHA-256 implementation. The module is now browser-compatible and bundles cleanly
+  with Vite. Hash output is identical — `deriveChildCanonicalId` produces the same IDs.
+- Engine: fixed two pre-existing TS7022 (`el`, `next` implicit `any`) errors in
+  `array-expander.ts` linked-list walk; fixed TS2365 operator mismatch in `conflict.ts`
+  `connectorPriorities` comparison. Both were blocking `packages/engine` type build.
 
 ### Added
 - Engine: `bool_or` per-field resolution strategy (specs/field-mapping.md §2.5). Once any source

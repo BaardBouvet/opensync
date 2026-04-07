@@ -121,6 +121,12 @@ One column per channel member (fixed width 260 px). Each header shows:
 - Count badge — the number of active (non-soft-deleted) records for that connector/entity
 - `+ New` button — opens the new-record modal (§ 6.2) for that connector/entity combination.
   The button is inline in the header, to the right of the count badge.
+  The button is hidden for array-source members (those with `arrayPath` set): sub-object
+  records cannot be created directly; they must be edited through the parent record.
+
+Column display order is sorted alphabetically by `connectorId` for visual consistency.
+The engine's internal ingest ordering (which may differ, e.g. webshop before erp for
+array-expansion channels) is unaffected.
 
 The `cluster-header-row` element is set with `column-gap: 6px` (matching the cards-row gap)
 and left/right padding that aligns its columns with the card columns below it:
@@ -176,9 +182,12 @@ the cluster view style. Column headers include count badges (§ 4.2).
 
 Each record card displays:
 - **ID badge** — the record's external ID in monospace, small font
-- **Fields table** — key/value pairs from `record.data`, two-column table layout
+- **Fields table** — key/value pairs from `record.data`, two-column table layout.
+  Array-valued fields are rendered as a static `[N items]` chip with a tooltip showing
+  up to 120 characters of the serialised value; they are not expanded inline.
 - **Association badges** — one badge per association (§ 5.3)
-- **Footer** — `modifiedAt` timestamp + action buttons (Edit / Delete / Restore)
+- **Parent record badge** — shown only on array sub-object cards (§ 5.4)
+- **Footer** — `modifiedAt` timestamp + action buttons (§ 5.5)
 
 ### § 5.2 Card states
 
@@ -202,6 +211,33 @@ association target within the same connector's store:
 
 Target lookup uses the same connector's in-memory store (same `systemId`, `targetEntity`,
 `targetId`). Cross-connector associations are not resolved in the playground.
+
+### § 5.4 Parent record badge
+
+Array sub-object cards (connector members with `arrayPath` set) display a teal pill badge
+of the form `↑ <parentEntity>: <parentId>` between the association badges and the footer.
+The badge links back to the parent record (e.g. the `purchases` record whose `lines[]`
+contains this sub-object). Clicking navigates to the parent record in the same connector
+column and highlights it with the standard highlight animation (§ 5.2).
+
+If the parent record is not found in the connector's store (transient state), the badge
+renders with the missing-target style (red, ⚠ prefix, non-clickable).
+
+### § 5.5 Footer and action buttons
+
+Cards that are **not** array sub-objects show Edit and Delete buttons (or Restore for
+soft-deleted records). Array sub-objects are read-only; their footer shows a small italic
+annotation `⊂ <parentEntity>.<arrayPath>` in place of the action buttons, with a tooltip
+explaining that the parent record must be edited to change the sub-object.
+
+### § 5.6 Flash tracking
+
+The flash animation (§ 5.2) is driven by comparing `rec.watermark` against
+`lastWatermarks` — a module-level map updated after each render.  For records backed by
+real connector entities, watermarks are written by `updateWatermarks()` from `snapshotFull()`.
+For synthesized array sub-object records (which never appear in `snapshotFull()`), the
+watermark is stored directly into `lastWatermarks` after each card render in the cluster loop,
+preventing unwanted flash on every poll tick.
 
 ---
 
@@ -320,6 +356,10 @@ in the right panel instead.
 a metadata row is clicked, the right panel shows the parsed `canonical_data` fields as
 monospace `key → value` rows (values in blue). The panel title shows
 `connectorId / entityName / externalId…` (8-char prefix).
+
+The split between `shadow-left` and `shadow-right` is user-resizable via a 5px drag
+handle (`#shadow-resizer`) between the two panels (160–600 px right panel width,
+default 320 px).
 
 **Selection persistence:** The selected row is tracked by its composite key
 (`connector_id / entity_name / external_id`), not by DOM reference. Re-renders (triggered
@@ -507,6 +547,18 @@ Switching scenarios or resetting respects the current toggle state: if auto mode
 when the new engine boots, it is immediately paused after `startEngine()` returns and the
 countdown bar remains hidden.
 
+### § 10.4 Tab activity indicators
+
+When a non-active channel tab receives new or updated records (detected by comparing
+connector watermarks against the values stored from the previous render pass), a small
+pulsing green dot (`.tab-activity-dot`) appears on that tab. The dot is computed at the
+start of each `refresh()` call, before watermarks are updated, so it reflects changes
+made since the last visible render.
+
+Switching to a channel tab clears its activity dot immediately. The active channel never
+shows a dot. Array-source members check the parent entity for watermark changes (since the
+sub-object records are synthesized and never stored in the connector's entity map).
+
 ---
 
 ## § 11 Field Lineage Diagram
@@ -609,8 +661,11 @@ time the user opens the `lineage` tab.
 ### § 11.11 Array-expansion channels — lifecycle skip
 
 Channels that contain at least one member with `arrayPath` skip the
-collect → discover → onboard lifecycle step. They are bootstrapped on the first regular
-poll tick instead. `buildSeedClusters` returns `[]` for these channels.
+collect → discover → onboard lifecycle step. Instead, after all non-array channels are
+onboarded, a warmup ingest pass runs for each member of every array channel (webshop first,
+per member declaration order, to ensure `array_parent_map` rows are written before the flat
+ERP member ingests). This pass is synchronous at boot so the initial render already has
+cluster data. `buildSeedClusters` returns `[]` for these channels.
 
 ```ts
 const isArrayChannel = (ch: ChannelConfig): boolean =>
@@ -620,7 +675,9 @@ const isArrayChannel = (ch: ChannelConfig): boolean =>
 `FIXED_SYSTEMS` may include systems (e.g. `webshop`) that are not participants of every
 channel — unused connectors simply return empty records on `read()`.
 
----
+The ERP `orderLines` entity seed starts empty; it is fully populated by the engine from
+webshop expansion during the warmup pass. The `orderLines` entity key must still be present
+in the seed (as an empty array) so the in-memory connector registers its entity definition.
 
 ### § 11.12 Array-source entity labels in lineage diagram
 
