@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create GitHub Releases
+  pages: write      # deploy to GitHub Pages
+  id-token: write   # authenticate to GitHub Pages
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a release in progress
+
+jobs:
+  # ── Preflight: type-check + tests ───────────────────────────────────────
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Type-check
+        run: bun run tsc --noEmit
+
+      - name: Test
+        run: bun test
+
+  # ── Build playground (smoke-test the Vite build) ────────────────────────
+  build-playground:
+    name: Build playground
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build
+        run: cd playground && bun run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: playground/dist
+
+  # ── Deploy playground to GitHub Pages ──────────────────────────────────
+  deploy-playground:
+    name: Deploy playground to GitHub Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-playground
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ── Create GitHub Release ───────────────────────────────────────────────
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [preflight, build-playground]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog notes
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract the section matching ## [VERSION] from CHANGELOG.md
+          NOTES=$(awk -v ver="$VERSION" '
+            /^## \[/ { if (found) exit; if (index($0, ver)) { found=1; next } }
+            found { print }
+          ' CHANGELOG.md)
+          {
+            echo "notes<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ${{ steps.changelog.outputs.notes }}
+
+            ---
+            **Playground:** ${{ vars.PAGES_URL || 'https://github.com/${{ github.repository }}/deployments/github-pages' }}
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
