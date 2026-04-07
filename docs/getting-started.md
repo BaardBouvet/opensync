@@ -150,8 +150,9 @@ With OpenSync, you offload the infrastructure. You expose your API's schema. The
 ## Next Steps
 
 1. **[Building Your First Connector](./connectors/guide.md)** — detailed walkthrough with examples
-2. **[Connector Reference](./connectors/reference.md)** — full API documentation
-3. **[Advanced Patterns](./connectors/advanced.md)** — webhooks, error handling, semantic sources, idempotency
+2. **[Embedding the Engine in Your Application](./using-the-engine.md)** — use the engine API directly from JavaScript/TypeScript
+3. **[Connector Reference](./connectors/reference.md)** — full API documentation
+4. **[Advanced Patterns](./connectors/advanced.md)** — webhooks, error handling, semantic sources, idempotency
 
 ---
 

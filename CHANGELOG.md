@@ -13,6 +13,13 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 
 ## [Unreleased]
 
+### Added
+- Engine: transitive closure identity matching. `discover()`, `addConnector()`, and `_resolveCanonical()` now use a union-find (connected-components) algorithm instead of a composite key. Records linked pairwise (A=B via email, B=C via taxId) are now correctly detected as one entity (A=B=C), regardless of chain length. Ambiguous components (two records from the same connector in the same group) are placed in `uniquePerSide` with a console warning.
+- Engine: `identityGroups` channel config key. Compound AND-within-group, OR-across-groups identity semantics. `identityGroups: [{ fields: [firstName, lastName, dob] }]` requires all three fields to match. Internally `identityFields` is expanded to one single-field group per field. `identityGroups` takes precedence when both are present.
+- Engine: `dbFindCanonicalByGroup()` query helper for compound identity group lookups (AND-chained `JSON_EXTRACT` conditions in one SQL query).
+- Engine: `dbMergeCanonicals()` now deletes conflicting `identity_map` rows before updating, preventing `PRIMARY KEY (canonical_id, connector_id)` constraint violations when two canonicals both have entries for the same connector.
+- `IdentityGroup` type exported from `@opensync/engine`.
+
 ### Changed
 - Some ecosystem plan files moved to the private internal submodule.
   Public plan cross-references updated accordingly.

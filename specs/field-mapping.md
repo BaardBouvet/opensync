@@ -113,7 +113,7 @@ is applied when writing back. Both have access to the full canonical record, not
 A `reverseExpression` that returns an object can set multiple source fields at once (one-to-many
 decomposition).
 
-**Status: implemented (OSI-mapping §5 "Field expressions").**
+**Status: designed, not yet implemented (OSI-mapping §5 "Field expressions"). See `plans/engine/PLAN_FIELD_EXPRESSIONS.md`.**
 
 ---
 

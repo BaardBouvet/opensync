@@ -150,17 +150,25 @@ Optional channel metadata:
 ```yaml
 channels:
   - id: contacts
-    # identityFields: canonical field names used to match records across connectors
-    # by shared field value (e.g. same email address = same real-world entity).
-    # See identity.md for full semantics and trade-offs.
+    # identityFields: OR-per-field matching. Each field is its own group.
+    # Records sharing a value on ANY listed field are linked (transitive).
+    # See identity.md for full semantics.
     identityFields:
       - email
+      - taxId
+
+    # identityGroups: compound (AND-within-group, OR-across-groups). Takes precedence
+    # over identityFields when both are present.
+    # identityGroups:
+    #   - fields: [email]
+    #   - fields: [firstName, lastName, dob]
+
     conflict_resolution: lww        # last-write-wins (future)
     circuit_breaker:                # future
       volume_threshold: 100
 ```
 
-`identityFields` is the primary configuration point for field-value-based record matching. When set, the engine queries shadow state for existing records with matching canonical field values before allocating a new UUID for an incoming record. This prevents duplicates during initial onboarding and catches connectors that don't preserve each other's external IDs across restarts.
+`identityFields` / `identityGroups` are the primary configuration point for field-value-based record matching. When set, the engine uses a union-find (connected-components) algorithm to identify records that represent the same real-world entity across connectors, supporting transitive chains (A=B via email, B=C via taxId → A=B=C). See `specs/identity.md § Field-Value-Based Matching` for full semantics, trade-offs, and the compound-group (`identityGroups`) syntax.
 
 ---
 

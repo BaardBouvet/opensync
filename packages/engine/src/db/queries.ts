@@ -44,6 +44,15 @@ export function dbLinkIdentity(
 }
 
 export function dbMergeCanonicals(db: Db, keepId: string, dropId: string): void {
+  // Delete rows from drop that would violate the (canonical_id, connector_id) PK
+  // if updated to keep. This happens when both canonical IDs already have a link
+  // to the same connector (e.g. after onboarding inserted synthetic records).
+  db.prepare(
+    `DELETE FROM identity_map
+     WHERE canonical_id = ? AND connector_id IN (
+       SELECT connector_id FROM identity_map WHERE canonical_id = ?
+     )`,
+  ).run(dropId, keepId);
   db.prepare("UPDATE identity_map SET canonical_id = ? WHERE canonical_id = ?").run(keepId, dropId);
   db.prepare("UPDATE shadow_state SET canonical_id = ? WHERE canonical_id = ?").run(keepId, dropId);
 }
@@ -68,6 +77,39 @@ export function dbFindCanonicalByField(
        LIMIT 1`,
     )
     .get(entityName, excludeConnectorId, fieldName, raw)?.canonical_id;
+}
+
+/**
+ * Find a canonical_id where ALL fields in the group match the given values.
+ * For a single-field group this is equivalent to dbFindCanonicalByField.
+ * Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §3.2
+ */
+export function dbFindCanonicalByGroup(
+  db: Db,
+  entityName: string,
+  excludeConnectorId: string,
+  fields: string[],
+  values: unknown[],
+): string | undefined {
+  if (fields.length === 1) {
+    return dbFindCanonicalByField(db, entityName, excludeConnectorId, fields[0]!, values[0]);
+  }
+  const conditions = fields.map(() => "AND JSON_EXTRACT(canonical_data, '$.' || ? || '.val') = ?").join("\n         ");
+  const params: unknown[] = [entityName, excludeConnectorId];
+  for (let i = 0; i < fields.length; i++) {
+    const v = values[i];
+    const raw = typeof v === "string" || typeof v === "number" || typeof v === "boolean" ? v : JSON.stringify(v);
+    params.push(fields[i], raw);
+  }
+  return db
+    .prepare<{ canonical_id: string }>(
+      `SELECT canonical_id FROM shadow_state
+       WHERE entity_name = ?
+         AND connector_id != ?
+         ${conditions}
+       LIMIT 1`,
+    )
+    .get(...(params as [unknown, ...unknown[]]))?.canonical_id;
 }
 
 export function dbGetAllCanonicals(db: Db, connectorIds: string[]): string[] {

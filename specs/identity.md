@@ -76,7 +76,7 @@ The connector never decides whether to split or combine — that's the engine's 
 
 See [discovery.md](discovery.md) for how existing records across systems are matched and linked during onboarding.
 
-## Field-Value-Based Matching (`identityFields`)
+## Field-Value-Based Matching (`identityFields` and `identityGroups`)
 
 Beyond tracking IDs that the engine itself inserts, the engine can match records across connectors using shared field values — for example, recognising that a HubSpot contact and a Fiken customer with the same email address are the same real-world person.
 
@@ -95,5 +95,45 @@ When `identityFields` is set on a channel, the engine queries `shadow_state` for
 
 **Trade-offs:**
 - Fields used for matching must be stable and trustworthy across systems. Email is a good candidate; names and phone numbers are not (formatting differences cause false misses).
-- Multi-field identity (`email` + `organizationId`) reduces false positives but means both fields must match — a contact that has one but not the other will not be linked.
-- Transitive closure (A matches B via email, B matches C via tax ID, therefore A=C) is not currently supported. Each incoming record is matched against existing shadow state directly.
+- Multi-field identity (`email` + `organizationId`) reduces false positives but means both fields must match — see `identityGroups` below for AND-within-group, OR-across-groups semantics.
+- Transitive closure is supported: A matches B via email, B matches C via tax ID → A = B = C. See § Transitive Closure below.
+
+### Transitive Closure
+
+Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
+
+Identity fields are matched using a **union-find (connected-components)** algorithm, not a composite key. Each `identityField` (or `identityGroup`) is processed independently. Records that share a value on ANY identity field or group are unioned into the same component, even if they share no OTHER field values.
+
+Example — three systems A, B, C with `identityFields: [email, taxId]`:
+
+| Record | email               | taxId |
+|--------|---------------------|-------|
+| A/a1   | alice@example.com   | —     |
+| B/b1   | alice@example.com   | 123   |
+| C/c1   | —                   | 123   |
+
+A and B share `email` → unioned. B and C share `taxId` → unioned. Therefore A = B = C, even though A and C share no field directly. All three get the same canonical UUID.
+
+**Blank values are skipped**: if a field is absent or empty after normalisation (`toLowerCase().trim()`), it does not participate in matching for that group.
+
+**Ambiguity rule**: if two records from the _same_ connector end up in the same component (intra-connector duplicates bridged via an identity field to a record in another connector), the engine cannot determine which record to link. The entire component is placed in `uniquePerSide` with a console warning. This avoids silently creating incorrect links.
+
+### Compound Identity Groups (`identityGroups`)
+
+Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
+
+For AND-semantics — requiring ALL fields in a tuple to match — use `identityGroups`:
+
+```yaml
+channels:
+  - id: contacts
+    # Group 1: email alone (OR-able with group 2)
+    # Group 2: all three of firstName + lastName + dob must match together
+    identityGroups:
+      - fields: [email]
+      - fields: [firstName, lastName, dob]
+```
+
+A record satisfies a group only when **all** fields in that group are present and non-empty. Groups are OR-ed across: satisfying ANY group links the records. Within each group the AND-semantics prevents false positives from partial field matches.
+
+`identityGroups` takes precedence over `identityFields` when both are present (a warning is emitted). Internally, `identityFields` is expanded to one single-field group per field before matching — so `identityFields: [email, taxId]` is equivalent to `identityGroups: [{ fields: [email] }, { fields: [taxId] }]`.

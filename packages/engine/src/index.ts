@@ -26,6 +26,7 @@ export type {
   FieldMapping,
   FieldMappingList,
   AssocPredicateMapping,
+  IdentityGroup,
 } from "./config/loader.js";
 
 export { openDb } from "./db/index.js";

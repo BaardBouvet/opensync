@@ -7,7 +7,9 @@ import {
   MappingsFileSchema,
   type MappingEntry,
   type FieldMappingEntry,
+  type IdentityGroup,
 } from "./schema.js";
+export type { IdentityGroup } from "./schema.js";
 import type {
   Connector,
   ConnectorContext,
@@ -46,6 +48,10 @@ export interface ChannelConfig {
   id: string;
   members: ChannelMember[];
   identityFields?: string[];
+  /** Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
+   * Compound identity groups. Each group matches as an AND-tuple; groups are OR-ed across.
+   * Takes precedence over identityFields when both are present. */
+  identityGroups?: IdentityGroup[];
 }
 
 /** A resolved connector instance — plugin loaded, context wired, entities retrieved. */
@@ -112,7 +118,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
     // mappings/ is optional if no channels are configured
   }
 
-  const allChannelDefs: Array<{ id: string; identityFields?: string[] }> = [];
+  const allChannelDefs: Array<{ id: string; identityFields?: string[]; identityGroups?: IdentityGroup[] }> = [];
   const allMappingEntries: MappingEntry[] = [];
 
   for (const filePath of mappingFiles) {
@@ -131,7 +137,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 
     if (result.data.channels) {
       for (const ch of result.data.channels) {
-        allChannelDefs.push({ id: ch.id, identityFields: ch.identityFields });
+        allChannelDefs.push({ id: ch.id, identityFields: ch.identityFields, identityGroups: ch.identityGroups });
       }
     }
     if (result.data.mappings) {
@@ -148,6 +154,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       id: chDef.id,
       members: [],
       identityFields: chDef.identityFields,
+      identityGroups: chDef.identityGroups,
     });
   }
 

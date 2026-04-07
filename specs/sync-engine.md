@@ -10,29 +10,47 @@ implementation-ready.
 
 ## Setup
 
-The engine is constructed with an `EngineConfig`:
+The engine is constructed with a `ResolvedConfig` and a `Db` handle:
 
 ```typescript
-interface EngineConfig {
-  connectors: ConnectorInstance[];     // resolved connector instances
-  channels:   ChannelConfig[];         // channel topology + field mappings
-  eventBus?:  EventBus;                // in-process event emission (optional)
-  conflict?:  ConflictConfig;          // global conflict resolution rules
-  circuitBreaker?: CircuitBreaker;     // override default breaker settings
-  readTimeoutMs?:  number;             // max ms for a read() call, default 30 000
+const db     = openDb('sync-state.db');   // ':memory:' for in-process use
+const engine = new SyncEngine(config, db);
+// optional third argument: webhookBaseUrl string for inbound webhook routing
+```
+
+`loadConfig(rootDir)` reads `opensync.json` and the `mappings/` directory and returns
+a `ResolvedConfig`. For embedded use, construct `ResolvedConfig` directly:
+
+```typescript
+interface ResolvedConfig {
+  connectors:    ConnectorInstance[];
+  channels:      ChannelConfig[];
+  conflict:      ConflictConfig;
+  readTimeoutMs: number;               // max ms for a read() call; 30 000 is a safe default
+}
+
+interface ConnectorInstance {
+  id:         string;
+  connector:  Connector;               // loaded connector plugin (default export)
+  config:     Record<string, unknown>; // connector-specific config (e.g. { apiUrl: "..." })
+  auth:       Record<string, unknown>; // auth credentials — never mixed into config
+  batchIdRef: { current: string | undefined };    // always initialise to { current: undefined }
+  triggerRef: { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined };  // always initialise to { current: undefined }
 }
 
 interface ChannelConfig {
-  id:              string;
-  members:         ChannelMember[];
-  identityFields?: string[];           // canonical field names used for record matching
+  id:               string;
+  members:          ChannelMember[];
+  identityFields?:  string[];          // canonical field names used for record matching
+  identityGroups?:  IdentityGroup[];   // compound identity matching; takes precedence over identityFields
 }
 
 interface ChannelMember {
-  connectorId: string;
-  entity:      string;                 // entity name as declared in the connector
-  inbound?:    FieldMappingList;       // source → canonical renames
-  outbound?:   FieldMappingList;       // canonical → target renames
+  connectorId:    string;
+  entity:         string;              // entity name as declared in the connector
+  inbound?:       FieldMappingList;    // source → canonical renames
+  outbound?:      FieldMappingList;    // canonical → target renames
+  assocMappings?: AssocPredicateMapping[]; // declared association predicates; absent = no associations forwarded
 }
 
 interface FieldMapping {
@@ -40,10 +58,18 @@ interface FieldMapping {
   target:     string;                  // canonical field name
   direction?: "bidirectional" | "forward_only" | "reverse_only";
 }
+
+interface ConflictConfig {
+  strategy:             "lww" | "field_master";
+  fieldMasters?:        Record<string, string>;   // field → connectorId
+  connectorPriorities?: Record<string, number>;   // connectorId → priority (lower wins)
+  fieldStrategies?:     Record<string, { strategy: "coalesce" | "last_modified" | "collect" }>;
+}
 ```
 
-Every `ConnectorInstance` is created by `makeConnectorInstance()`, which wires up `ctx.http`,
-`ctx.state`, OAuth management, and the webhook base URL for that connector.
+The engine creates the SQLite schema on construction (idempotent) and wires each connector
+instance with a live `ConnectorContext` — auth, HTTP tracking, state KV store, and webhook
+URL are all resolved internally. Callers never call a separate wiring function.
 
 ---
 
@@ -345,24 +371,39 @@ value. Both are stored as JSON. This is the basis for rollback — see `rollback
 
 ## Public API
 
+## Public API
+
 ```typescript
+// Open (or create) the SQLite database file. Pass ':memory:' for in-process use.
+function openDb(path: string): Db
+
 class SyncEngine {
-  // Primary operations
-  ingest(channelId, connectorId, opts?): Promise<IngestResult>
-  processWebhookQueue(channelId, connectorId): Promise<number>   // returns processed count
+  constructor(config: ResolvedConfig, db: Db, webhookBaseUrl?: string)
+
+  // Primary sync operations
+  ingest(channelId: string, connectorId: string, opts?: {
+    collectOnly?: boolean;  // collect into shadow without fanning out
+    fullSync?:   boolean;   // ignore stored watermark, re-read all records
+  }): Promise<IngestResult>
+
+  processWebhookQueue(channelId: string, connectorId: string): Promise<number>  // returns processed count
 
   // Onboarding (see discovery.md)
-  discover(channelId): Promise<DiscoveryReport>
-  onboard(channelId, report, opts?): Promise<OnboardResult>
-  addConnector(channelId, connectorId, opts?): Promise<AddConnectorReport>
+  discover(channelId: string, snapshotAt?: number): Promise<DiscoveryReport>
+  onboard(channelId: string, report: DiscoveryReport, opts?: { dryRun?: boolean }): Promise<OnboardResult>
+  addConnector(channelId: string, connectorId: string, opts?: AddConnectorOptions): Promise<AddConnectorReport>
 
-  // Observability
-  onboardedConnectors(channelId): string[]   // connectors with cross-linked canonicals
-
-  // Lifecycle
-  start(): void                              // starts webhook server if configured
-  stop(): void
+  // Status
+  channelStatus(channelId: string): ChannelStatus
+  onboardedConnectors(channelId: string): string[]  // connectors with cross-linked canonicals
 }
+```
+
+```typescript
+type ChannelStatus = "uninitialized" | "collected" | "ready";
+// uninitialized — no shadow rows exist for this channel
+// collected     — shadow rows collected but no cross-linked identity links yet
+// ready         — at least one canonical_id is linked across 2+ connectors; incremental polling is active
 ```
 
 `ingest()` result:

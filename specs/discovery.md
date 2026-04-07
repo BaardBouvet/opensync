@@ -103,7 +103,7 @@ which connectors are participating in active sync and which are still being coll
 
 ---
 
-## `discover(channelId): Promise<DiscoveryReport>`
+## `discover(channelId, snapshotAt?): Promise<DiscoveryReport>`
 
 Reads entirely from shadow_state. Zero live connector calls. Safe to call multiple times
 without side effects.
@@ -111,15 +111,29 @@ without side effects.
 **Requires**: `ingest({collectOnly: true})` has been run for every channel member. If any
 member has no shadow_state rows, throws with a message pointing to the collect step.
 
-**Matching**: exact match on all `identityFields` (case-insensitive, whitespace-trimmed).
-A record key that appears in **2 or more** connectors → `DiscoveryReport.matched` (partial
-N-way match is supported: Alice in A+B counts even when C has no Alice).
-A record key that appears in **exactly 1** connector → `DiscoveryReport.uniquePerSide`.
+**`snapshotAt`**: pass the `snapshotAt` value from the `collectOnly` ingest results. The
+engine stores it on the returned report so that the subsequent `onboard()` call can use it
+as a watermark anchor — records written to any connector *after* this timestamp are picked up
+on the first incremental poll rather than silently swallowed.
+
+**Matching**: group-aware union-find over all `identityFields` / `identityGroups` (case-insensitive, whitespace-trimmed).
+
+Each identity group is processed independently: records sharing a group key are unioned into one connected component. Transitive closure falls out naturally — A matches B via email group, B matches C via taxId group → {A, B, C} in one component.
+
+**Blank-group skip**: if any field in a group is absent or empty for a given record, that record does not participate in that group's matching.
+
+**Match classification**:
+- Component with records from 2+ distinct connectors → `DiscoveryReport.matched`
+- Component where one connector contributes 2+ records → **ambiguous** (console warning, all placed in `uniquePerSide`)
+- Component with exactly one record → `DiscoveryReport.uniquePerSide`
+
+Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
 
 ```typescript
 interface DiscoveryReport {
   channelId:     string;
   entity:        string;
+  snapshotAt?:   number;   // ms epoch — the earliest snapshotAt across all collectOnly ingests
   matched:       DiscoveryMatch[];
   uniquePerSide: DiscoverySide[];
   summary:       Record<string, { total: number; matched: number; unique: number }>;

@@ -27,11 +27,18 @@ export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>;
 
 export const ConflictStrategySchema = z.enum(["lww", "field_master"]);
 
+export const IdentityGroupSchema = z.object({
+  fields: z.array(z.string()).min(1),
+});
+
 export const ChannelDefSchema = z.object({
   id: z.string(),
   identityFields: z.array(z.string()).optional(),
+  identityGroups: z.array(IdentityGroupSchema).optional(),
   conflict_resolution: ConflictStrategySchema.optional(),
 });
+
+export type IdentityGroup = z.infer<typeof IdentityGroupSchema>;
 
 export const ChannelsYamlSchema = z.object({
   channels: z.array(ChannelDefSchema),

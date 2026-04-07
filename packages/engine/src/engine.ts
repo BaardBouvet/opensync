@@ -12,7 +12,7 @@ import type {
   UpdateRecord,
 } from "@opensync/sdk";
 import type { Db } from "./db/index.js";
-import type { ChannelConfig, ChannelMember, ConflictConfig, ResolvedConfig } from "./config/loader.js";
+import type { ChannelConfig, ChannelMember, ConflictConfig, ResolvedConfig, IdentityGroup } from "./config/loader.js";
 import type { WiredConnectorInstance } from "./auth/context.js";
 import type { FieldData } from "./db/schema.js";
 import {
@@ -21,6 +21,7 @@ import {
   dbLinkIdentity,
   dbMergeCanonicals,
   dbFindCanonicalByField,
+  dbFindCanonicalByGroup,
   dbGetAllCanonicals,
   dbGetCanonicalsByChannelMembers,
   dbGetCanonicalFields,
@@ -463,38 +464,56 @@ export class SyncEngine {
     }
 
     const identityFields = channel.identityFields ?? [];
-    const normalise = (v: unknown): string =>
-      typeof v === "string" ? v.toLowerCase().trim() : String(v ?? "");
-    const buildKey = (r: Record<string, unknown>): string | undefined => {
-      if (!identityFields.length) return undefined;
-      return identityFields.map((f) => normalise(r[f])).join("\x01");
-    };
+    const groups = this._resolveGroups(channel);
 
-    // Spec: specs/sync-engine.md § Discover — group all records by identity key
-    // across all connectors. Any key with 2+ sides is a match; 1-of-N is unique.
-    // This handles partial N-way matches (e.g. Alice in A+B but not C).
-    const keyIndex = new Map<string, DiscoverySide[]>();
-    const matched: DiscoveryMatch[] = [];
-    const uniquePerSide: DiscoverySide[] = [];
+    // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
+    // Group-aware union-find: one pass per identity group, unioning records that share a group key.
+    // Transitive closure falls out naturally: A–B via email + B–C via taxId → {A,B,C} in one component.
 
+    // Flatten all records into a single indexed list
+    type NodeEntry = { connectorId: string; externalId: string; rawData: Record<string, unknown> };
+    const nodes: NodeEntry[] = [];
     for (const side of sides) {
       for (const r of side.records) {
-        const k = buildKey(r.canonical);
-        if (!k) {
-          uniquePerSide.push({ connectorId: side.connectorId, externalId: r.id, rawData: r.canonical });
-          continue;
-        }
-        const existing = keyIndex.get(k) ?? [];
-        existing.push({ connectorId: side.connectorId, externalId: r.id, rawData: r.canonical });
-        keyIndex.set(k, existing);
+        nodes.push({ connectorId: side.connectorId, externalId: r.id, rawData: r.canonical });
       }
     }
 
-    for (const [, keySides] of keyIndex.entries()) {
-      if (keySides.length >= 2) {
-        matched.push({ canonicalData: keySides[0]!.rawData, sides: keySides });
-      } else {
-        uniquePerSide.push(keySides[0]!);
+    const matched: DiscoveryMatch[] = [];
+    const uniquePerSide: DiscoverySide[] = [];
+
+    if (!groups.length) {
+      // No identity groups → every record is unique
+      for (const n of nodes) uniquePerSide.push({ connectorId: n.connectorId, externalId: n.externalId, rawData: n.rawData });
+    } else {
+      const components = this._unionFindComponents(nodes, groups);
+
+      for (const component of components) {
+        const connectorCounts = new Map<string, number>();
+        for (const n of component) connectorCounts.set(n.connectorId, (connectorCounts.get(n.connectorId) ?? 0) + 1);
+        const isAmbiguous = [...connectorCounts.values()].some((c) => c >= 2);
+
+        if (isAmbiguous) {
+          // Ambiguous: at least one connector contributes 2+ records to the component.
+          // Engine cannot determine which is the unique match → warn and treat all as uniquePerSide.
+          console.warn(
+            `[opensync] discover: ambiguous identity component — connector(s) ` +
+            `${[...connectorCounts.entries()].filter(([, c]) => c >= 2).map(([id]) => `"${id}"`).join(", ")} ` +
+            `each contribute multiple records. Treating all as uniquePerSide.`,
+          );
+          for (const n of component) uniquePerSide.push({ connectorId: n.connectorId, externalId: n.externalId, rawData: n.rawData });
+        } else if (connectorCounts.size >= 2) {
+          // Sort sides for deterministic canonicalData merge (§2.3)
+          const sorted = [...component].sort((a, b) => a.connectorId.localeCompare(b.connectorId));
+          // Reverse so first connector's values take priority (Object.assign last-wins)
+          const mergedData: Record<string, unknown> = {};
+          for (const n of sorted.slice().reverse()) Object.assign(mergedData, n.rawData);
+          matched.push({ canonicalData: mergedData, sides: component.map((n) => ({ connectorId: n.connectorId, externalId: n.externalId, rawData: n.rawData })) });
+        } else {
+          // Single-connector, single-record → unique
+          const n = component[0]!;
+          uniquePerSide.push({ connectorId: n.connectorId, externalId: n.externalId, rawData: n.rawData });
+        }
       }
     }
 
@@ -867,29 +886,55 @@ export class SyncEngine {
     }));
 
     const identityFields = channel.identityFields ?? [];
-    const normalise = (v: unknown): string => typeof v === "string" ? v.toLowerCase().trim() : String(v ?? "");
-    const buildKey = (r: Record<string, unknown>): string | undefined => {
-      if (!identityFields.length) return undefined;
-      return identityFields.map((f) => normalise(r[f])).join("\x01");
-    };
+    const groups = this._resolveGroups(channel);
 
-    const canonIdx = new Map<string, string>();
-    for (const [cid, fields] of canonicalMap) {
-      const k = buildKey(fields); if (k) canonIdx.set(k, cid);
-    }
-
+    // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1 / §3.1
+    // For each joiner record, collect all canonicalIds matched across all groups,
+    // then merge them into one winner. Bridges two existing canonicals if the
+    // joiner record satisfies different groups that each match a different canonical.
     const linkedEntries: AddConnectorReport["linked"] = [];
     const newFromJoiner: AddConnectorReport["newFromJoiner"] = [];
     const matchedCanonicals = new Set<string>();
 
+    const normalise = (v: unknown): string => typeof v === "string" ? v.toLowerCase().trim() : String(v ?? "");
+    const buildGroupKey = (r: Record<string, unknown>, fields: string[]): string | undefined => {
+      if (!fields.length) return undefined;
+      const parts = fields.map((f) => normalise(r[f]));
+      if (parts.some((p) => p === "")) return undefined;
+      return parts.join("\x01");
+    };
+
     for (const r of joinerRecords) {
-      const k = buildKey(r.canonical);
-      if (k && canonIdx.has(k)) {
-        const cid = canonIdx.get(k)!;
-        linkedEntries.push({ canonicalId: cid, externalId: r.id, matchedOn: identityFields });
-        matchedCanonicals.add(cid);
-      } else {
+      const found = new Map<string, true>(); // deduplicate matched canonicalIds
+      const collectedCids: string[] = [];
+
+      for (const group of groups) {
+        const k = buildGroupKey(r.canonical, group.fields);
+        if (!k) continue;
+        // Check canonical map entries for this group key
+        for (const [cid, fields] of canonicalMap) {
+          const ck = buildGroupKey(fields, group.fields);
+          if (ck === k && !found.has(cid)) {
+            found.set(cid, true);
+            collectedCids.push(cid);
+          }
+        }
+      }
+
+      if (collectedCids.length === 0) {
         newFromJoiner.push({ externalId: r.id, data: r.canonical });
+        continue;
+      }
+
+      // Merge all matched canonicals into one winner
+      const winner = collectedCids[0]!;
+      linkedEntries.push({ canonicalId: winner, externalId: r.id, matchedOn: groups.flatMap((g) => g.fields) });
+      matchedCanonicals.add(winner);
+
+      // Also add any merged-away canonicals to matchedCanonicals so they don't
+      // appear in missingInJoiner
+      for (let i = 1; i < collectedCids.length; i++) {
+        matchedCanonicals.add(collectedCids[i]!);
       }
     }
 
@@ -908,14 +953,30 @@ export class SyncEngine {
     const ts = Date.now();
     const batchId = crypto.randomUUID();
 
-    // 4. Commit links
+    // 4. Commit links (and merge any bridged canonicals)
     this.db.transaction(() => {
       for (const entry of linkedEntries) {
+        // Merge all secondary canonicals into the winner (transitive bridge via addConnector)
+        // collectedCids was local; re-derive using the entry's canonicalId as winner and check
+        // any other canonical that shares the same joiner external record.
+        // Simpler: we stored only winner in entry.canonicalId; secondary merges were tracked in
+        // matchedCanonicals. Re-run group matching inline to find them.
+        const jr = joinerRecords.find((r) => r.id === entry.externalId)!;
+        for (const group of groups) {
+          const k = buildGroupKey(jr.canonical, group.fields);
+          if (!k) continue;
+          for (const [cid, fields] of canonicalMap) {
+            const ck = buildGroupKey(fields, group.fields);
+            if (ck === k && cid !== entry.canonicalId) {
+              dbMergeCanonicals(this.db, entry.canonicalId, cid);
+            }
+          }
+        }
+
         if (dbGetExternalId(this.db, entry.canonicalId, connectorId)) continue;
         const provisionalId = dbGetCanonicalId(this.db, connectorId, entry.externalId);
         if (provisionalId && provisionalId !== entry.canonicalId) dbMergeCanonicals(this.db, entry.canonicalId, provisionalId);
         else if (!provisionalId) dbLinkIdentity(this.db, entry.canonicalId, connectorId, entry.externalId);
-        const jr = joinerRecords.find((r) => r.id === entry.externalId)!;
         dbSetShadow(this.db, connectorId, joinerMember.entity, entry.externalId, entry.canonicalId,
           buildFieldData(undefined, jr.canonical, connectorId, ts, undefined));
       }
@@ -1016,25 +1077,107 @@ export class SyncEngine {
     canonical: Record<string, unknown>,
     entityName: string,
     identityFields: string[] | undefined,
+    channel?: ChannelConfig,
   ): string {
-    if (identityFields?.length) {
-      for (const field of identityFields) {
-        const value = canonical[field];
-        if (value === undefined) continue;
-        const matchedId = dbFindCanonicalByField(this.db, entityName, connectorId, field, value);
-        if (matchedId) {
-          const ownId = dbGetCanonicalId(this.db, connectorId, externalId);
-          if (ownId && ownId !== matchedId) dbMergeCanonicals(this.db, matchedId, ownId);
-          if (!ownId) {
-            const alreadyLinked = dbGetExternalId(this.db, matchedId, connectorId);
-            if (!alreadyLinked) dbLinkIdentity(this.db, matchedId, connectorId, externalId);
-            else return this._getOrCreateCanonical(connectorId, externalId);
-          }
-          return matchedId;
+    // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.4
+    // Collect-then-merge: find ALL canonicals matched by any identity group, merge them all.
+    const groups = channel ? this._resolveGroups(channel) : (identityFields ?? []).map((f) => ({ fields: [f] }));
+    if (groups.length) {
+      const matchedCids: string[] = [];
+      for (const group of groups) {
+        const values = group.fields.map((f) => canonical[f]);
+        if (values.some((v) => v === undefined || v === null || String(v).trim() === "")) continue;
+        const cid = dbFindCanonicalByGroup(this.db, entityName, connectorId, group.fields, values);
+        if (cid && !matchedCids.includes(cid)) matchedCids.push(cid);
+      }
+
+      if (matchedCids.length > 0) {
+        const winner = matchedCids[0]!;
+        // Merge all secondary matched canonicals into the winner
+        for (let i = 1; i < matchedCids.length; i++) {
+          if (matchedCids[i] !== winner) dbMergeCanonicals(this.db, winner, matchedCids[i]!);
         }
+        // Link this external ID to the winner
+        const ownId = dbGetCanonicalId(this.db, connectorId, externalId);
+        if (ownId && ownId !== winner) {
+          dbMergeCanonicals(this.db, winner, ownId);
+        } else if (!ownId) {
+          const alreadyLinked = dbGetExternalId(this.db, winner, connectorId);
+          if (!alreadyLinked) dbLinkIdentity(this.db, winner, connectorId, externalId);
+          else return this._getOrCreateCanonical(connectorId, externalId);
+        }
+        return winner;
       }
     }
     return this._getOrCreateCanonical(connectorId, externalId);
+  }
+
+  /**
+   * Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
+   * Normalise identityFields/identityGroups to a single IdentityGroup[] list.
+   * identityGroups takes precedence when both are present.
+   */
+  private _resolveGroups(channel: ChannelConfig): IdentityGroup[] {
+    if (channel.identityGroups?.length) {
+      if (channel.identityFields?.length) {
+        console.warn(`[opensync] channel "${channel.id}": both identityFields and identityGroups are set; identityGroups takes precedence.`);
+      }
+      return channel.identityGroups;
+    }
+    return (channel.identityFields ?? []).map((f) => ({ fields: [f] }));
+  }
+
+  /**
+   * Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
+   * Union-find over a flat list of node entries. Returns the connected components.
+   * Path compression + union-by-rank for O(α(n)) amortised.
+   */
+  private _unionFindComponents(
+    nodes: Array<{ connectorId: string; externalId: string; rawData: Record<string, unknown> }>,
+    groups: IdentityGroup[],
+  ): Array<typeof nodes> {
+    const n = nodes.length;
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const rank = new Array<number>(n).fill(0);
+
+    const find = (i: number): number => {
+      if (parent[i] !== i) parent[i] = find(parent[i]!);
+      return parent[i]!;
+    };
+    const union = (a: number, b: number): void => {
+      const ra = find(a), rb = find(b);
+      if (ra === rb) return;
+      if (rank[ra]! < rank[rb]!) { parent[ra] = rb; }
+      else if (rank[ra]! > rank[rb]!) { parent[rb] = ra; }
+      else { parent[rb] = ra; rank[ra]!++; }
+    };
+
+    const normalise = (v: unknown): string =>
+      typeof v === "string" ? v.toLowerCase().trim() : String(v ?? "");
+
+    for (const group of groups) {
+      const keyIdx = new Map<string, number[]>();
+      for (let i = 0; i < n; i++) {
+        const parts = group.fields.map((f) => normalise(nodes[i]!.rawData[f]));
+        if (parts.some((p) => p === "")) continue; // blank → not a key for this group
+        const k = parts.join("\x01");
+        const ex = keyIdx.get(k) ?? [];
+        ex.push(i);
+        keyIdx.set(k, ex);
+      }
+      for (const members of keyIdx.values()) {
+        for (let j = 1; j < members.length; j++) union(members[0]!, members[j]!);
+      }
+    }
+
+    const componentMap = new Map<number, typeof nodes>();
+    for (let i = 0; i < n; i++) {
+      const root = find(i);
+      const arr = componentMap.get(root) ?? [];
+      arr.push(nodes[i]!);
+      componentMap.set(root, arr);
+    }
+    return [...componentMap.values()];
   }
 
   // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4
@@ -1373,7 +1516,7 @@ export class SyncEngine {
         sourceShadowAssociations: existingShadow ? parseSentinelAssociations(existingShadow) : undefined,
       });
 
-      const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields);
+      const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields, channel);
 
       type Outcome = { result: RecordSyncResult; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
       const outcomes: Outcome[] = [];
