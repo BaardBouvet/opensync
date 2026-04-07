@@ -527,14 +527,17 @@ In the **cross-channel** case, the parent entry is a full member of its own chan
 
 **Element filters (`filter` / `reverse_filter`):**
 
-Two optional config keys may be added to any array expansion member (source descriptor entries do not use them):
+Two optional config keys may be added to any array expansion member (source descriptor entries do not use them). The same `filter` / `reverse_filter` keys are also used on flat (non-array) members as record-level filters — see §5. The compilation path and **bindings differ by context**:
 
-| Key | Pass | Effect |
-|-----|------|--------|
+- **Array expansion member** (has `array_path` or `parent`): bindings are `element`, `parent`, `index`.
+- **Flat member** (no `array_path`): binding is `record`. See §5.1 / §5.2.
+
+| Key | Pass | Effect (array expansion members) |
+|-----|------|----------------------------------|
 | `filter` | Forward (inbound) | Only elements for which the expression returns truthy are expanded, canonicalised, and dispatched. Elements that fail the filter are ignored entirely for that pass. |
 | `reverse_filter` | Reverse (outbound) | Only elements for which the expression returns truthy receive collapse patches. Elements that fail are left unchanged in the source array. |
 
-Both values are JS expression strings compiled once at engine startup via `new Function`. A compilation failure is detected immediately at load time. Bindings available inside the expression: `element` (the current array element object, after `parent_fields` merge), `parent` (the parent source record's raw data), `index` (zero-based element position).
+Both values are JS expression strings compiled once at engine startup via `new Function`. A compilation failure is detected immediately at load time. Bindings for array expansion: `element` (the current array element object, after `parent_fields` merge), `parent` (the parent source record's raw data), `index` (zero-based element position).
 
 ```yaml
 - connector: erp
@@ -745,6 +748,15 @@ Declare a mapping as vocabulary-only:
 
 ## 5. Filters and Routing
 
+`filter` and `reverse_filter` are unified config keys. The **bindings** differ by context:
+
+| Mapping entry type | `filter` bindings | `reverse_filter` bindings |
+|--------------------|-------------------|---------------------------|
+| Flat (no `array_path`) | `record` — raw source record | `record` — outbound-mapped record |
+| Array expansion (has `array_path`) | `element`, `parent`, `index` | `element`, `parent`, `index` |
+
+Both are plain JS expressions (not arrow functions). Compiled once at load time via `new Function`.
+
 ### 5.1 Source filter (`filter`)
 
 Include only source records that match a condition in the forward pipeline:
@@ -753,12 +765,12 @@ Include only source records that match a condition in the forward pipeline:
   - connector: erp
     channel: contacts
     entity: customers
-    filter: (record) => record.type === 'customer'
+    filter: "record.type === 'customer'"
 ```
 
 Records that do not match the filter are excluded from resolution and produce no canonical delta. If
-a record previously matched but no longer does, it contributes a soft-delete signal (null for all
-fields, or omission, causing the canonical entity to fall back to other sources).
+a record previously matched but no longer does, its shadow state is cleared (soft-delete signal:
+the canonical entity falls back to other contributing sources, or becomes empty).
 
 **Status: designed, not yet implemented (OSI-mapping §5 "Filters").**
 
@@ -769,12 +781,15 @@ fields, or omission, causing the canonical entity to fall back to other sources)
 Exclude canonical entities from being written back to a specific connector:
 
 ```yaml
-    reverse_filter: (entity) => entity.status !== 'archived'
+  - connector: crm
+    channel: contacts
+    entity: contacts
+    reverse_filter: "record.status !== 'archived'"
 ```
 
-Archived entities are not pushed to the connector even if they changed. If an entity transitions
-to archived, the connector may be instructed to delete or deactivate the corresponding record
-(depending on deletion configuration).
+The binding `record` is the **outbound-mapped** record (after applying the member's `outbound`
+field mapping). Entities that fail the filter are silently skipped for this connector; no
+`written_state` row is written, so the filter is re-evaluated on the next cycle.
 
 **Status: designed, not yet implemented (OSI-mapping §5 "Filters").**
 
@@ -783,23 +798,23 @@ to archived, the connector may be instructed to delete or deactivate the corresp
 ### 5.3 Discriminator routing
 
 A single source entity type fans out to different canonical targets based on a field value. Use a
-separate mapping for each target with a `filter`:
+separate mapping entry per channel with a `filter`:
 
 ```yaml
   - connector: erp
-    channel: contacts
-    entity: people         # all ERP people
-    filter: (r) => r.role === 'customer'
+    channel: customers
+    entity: contacts
+    filter: "record.role === 'customer'"
 
   - connector: erp
-    channel: employees
-    entity: staff          # same source type, different canonical target
-    filter: (r) => r.role === 'employee'
+    channel: staff
+    entity: people
+    filter: "record.role === 'employee'"
 ```
 
-The same source record can match at most one filter per canonical entity type. For merge patterns
-(different sources → same canonical target with different filters) identity linking handles the
-merge once filters are applied.
+Each channel is processed independently. The ERP connector appears in both but with different
+filters and different canonical targets. For merge patterns (different sources → same canonical
+target with different filters) identity linking handles the merge once filters are applied.
 
 **Status: depends on §5.1 (OSI-mapping §9 "Discriminator routing").**
 

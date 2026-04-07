@@ -128,7 +128,7 @@ Each nesting level references the previous as parent. Supports arbitrary depth: 
 ### Scalar arrays (`scalar: true`)
 A JSONB array of bare scalar values (e.g. `["vip", "churned"]`) rather than objects. The scalar value doubles as the element identity.
 
-**Foundation: ❌** Depends on nested arrays. Scalar extraction is a variant of the array expansion path.
+**Foundation: 🔶** The nested array pipeline (§3.2) and multi-level expansion (§3.4) are implemented. Scalar expansion is a variant of that path: when `scalar: true`, each bare element is wrapped as `{ _value: element }` and the value becomes its own identity. Forward pass design is specified in `plans/engine/PLAN_SCALAR_ARRAYS.md` (backlog). Reverse pass (collapse back to a scalar array) is deferred.
 
 ---
 
@@ -409,7 +409,7 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 |----------|-----------------|---------|-----------|-------|
 | Resolution strategies | 6 | 3 | 3 | 0 |
 | Identity & linking | 5 | 0 | 1 | 4 |
-| Nesting & structure | 6 | 0 | 2 | 4 |
+| Nesting & structure | 6 | 0 | 3 | 3 |
 | References & FKs | 5 | 0 | 3 | 2 |
 | Field-level controls | 8 | 1 | 3 | 4 |
 | Deletion & tombstones | 4 | 0 | 1 | 3 |
@@ -418,7 +418,7 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 | Routing & partitioning | 3 | 0 | 0 | 3 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **6** | **16** | **28** |
+| **Total** | **50** | **6** | **17** | **27** |
 
 ---
 

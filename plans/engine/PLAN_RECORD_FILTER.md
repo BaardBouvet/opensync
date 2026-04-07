@@ -4,7 +4,7 @@
 **Date:** 2026-04-07  
 **Effort:** S  
 **Domain:** engine  
-**Scope:** config/schema, config/loader, engine (ingest + _processRecords + _dispatchToTarget)  
+**Scope:** config/loader, engine (ingest + _processRecords + _dispatchToTarget)  
 **Spec:** specs/field-mapping.md §5  
 **Depends on:** nothing — independent of array expansion  
 
@@ -12,22 +12,23 @@
 
 ## Problem
 
-`filter` / `reverse_filter` on a mapping entry are currently only wired up for array element
-expansion (`elementFilter` / `elementReverseFilter` on `ChannelMember`, applied in
-`array-expander.ts`). They operate on individual array elements, not on top-level source records.
+`filter` / `reverse_filter` on a mapping entry are currently only compiled for array expansion
+members (→ `elementFilter` / `elementReverseFilter` on `ChannelMember` with `element`, `parent`,
+`index` bindings, applied in `array-expander.ts`). The schema keys already exist; the loader just
+ignores them on flat (non-array) members.
 
 There is no way to express "only ERP records where `type = 'customer'` should contribute to this
 canonical entity" — which is what `specs/field-mapping.md §5.1` calls a *source filter* and what
 OSI-mapping §9 uses for *discriminator routing*.
 
-Note: `elementFilter` / `elementReverseFilter` are not touched by this plan. They remain
-array-element-only. Two separate mechanisms with similar names but different scopes.
+One YAML key, two compilation paths: the loader determines which to use based on whether the
+entry has `array_path` / `parent`.
 
 ---
 
 ## What this plan covers
 
-### § 1 Source record filter (`record_filter`)
+### § 1 Source record filter (`filter` on a flat member)
 
 A JS expression applied to each raw source record on the **forward pass**, before the record
 reaches the resolution layer.
@@ -47,10 +48,10 @@ reaches the resolution layer.
 - connector: erp
   channel: contacts
   entity: contacts
-  record_filter: "record.type === 'customer'"
+  filter: "record.type === 'customer'"
 ```
 
-### § 2 Reverse record filter (`record_reverse_filter`)
+### § 2 Reverse record filter (`reverse_filter` on a flat member)
 
 A JS expression applied to each resolved canonical entity on the **reverse pass**, before the
 engine decides whether to write back to this connector.
@@ -68,7 +69,7 @@ engine decides whether to write back to this connector.
 - connector: crm
   channel: contacts
   entity: contacts
-  record_reverse_filter: "record.status !== 'archived'"
+  reverse_filter: "record.status !== 'archived'"
 ```
 
 ### § 3 Discriminator routing (derived from §1)
@@ -81,7 +82,7 @@ across multiple channels:
 - connector: erp
   channel: customers
   entity: contacts
-  record_filter: "record.role === 'customer'"
+  filter: "record.role === 'customer'"
 
 - connector: crm
   channel: customers
@@ -93,7 +94,7 @@ across multiple channels:
 - connector: erp
   channel: staff
   entity: people
-  record_filter: "record.role === 'employee'"
+  filter: "record.role === 'employee'"
 
 - connector: hr
   channel: staff
@@ -119,7 +120,7 @@ identity linking foundation:
 - connector: erp
   channel: contacts
   entity: contacts
-  record_filter: "record.type === 'customer'"  # only B2B customers from ERP
+  filter: "record.type === 'customer'"  # only B2B customers from ERP
 
 - connector: crm
   channel: contacts
@@ -135,15 +136,18 @@ applied. No additional engine changes needed.
 ## Spec changes planned
 
 **`specs/field-mapping.md §5.1`** — update status from "designed, not yet implemented" to
-"implemented". Clarify that `record_filter` is the config key (not `filter`, which is reserved for
-element-level array filtering to avoid ambiguity). Document the shadow-clearing soft-delete
-behaviour.
+"implemented". Clarify that `filter` on a flat mapping entry (no `array_path`) is a record-level
+source filter with a `record` binding. Document the shadow-clearing soft-delete behaviour.
 
-**`specs/field-mapping.md §5.2`** — update status to "implemented". Clarify that
-`record_reverse_filter` is the config key (not `reverse_filter`).
+**`specs/field-mapping.md §5.2`** — update status to "implemented". Clarify that `reverse_filter`
+on a flat mapping entry is a record-level reverse filter with a `record` binding.
 
 **`specs/field-mapping.md §5.3`** — update status to "implemented". Note the within-channel
 multi-member limitation.
+
+Note: `specs/field-mapping.md §3.2` (element filter documentation) must be updated to clarify
+that `filter` / `reverse_filter` on entries **with** `array_path` use `element`, `parent`, `index`
+bindings, while entries **without** `array_path` use `record` binding.
 
 **`plans/engine/GAP_OSI_PRIMITIVES.md §5 (Filters)`** — update from ❌ to ✅. Update §9
 (Discriminator routing and Route combined) from ❌ to ✅ / 🔶 as appropriate.
@@ -154,45 +158,67 @@ multi-member limitation.
 
 ### Step 1 — Schema (`config/schema.ts`)
 
-Add two new optional fields to `MappingEntrySchema`:
-
-```ts
-record_filter: z.string().optional(),         // JS expression — forward pass record filter
-record_reverse_filter: z.string().optional(), // JS expression — reverse pass record filter
-```
-
-These are **separate keys** from `filter` / `reverse_filter` (which are element-level) to
-avoid any ambiguity at the schema and documentation level.
+No changes needed. `MappingEntrySchema` already declares `filter` and `reverse_filter` as
+optional string fields. The same YAML keys are reused; the loader determines compilation path
+based on context.
 
 ### Step 2 — Loader (`config/loader.ts`)
 
 Add two new optional fields to `ChannelMember`:
 
 ```ts
-/** Spec: specs/field-mapping.md §5.1 — forward record filter.
+/** Spec: specs/field-mapping.md §5.1 — forward record filter (flat members only).
  *  When set, only source records for which this returns true contribute to resolution.
- *  Records that previously matched but now fail are treated as soft-delete contributions. */
+ *  Records that previously matched but now fail are treated as soft-delete contributions.
+ *  Not present on array expansion members (those use elementFilter instead). */
 recordFilter?: (record: Record<string, unknown>) => boolean;
-/** Spec: specs/field-mapping.md §5.2 — reverse record filter.
- *  When set, canonical entities for which this returns false are skipped for this connector. */
+/** Spec: specs/field-mapping.md §5.2 — reverse record filter (flat members only).
+ *  When set, canonical entities for which this returns false are skipped for this connector.
+ *  Not present on array expansion members. */
 recordReverseFilter?: (record: Record<string, unknown>) => boolean;
 ```
 
-In the mapping entry resolution loop, compile `record_filter` and `record_reverse_filter` using
-the same `new Function` approach as `compileElementFilter`, but with a single `record` binding
-rather than `(element, parent, index)`. Extracted into a shared `compileRecordFilter` function:
+In the member assembly loop, select the compilation path based on whether the entry is an array
+expansion member (`entry.array_path || entry.parent`):
 
 ```ts
-function compileRecordFilter(expr: string, channel: string): (record: Record<string, unknown>) => boolean {
+// Array expansion member → element-level filter (existing behaviour, unchanged)
+const elementFilter = (entry.array_path || entry.parent) && entry.filter
+  ? compileElementFilter(entry.filter, entry.channel)
+  : undefined;
+const elementReverseFilter = (entry.array_path || entry.parent) && entry.reverse_filter
+  ? compileElementFilter(entry.reverse_filter, entry.channel)
+  : undefined;
+
+// Flat member → record-level filter (new)
+const recordFilter = !(entry.array_path || entry.parent) && entry.filter
+  ? compileRecordFilter(entry.filter, entry.channel)
+  : undefined;
+const recordReverseFilter = !(entry.array_path || entry.parent) && entry.reverse_filter
+  ? compileRecordFilter(entry.reverse_filter, entry.channel)
+  : undefined;
+```
+
+Add a `compileRecordFilter` function alongside `compileElementFilter`:
+
+```ts
+function compileRecordFilter(
+  expression: string,
+  channelId: string,
+): (record: Record<string, unknown>) => boolean {
+  let fn: (record: Record<string, unknown>) => unknown;
   try {
-    return new Function("record", `"use strict"; return (${expr});`) as (r: Record<string, unknown>) => boolean;
-  } catch (e) {
-    throw new Error(`record_filter compilation error in channel "${channel}": ${String(e)}`);
+    fn = new Function("record", `return (${expression});`) as typeof fn;
+  } catch (err) {
+    throw new Error(
+      `Record filter expression in channel "${channelId}" failed to compile: ${String(err)}\n  Expression: ${expression}`,
+    );
   }
+  return (record) => Boolean(fn(record));
 }
 ```
 
-Validation: compilation failure is a fatal config load error (same as element filters).
+Compilation failure is a fatal config load error (same as element filters).
 
 ### Step 3 — Forward pass: `_processRecords`
 
