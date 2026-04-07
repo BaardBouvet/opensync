@@ -16,10 +16,11 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [0.2.0] — 2026-04-07
 
-The field-mapping pipeline release. The engine now has a complete, OSI-mapping-compatible
-transformation layer between raw connector records and the canonical model. A new `array-demo`
-playground scenario exercises the headline features end-to-end — webshop purchases with nested
-line items syncing bidirectionally with a flat ERP.
+The field-mapping pipeline release. The engine gains most of the OSI-mapping primitive set:
+field expressions, normalize, defaults, atomic groups, array expansion/collapse, transitive
+identity, and association predicate routing. A few primitives are still outstanding and will
+land in a follow-up. A new `array-demo` playground scenario exercises the headline features
+end-to-end — webshop purchases with nested line items syncing bidirectionally with a flat ERP.
 
 ### Added
 
