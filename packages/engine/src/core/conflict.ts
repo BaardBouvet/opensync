@@ -94,6 +94,14 @@ export function resolveConflicts(
       }
     }
 
+    // Per-field resolve function (§2.3) — takes precedence over fieldStrategies and global LWW.
+    // Spec: specs/field-mapping.md §2.3
+    const resolverFn = fieldMappings?.find((m) => m.target === field)?.resolve;
+    if (resolverFn) {
+      resolved[field] = resolverFn(incomingVal, existing?.val);
+      continue;
+    }
+
     // Per-field strategy override
     const fieldStrategy = config.fieldStrategies?.[field];
     if (fieldStrategy) {
@@ -112,6 +120,17 @@ export function resolveConflicts(
         case "collect": {
           const arr = Array.isArray(existing.val) ? existing.val : [existing.val];
           resolved[field] = arr.includes(incomingVal) ? arr : [...arr, incomingVal];
+          break;
+        }
+        case "bool_or": {
+          // Spec: specs/field-mapping.md §2.5 — accumulates truthy values.
+          // Once true, never reverts to false (other sources may have contributed true).
+          const alreadyTrue = Boolean(existing.val);
+          if (!alreadyTrue && Boolean(incomingVal)) {
+            resolved[field] = true;
+          }
+          // If alreadyTrue: no change — shadow already holds true.
+          // If neither truthy: no change — don't write false over a prior true.
           break;
         }
       }

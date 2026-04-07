@@ -315,26 +315,37 @@ result of comparing those timestamps across contributing sources.
 
 ### 2.3 Expression resolvers
 
-Custom aggregation function computing the final canonical value from all contributing source values.
+Custom incremental aggregation function for computing a canonical field from multiple sources.
+Called during conflict resolution instead of `fieldStrategies[field]` and the global LWW strategy.
 
-```yaml
-fields:
-  - target: score
-    resolve: (values) => Math.max(...values.map(v => Number(v) || 0))
+```typescript
+// TypeScript embedded API only — not serialisable to YAML
+{
+  target: "score",
+  resolve: (incoming: unknown, existing: unknown | undefined) => {
+    return Math.max(Number(incoming) || 0, Number(existing) || 0);
+  }
+}
 ```
 
-The resolver receives an array of `{ value, sourceId, timestamp }` items and returns the canonical
-value. Unlike field expressions (§1.3 above, which transform one value), resolvers aggregate across
-sources.
+The incremental reducer receives `(incoming, existing)` where `existing` is the prior canonical
+value (or `undefined` on first ingest). It runs after the group pre-pass and normalize
+precision-loss guard. Takes precedence over `fieldStrategies[field]` when both are declared.
 
-**Status: designed, not yet implemented (OSI-mapping §1 "Expression").**
+This form covers the practical OSI-mapping expression cases (max, min, sum, concat) without
+requiring a full multi-source snapshot. A multi-snapshot resolver (collecting all
+`{ value, sourceId, timestamp }` items) is a future follow-on.
+
+**Status: implemented (OSI-mapping §1 "Expression"). Tests: `packages/engine/src/core/conflict.test.ts` ER1–ER6.**
 
 ---
 
 ### 2.4 `collect`
 
 Returns an array of all contributed values without resolving to one. Useful for tag lists or
-multi-source enum aggregations.
+multi-source enum aggregations. Each ingest appends the incoming value if not already present
+(set semantics — deduplicates by value). The accumulated array is stored in the target shadow
+and used as the accumulator for subsequent ingests.
 
 ```yaml
 fields:
@@ -342,7 +353,10 @@ fields:
     resolve: collect
 ```
 
-**Status: designed, not yet implemented (OSI-mapping §1 "Collect").**
+In YAML config, set `strategy: collect` inside `fieldStrategies`. In the TypeScript embedded API,
+use the `resolve` function (§2.3) for custom collection logic.
+
+**Status: implemented (OSI-mapping §1 "Collect"). Tests: `packages/engine/src/core/conflict.test.ts` RS1–RS4.**
 
 ---
 
@@ -351,13 +365,18 @@ fields:
 Resolves to `true` if any contributing source contributes a truthy value. Intended for deletion
 flags that should propagate if *any* upstream marks the record deleted.
 
+Once `true`, the field never reverts to `false` via this strategy — a later source sending `false`
+or `null` does not overwrite a prior `true`. Resetting the flag requires removing it from all
+sources' shadow states (outside scope of this strategy).
+
 ```yaml
-fields:
-  - target: isDeleted
-    resolve: bool_or
+conflict_resolution:
+  fieldStrategies:
+    isDeleted:
+      strategy: bool_or
 ```
 
-**Status: designed, not yet implemented (OSI-mapping §1 "Bool_or").**
+**Status: implemented (OSI-mapping §1 "Bool_or"). Tests: `packages/engine/src/core/conflict.test.ts` BO1–BO6.**
 
 ---
 
@@ -567,10 +586,15 @@ Security note: `new Function` executes arbitrary JS. Use a dedicated per-connect
     scalar: true           # elements are bare strings, not objects
 ```
 
-When `scalar: true`, each element of the JSON array is a bare value (string, number). The element's
-value doubles as its identity. Deduplicated via `collect` resolution across sources.
+When `scalar: true`, each bare-scalar element is wrapped as `{ _value: element }` before inbound
+mapping. The element identity is `String(element)` (set semantics — duplicate values share the
+same canonical ID). `element_key` is mutually exclusive with `scalar: true`.
 
-**Status: planned follow-on — depends on §3.2 implementation (OSI-mapping §3 "Scalar arrays").**
+In `filter` expressions, `element` is the **raw scalar value** (not the wrapped object).
+
+Reverse pass (collapse) is not yet implemented for scalar arrays.
+
+**Status: forward pass implemented (OSI-mapping §3 "Scalar arrays"). Reverse pass planned follow-on. Tests: `array-expander.test.ts` SA1–SA9.**
 
 ---
 
@@ -772,7 +796,7 @@ Records that do not match the filter are excluded from resolution and produce no
 a record previously matched but no longer does, its shadow state is cleared (soft-delete signal:
 the canonical entity falls back to other contributing sources, or becomes empty).
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Filters").**
+**Status: implemented (OSI-mapping §5 "Filters"). Tests: `packages/engine/src/engine.ts` record filter path (RF1–RF4).**
 
 ---
 
@@ -791,7 +815,7 @@ The binding `record` is the **outbound-mapped** record (after applying the membe
 field mapping). Entities that fail the filter are silently skipped for this connector; no
 `written_state` row is written, so the filter is re-evaluated on the next cycle.
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Filters").**
+**Status: implemented (OSI-mapping §5 "Filters").**
 
 ---
 
@@ -816,43 +840,66 @@ Each channel is processed independently. The ERP connector appears in both but w
 filters and different canonical targets. For merge patterns (different sources → same canonical
 target with different filters) identity linking handles the merge once filters are applied.
 
-**Status: depends on §5.1 (OSI-mapping §9 "Discriminator routing").**
+**Status: implemented via §5.1 record filters (OSI-mapping §9 "Discriminator routing"). Within-channel variant not supported.**
 
 ---
 
 ## 6. Ordering (Nested Arrays)
 
-The following ordering primitives all depend on nested array expansion (§3.2) being designed first.
-They are documented here for completeness.
+All three ordering strategies depend on nested array expansion (§3.2). They are applied during
+the reverse collapse pass, after all element patches are merged and before `connector.update`.
+Only one strategy may be declared per mapping entry (mutual exclusion enforced at load time).
 
 ### 6.1 Custom sort
 
-When reassembling a nested array on the reverse pass, control the element order:
+When reassembling a nested array on the reverse pass, sort by one or more declared field names:
 
 ```yaml
     order_by:
       - field: lineNumber
-        direction: asc
+        direction: asc   # default
+      - field: productCode
+        direction: desc  # optional secondary key
 ```
+
+Multi-key comparison: fields are compared in order; numeric values are compared numerically
+(both sides parse as finite number); otherwise compared as locale-insensitive strings.
+Applied immediately after all element patches are applied, before write-back.
+
+**Status: implemented (OSI-mapping §8). Tests: `array-expander.test.ts` OR1–OR5.**
 
 ### 6.2 CRDT ordinal
 
-Generate a deterministic per-element ordinal from source array position, enabling stable ordering
-across merges from multiple sources without a dedicated ordering column:
+Inject a synthetic `_ordinal` field from source array position on the forward pass, enabling
+stable ordering across merges from multiple sources:
 
 ```yaml
     order: true    # auto-assign ordinal from source position
 ```
 
+`_ordinal` (0-based source index) is stored in the child shadow and participates in LWW
+resolution across sources. During collapse, elements are sorted by `_ordinal` ascending;
+elements without `_ordinal` sort last. The field is stripped before write-back unless mapped
+explicitly in `outbound`.
+
+**Status: implemented (OSI-mapping §8). Tests: `array-expander.test.ts` OR6–OR9.**
+
 ### 6.3 Linked-list ordering
 
-Store adjacency pointers (`order_prev`, `order_next`) for graph-style linked-list ordering:
+Store adjacency pointers (`_prev`, `_next`) for linked-list ordering:
 
 ```yaml
     order_linked_list: true
 ```
 
-**Status of all ordering primitives: aspirational, depends on §3.2 (OSI-mapping §8).**
+`_prev` is the element key of the preceding sibling (`null` for the head); `_next` is the key
+of the following sibling (`null` for the tail). Both enter shadow state and participate in LWW.
+During collapse, the head is found (element whose `_prev` is null or absent from the map),
+then the chain is walked via `_next`. Remaining elements (broken chain or cycle) are appended
+in their current order. A cycle guard (max iterations = array length) prevents infinite loops.
+Both fields are stripped before write-back unless mapped explicitly.
+
+**Status: implemented (OSI-mapping §8). Tests: `array-expander.test.ts` LL1–LL4.**
 
 ---
 

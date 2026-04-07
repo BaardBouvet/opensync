@@ -14,6 +14,46 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 ## [Unreleased]
 
 ### Added
+- Engine: `bool_or` per-field resolution strategy (specs/field-mapping.md §2.5). Once any source
+  sets a field to truthy, the canonical value latches to `true` and cannot be reverted to `false`
+  by a later source contributing `false`. Useful for deletion flags and soft-delete signals that
+  should propagate if any upstream source triggers them. Add `"bool_or"` to
+  `ConflictConfig.fieldStrategies`. Tests: `conflict.test.ts` BO1–BO6.
+- Engine: `resolve` per-field function on `FieldMapping` (TypeScript embedded API only —
+  specs/field-mapping.md §2.3). An incremental reducer called instead of
+  `fieldStrategies[field]` and the global LWW strategy. Signature:
+  `(incoming: unknown, existing: unknown | undefined) => unknown`. Called after the group
+  pre-pass and normalize precision-loss guard. Enables max, min, sum, concat, and other
+  aggregation patterns. Tests: `conflict.test.ts` ER1–ER6.
+- Engine: `collect` strategy now has dedicated tests. `collect` was already implemented in
+  `conflict.ts` but had no coverage. Tests: `conflict.test.ts` RS1–RS4.
+- Engine: `filter` / `reverse_filter` on flat (non-array) mapping entries now compile to
+  record-level predicates (specs/field-mapping.md §5.1, §5.2). Previously, `filter` on a
+  flat member was silently ignored; it now gates the forward pass with `record` as the binding
+  variable. Records failing the filter are excluded from resolution; their shadow state is
+  cleared if they previously matched. `reverse_filter` gates outbound dispatch; filtered
+  canonicals are skipped without writing a `written_state` row. The loader now selects the
+  compilation path (element-level vs. record-level) based on whether the entry has `array_path`.
+- Engine: `scalar: true` config key on array expansion members (specs/field-mapping.md §3.3).
+  Bare-scalar JSON arrays (strings, numbers, booleans) are now expanded into child records
+  exposing the value as `_value`. Element identity is `String(element)` (set semantics —
+  duplicate scalar values share the same canonical ID). `filter` expressions receive the raw
+  scalar as the `element` binding. `element_key` is mutually exclusive with `scalar: true`
+  (validated at config load time). Tests: `array-expander.test.ts` SA1–SA9.
+- Engine: array ordering on nested array members (specs/field-mapping.md §6). Applied during
+  the reverse collapse pass (after all element patches, before `connector.update`). Three
+  mutually exclusive strategies per mapping entry:
+  - `order_by`: post-collapse custom sort by one or more field names with asc/desc direction.
+  - `order: true` (CRDT ordinal): `_ordinal` injected from source array position on the
+    forward pass; sorted ascending during collapse; field stripped before write-back.
+  - `order_linked_list: true` (CRDT linked-list): `_prev`/`_next` adjacency pointers injected
+    on the forward pass; chain reconstruction during collapse with graceful fallback on broken
+    chains and cycle guard; pointers stripped before write-back.
+  Config fields propagate through `ExpansionChainLevel` and `ChannelMember`.
+  Tests: `array-expander.test.ts` OR1–OR9, LL1–LL4, MX1.
+- DB: `dbDeleteShadow()` query helper — hard-deletes a shadow_state row by connector+entity+id.
+
+### Added
 - Engine: `normalize` per-field function on `FieldMapping` (specs/field-mapping.md §1.4).
   Applied to both sides before the noop diff check — if `normalize(incoming) ===
   normalize(shadow)`, the field is treated as unchanged and no write is triggered, preventing

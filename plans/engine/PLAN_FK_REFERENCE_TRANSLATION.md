@@ -2,18 +2,15 @@
 
 **Status:** backlog  
 **Date:** 2026-04-07  
-**Effort:** S  
+**Effort:** M  
 **Domain:** engine  
-**Scope:** `packages/engine/src/config/schema.ts`, `packages/engine/src/config/loader.ts`, `packages/engine/src/engine.ts`, `packages/engine/src/db/queries.ts`, `specs/field-mapping.md`  
+**Scope:** `packages/engine/src/config/schema.ts`, `packages/engine/src/config/loader.ts`, `packages/engine/src/engine.ts`, `packages/engine/src/db/queries.ts`, `packages/engine/src/db/migrations.ts`, `specs/field-mapping.md`, `specs/database.md`  
 **Spec:** `specs/field-mapping.md §4`  
 **Depends on:** nothing — independent of array expansion and filter plans  
 
 ---
 
 ## § 1 Problem Statement
-
-Two related gaps exist in the FK handling pipeline. The spec (`specs/field-mapping.md §4.1`)
-calls this cluster "designed, not yet implemented":
 
 **1 — No FK translation on the reverse pass**  
 When the engine writes a record back to a connector, FK fields (e.g. `accountId`) contain the
@@ -40,12 +37,52 @@ via two live `identity_map` lookups per fan-out cycle. FK fields are plain scala
 annotation. Systems that store cross-entity references as data columns (e.g. a SQL `account_id`
 column) need this separate mechanism.
 
-**Reference preservation after merge — already solved**  
-`dbMergeCanonicals` updates every `identity_map` row for the losing canonical to point to the
-winner. Both the association path and the FK translation path read `identity_map` at runtime, so
-they automatically resolve to the winner UUID after a merge. No additional infrastructure (e.g. a
-redirect table) is required — this matches how `_remapAssociations` already handles merge
-preservation.
+**3 — Cross-connector FK references — the primary motivation**  
+The most common real-world case is connectors that are *not aware of each other*. A sales rep
+manually enters an ERP account ID into a custom HubSpot property (`erp_account_id`). HubSpot
+has no knowledge of ERP; ERP has no knowledge of HubSpot.
+
+The user handles this by giving the FK semantic meaning in the mapping config:
+
+1. Declare the ERP account PK as a named canonical field on the `accounts` entity:
+
+   ```yaml
+   # In the accounts channel (erp connector):
+   - source: id          # ERP's primary key, e.g. "ACC-001"
+     target: erpId       # named canonical field — now queryable by field value
+     direction: forward_only   # don't write erpId back to ERP as a data field
+   ```
+
+2. Map HubSpot's custom field to the same canonical `accountId` using `references_field`:
+
+   ```yaml
+   # In the contacts channel (hubspot connector):
+   - source: erp_account_id     # custom HubSpot property, value "ACC-001"
+     target: accountId
+     references: accounts
+     references_field: erpId    # find the accounts entity whose canonical erpId = "ACC-001"
+   ```
+
+The forward pass scans `shadow_state` for an `accounts` entity whose `erpId` field equals
+`"ACC-001"` and substitutes its canonical UUID. The reverse pass translates back via
+`dbGetExternalId`. No special connector-namespace handling is needed in the engine — the user
+expresses the relationship by giving the foreign key a canonical name.
+
+A third case — matching by a non-PK attribute (e.g. domain name, ISO code) — uses the same
+`references_field` mechanism with a different canonical field as the match key.
+
+**4 — After entity merge: stale canonical UUID causes one-cycle null-dispatch (flip-flop)**  
+The forward pass stores a canonical UUID inside `shadow_state.canonical_data` for the
+referencing record. When a merge runs, `dbMergeCanonicals(winner, loser)` only updates the
+entity's *own* shadow_state rows — not the FK values stored in the JSON blobs of other records
+that reference it. The referencing record's `canonical_data` still holds the loser UUID. On the
+next reverse pass, `dbGetExternalId("uuid-loser", connector)` returns null (loser UUID no
+longer in `identity_map`), so a null FK is dispatched to the target — one cycle of null before
+the next forward ingest corrects it.
+
+The `canonical_redirects` table records each merge outcome. The reverse pass calls
+`dbResolveCanonicalRedirect` before the `dbGetExternalId` lookup, turning a stale loser UUID
+into the winner UUID at virtually no cost.
 
 ---
 
@@ -53,9 +90,9 @@ preservation.
 
 | Spec file | Section | Change |
 |-----------|---------|--------|
-| `specs/field-mapping.md` | §4.1 `references` | Update status from "designed, not yet implemented" to "implemented". YAML snippet already matches the intended design; no structural changes needed. |
-| `specs/field-mapping.md` | §4.2 `references_field` | Keep status as "requires design work". Not covered by this plan — deferred. |
-| `specs/field-mapping.md` | §4.3 Vocabulary targets | Keep status as "requires design work". Not covered by this plan — deferred. |
+| `specs/field-mapping.md` | §4.1 `references` | Update status from "designed, not yet implemented" to "implemented". Update YAML example to show both `references` alone and with `references_field`. |
+| `specs/field-mapping.md` | §4.2 `references_field` | Update status from "requires design work" to "implemented". Update prose and examples to reflect the canonical-field model. |
+| `specs/database.md` | tables section | Add `canonical_redirects` table definition. |
 
 ---
 
@@ -63,75 +100,161 @@ preservation.
 
 ### § 3.1 Config changes — `references` on `FieldMapping`
 
-**`config/schema.ts`** — add optional `references` to `FieldMappingEntrySchema`:
+**`config/schema.ts`** — add optional `references` and `references_field` to `FieldMappingEntrySchema`:
 
 ```typescript
-references: z.string().optional(),
+references:       z.string().optional(),
+references_field: z.string().optional(),
 ```
 
 **`config/loader.ts`** — add to the `FieldMapping` interface:
 
 ```typescript
 export interface FieldMapping {
-  source?:            string;
-  target:             string;
-  direction?:         "bidirectional" | "forward_only" | "reverse_only";
-  expression?:        (record: Record<string, unknown>) => unknown;
+  source?:           string;
+  target:            string;
+  direction?:        "bidirectional" | "forward_only" | "reverse_only";
+  expression?:       (record: Record<string, unknown>) => unknown;
   reverseExpression?: (record: Record<string, unknown>) => unknown;
-  normalize?:         (v: unknown) => unknown;
+  normalize?:        (v: unknown) => unknown;
   /** Canonical entity type this field references as a foreign key.
    *  Forward pass: translate source local ID → canonical UUID.
    *  Reverse pass: translate canonical UUID → target connector's local ID.
    *  Spec: specs/field-mapping.md §4.1 */
-  references?:        string;
+  references?:       string;
+  /** Canonical field name on the referenced entity to match the FK value against.
+   *  When set, the forward pass scans shadow_state for the referenced entity whose
+   *  `references_field` canonical field equals the FK value, instead of using the
+   *  identity_map external_id lookup.
+   *  Use when the FK value is not the source connector's own external ID —
+   *  e.g. a HubSpot custom field storing an ERP account PK declared as canonical `erpId`.
+   *  Spec: specs/field-mapping.md §4.2 */
+  references_field?: string;
 }
 ```
 
-YAML config example (file-based API):
+YAML examples:
 
 ```yaml
+# Case 1 — same connector's own external ID (identity_map fast path)
 fields:
-  - source: account_id
+  - source: account_id      # CRM's own account PK
     target: accountId
     references: accounts
-```
 
-Embedded TypeScript config example:
+# Case 2 — FK value is a named canonical field on the referenced entity (shadow_state scan)
+# First, declare the ERP PK as a canonical field on accounts:
+- connector: erp
+  channel: accounts
+  entity: accounts
+  fields:
+    - source: id
+      target: erpId
+      direction: forward_only   # expose as canonical field; don't write back to ERP
 
-```typescript
-{ source: "account_id", target: "accountId", references: "accounts" }
+# Then, reference it from HubSpot:
+- connector: hubspot
+  channel: contacts
+  entity: contacts
+  fields:
+    - source: erp_account_id    # custom HubSpot property, value e.g. "ACC-001"
+      target: accountId
+      references: accounts
+      references_field: erpId   # find accounts where canonical erpId = "ACC-001"
+
+# Case 3 — match by a non-PK attribute (same mechanism, different canonical field)
+    - source: company_domain
+      target: companyId
+      references: companies
+      references_field: domain  # find companies where canonical domain = "acme.com"
 ```
 
 ---
 
 ### § 3.2 DB helpers — `queries.ts`
 
-**New helper — `dbGetCanonicalByExternalId`:**
+**New helper — `dbFindCanonicalByFieldValue`:**
 
-Used in the forward pass to translate a source-local FK value to a canonical UUID.
+Used in the `references_field` forward path to find a canonical UUID by matching a named
+canonical field value. Distinct from the existing `dbFindCanonicalByField` (which excludes a
+specific connector — correct for identity matching, wrong here where we want any match):
 
 ```typescript
-export function dbGetCanonicalByExternalId(
+export function dbFindCanonicalByFieldValue(
   db: DB,
   entityName: string,
-  connectorId: string,
-  externalId: string,
+  fieldName: string,
+  value: unknown,
 ): string | undefined {
-  const row = db
-    .prepare(
-      `SELECT canonical_id FROM identity_map
-       WHERE entity_name = ? AND connector_id = ? AND external_id = ?
+  const raw =
+    typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+      ? value
+      : JSON.stringify(value);
+  return db
+    .prepare<{ canonical_id: string }>(
+      `SELECT canonical_id FROM shadow_state
+       WHERE entity_name = ?
+         AND JSON_EXTRACT(canonical_data, '$.' || ? || '.val') = ?
        LIMIT 1`,
     )
-    .get(entityName, connectorId, externalId) as
-    | { canonical_id: string }
-    | undefined;
-  return row?.canonical_id;
+    .get(entityName, fieldName, raw)?.canonical_id;
 }
 ```
 
-No schema changes are needed. `identity_map` already has the required columns. `dbMergeCanonicals`
-already keeps `identity_map` consistent after merges — no redirect table is required.
+**Note on ambiguity:** if multiple canonical entities have the same value for `references_field`
+(e.g. two companies with the same domain), `LIMIT 1` picks an arbitrary row. This is a data
+quality issue, not an engine bug — the field chosen as `references_field` should be unique
+across entities of that type. The engine logs a warning when more than one row matches.
+
+**New helper — `dbResolveCanonicalRedirect`:**
+
+Used in the reverse pass to follow a single redirect hop when a stored canonical UUID has been
+superseded by a merge:
+
+```typescript
+export function dbResolveCanonicalRedirect(
+  db: DB,
+  canonId: string,
+): string {
+  const row = db
+    .prepare(
+      `SELECT winner_id FROM canonical_redirects WHERE loser_id = ? LIMIT 1`,
+    )
+    .get(canonId) as { winner_id: string } | undefined;
+  return row?.winner_id ?? canonId;
+}
+```
+
+**Modified — `dbMergeCanonicals`:**
+
+After repointing `identity_map`, record a redirect so reverse-pass lookups against stale UUIDs
+stored in other records' `canonical_data` can be resolved:
+
+```typescript
+// Flatten any existing chain: if a previous merge already redirects to dropId,
+// repoint it directly at keepId so all redirects remain one-hop.
+db.prepare(
+  `UPDATE canonical_redirects SET winner_id = ? WHERE winner_id = ?`,
+).run(keepId, dropId);
+db.prepare(
+  `INSERT OR REPLACE INTO canonical_redirects (loser_id, winner_id) VALUES (?, ?)`,
+).run(dropId, keepId);
+```
+
+**New table — `migrations.ts`:**
+
+```sql
+CREATE TABLE IF NOT EXISTS canonical_redirects (
+  loser_id   TEXT NOT NULL,
+  winner_id  TEXT NOT NULL,
+  merged_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (loser_id)
+);
+```
+
+The chain-flattening UPDATE before the INSERT keeps all redirects one-hop deep even through
+multi-step merges (A→B then B→C: the first UPDATE changes A→B to A→C, then INSERT adds B→C).
+This makes `dbResolveCanonicalRedirect` a single unconditional lookup rather than a loop.
 
 ---
 
@@ -141,33 +264,52 @@ In `engine.ts`, inside `_processRecords`, after the inbound mapping has been app
 the record is committed to shadow state, translate FK fields for this channel member:
 
 ```typescript
-// Spec: specs/field-mapping.md §4.1 — forward pass FK translation
+// Spec: specs/field-mapping.md §4.1–§4.2 — forward pass FK translation
 for (const fm of channelMember.fieldMappings ?? []) {
   if (!fm.references) continue;
   const target = fm.target ?? fm.source;
   if (!target) continue;
   const localId = inboundRecord[target];
   if (localId == null) continue;
-  const canonId = dbGetCanonicalByExternalId(
-    this.db,
-    fm.references,         // referenced entity name
-    connectorInstanceId,   // connector that produced this record
-    String(localId),
-  );
+
+  let canonId: string | undefined;
+  if (fm.references_field) {
+    // §4.2 path — FK value matches a named canonical field on the referenced entity.
+    // The user declared that field on the referenced entity's channel mapping
+    // (e.g. ERP's PK exposed as canonical `erpId`, or a domain/ISO-code field).
+    // Spec: specs/field-mapping.md §4.2
+    canonId = dbFindCanonicalByFieldValue(
+      this.db,
+      fm.references,        // referenced entity name
+      fm.references_field,  // canonical field to match against
+      localId,
+    );
+  } else {
+    // §4.1 path — FK value is the source connector's own external ID;
+    // look it up directly in identity_map.
+    // Spec: specs/field-mapping.md §4.1
+    canonId = dbGetCanonicalByExternalId(
+      this.db,
+      fm.references,
+      connectorInstanceId,
+      String(localId),
+    );
+  }
+
   inboundRecord[target] = canonId ?? null;
   // null when the referenced entity has not been ingested yet;
-  // the field will be re-resolved on the next cycle (same deferred
-  // pattern as associations — specs/identity.md §Deferred Associations).
+  // the field will be re-resolved on the next cycle.
 }
 ```
 
 **Ordering note:** FK translation runs after all per-field `expression` transforms. This ensures
 any transform that derives the FK value from other fields runs first.
 
-**Merge safety:** `dbGetCanonicalByExternalId` reads `identity_map` at runtime. After
-`dbMergeCanonicals` runs, the winner canonical ID is what `identity_map` returns — no stale
-values can accumulate. This is identical to how `_remapAssociations` is merge-safe without a
-redirect table.
+**Merge-safety note on forward pass:** `dbGetCanonicalByExternalId` reads `identity_map`
+fresh. The forward pass correctly stores the winner UUID immediately after a merge (because
+`identity_map` is live-updated). The stale-UUID problem only affects existing
+`canonical_data` blobs that were written in a *previous* cycle before the merge occurred.
+Those stale values are handled by `dbResolveCanonicalRedirect` on the reverse pass (§3.4).
 
 ---
 
@@ -183,9 +325,12 @@ for (const fm of channelMember.fieldMappings ?? []) {
   if (!fm.references) continue;
   const target = fm.target ?? fm.source;
   if (!target) continue;
-  const canonId = outboundRecord[target];
-  if (canonId == null) continue;
-  const localId = dbGetExternalId(this.db, String(canonId), targetConnectorId);
+  const rawCanonId = outboundRecord[target];
+  if (rawCanonId == null) continue;
+  // Follow a redirect in case this UUID was merged and its shadow_state value is stale.
+  // canonical_redirects is always one-hop due to chain flattening in dbMergeCanonicals.
+  const canonId = dbResolveCanonicalRedirect(this.db, String(rawCanonId));
+  const localId = dbGetExternalId(this.db, canonId, targetConnectorId);
   outboundRecord[target] = localId ?? null;
   // null when no identity_map entry exists for the target connector
   // (referenced entity not yet synced to this connector).
@@ -193,13 +338,8 @@ for (const fm of channelMember.fieldMappings ?? []) {
 ```
 
 `dbGetExternalId` is already used in the association dispatch path — this wires it into
-the field-mapping outbound path for the first time.
-
-**Merge safety:** `dbMergeCanonicals` rewrites all `identity_map` rows for the losing canonical
-to the winner. shadow_state canonical_data stores the canonical UUID (written on the forward
-pass). After a merge the forward pass will write the winner UUID on the next ingest cycle;
-`dbGetExternalId` will return the correct target-local ID for the winner. No special handling
-is needed.
+the field-mapping outbound path for the first time. `dbResolveCanonicalRedirect` is the
+new one-hop redirect lookup that prevents the flip-flop described in §1.3.
 
 ---
 
@@ -210,8 +350,9 @@ is needed.
 | FK value is null in source | Skipped; null is stored as-is in canonical. |
 | Referenced entity not yet ingested (forward pass) | Store null; re-resolved next cycle once the referenced entity is ingested. |
 | Referenced entity not yet synced to target (reverse pass) | Write null to target; retried next cycle. |
-| Entity merge occurs between cycles | Forward pass on next cycle writes winner UUID via `dbGetCanonicalByExternalId`. Reverse pass immediately reads winner UUID out of shadow_state canonical_data and translates it. No special handling required. |
-| `references_field` (ISO code translation) | Not covered; deferred. Spec status stays "requires design work". |
+| Entity merge occurs between cycles | `canonical_redirects` row written by `dbMergeCanonicals`. Reverse pass calls `dbResolveCanonicalRedirect(staleUUID)` → winner UUID → target-local ID. Stable. Next forward cycle stores winner UUID directly; redirect row becomes a passthrough (redirected to itself is never inserted; it simply stays in the table but is no longer exercised). |
+| Multi-step merge (A→B then B→C) | Chain-flattening UPDATE in `dbMergeCanonicals` turns A→B into A→C before inserting B→C. All redirect lookups remain one-hop. |
+| `references_field` ambiguous match | Two entities have the same value for the referenced field (e.g. duplicate domains). Engine uses `LIMIT 1`, picks an arbitrary canonical entity, and logs a warning. Data quality issue; engine behaviour is defined. |
 
 ---
 
@@ -220,14 +361,24 @@ is needed.
 - **FK forward translation — known referenced entity:** source record has `account_id = "crm-456"`; identity_map contains `("crm", "accounts", "crm-456", "uuid-ABC")`; after ingest, canonical shadow has `accountId = "uuid-ABC"`.
 - **FK forward translation — unknown referenced entity:** referenced entity not yet in identity_map; `accountId` stored as null; re-resolved on next cycle after the referenced entity is ingested.
 - **FK reverse translation:** outbound uses `dbGetExternalId("uuid-ABC", "erp-connector")` → writes ERP-local ID to the dispatched record.
-- **FK reverse translation — merge-safe:** merge canonical "uuid-X" into "uuid-Y" (via `dbMergeCanonicals`); next forward cycle stores `accountId = "uuid-Y"` in shadow_state; `dbGetExternalId("uuid-Y", "erp")` returns the correct ERP-local ID.
+- **FK reverse translation — stale UUID after merge:** before merge, shadow_state has `accountId = "uuid-loser"`; `dbMergeCanonicals("uuid-winner", "uuid-loser")` inserts a redirect row; reverse pass: `dbResolveCanonicalRedirect("uuid-loser")` → `"uuid-winner"` → `dbGetExternalId("uuid-winner", erp)` → correct local ID. No null dispatch.
 - **No-op when `references` absent:** records without `references`-annotated fields pass through the translation steps unmodified (regression guard).
-- **Two sources, same referenced entity:** source A stores `account_id = "A-10"`, source B stores `account_id = "B-20"`; both resolve to `uuid-ABC` after forward translation; conflict resolution correctly picks one winning UUID (rather than treating two distinct strings as a conflict between different entities).
+- **`references_field` — named canonical field match (cross-connector FK):** ERP accounts channel maps `source: id, target: erpId, direction: forward_only`; HubSpot contacts channel maps `erp_account_id → accountId, references: accounts, references_field: erpId`; forward pass calls `dbFindCanonicalByFieldValue(db, "accounts", "erpId", "ACC-001")` → `uuid-ABC`; canonical shadow stores `accountId = "uuid-ABC"`; reverse pass to ERP writes `"ACC-001"`, reverse pass to HubSpot writes HubSpot's own account ID.
+- **`references_field` — non-PK attribute match:** contacts channel maps `company_domain → companyId, references: companies, references_field: domain`; `dbFindCanonicalByFieldValue(db, "companies", "domain", "acme.com")` → `uuid-XYZ`.
+- **Two sources, same referenced entity, both using `references`:** ERP and CRM both store their own local `account_id`; both resolve to same `uuid-ABC` via identity_map; conflict resolution sees one canonical UUID from both sources rather than two different strings.
 
 ---
 
 ## § 6 Out of Scope
 
-- `references_field` (alternative representation translation, e.g. ISO code ↔ UUID) — `specs/field-mapping.md §4.2`, marked "requires design work".
-- Vocabulary targets — `specs/field-mapping.md §4.3`, marked "requires design work".
-- Enriched cross-entity expressions (computed fields that aggregate across entity types) — `specs/field-mapping.md status note §1068`, a separate post-resolution enrichment pass not related to FK translation.
+### Vocabulary targets
+
+A canonical entity used purely as a lookup table, seeded once and never synced bidirectionally.
+The `references` + `references_field` mechanism covers the FK resolution side. The
+`vocabulary: true` flag (suppress reverse dispatch) is a separate config concept.
+See `specs/field-mapping.md §4.3`, marked "requires design work".
+
+### Enriched cross-entity expressions
+
+Computed fields that aggregate across entity types — a separate post-resolution enrichment
+pass unrelated to FK translation. See `specs/field-mapping.md` status note at line 1068.

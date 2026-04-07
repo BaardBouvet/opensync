@@ -1,6 +1,6 @@
 # Plan: Nested Array Ordering (Custom Sort, CRDT Ordinal, CRDT Linked-List)
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** Engine, field-mapping  

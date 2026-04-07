@@ -33,6 +33,7 @@ import {
   dbGetAllShadowForEntity,
   shadowToCanonical,
   buildFieldData,
+  dbDeleteShadow,
   dbLogTransaction,
   dbLogSyncRun,
   dbGetChannelStatus,
@@ -58,6 +59,7 @@ import {
   extractHopKeys,
   patchNestedElement,
   deriveChildCanonicalId,
+  applySortToLeafArray,
 } from "./core/array-expander.js";
 
 // ─── Public result types ──────────────────────────────────────────────────────
@@ -354,6 +356,13 @@ export class SyncEngine {
               }
             } else {
               // Standard (non-expansion) collectOnly
+              // Spec: specs/field-mapping.md §5.1 — record filter on flat members
+              if (sourceMember.recordFilter && !sourceMember.recordFilter(stripped)) {
+                // Record fails filter: clear any existing shadow so it no longer contributes.
+                const existingForDelete = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
+                if (existingForDelete) dbDeleteShadow(this.db, connectorId, sourceMember.entity, record.id);
+                continue;
+              }
               const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
               const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
               const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
@@ -1387,6 +1396,13 @@ export class SyncEngine {
 
     const localData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
 
+    // Spec: specs/field-mapping.md §5.2 — reverse record filter on flat members.
+    // Applied before the written_state noop check so filtered-out canonicals don't get a
+    // written_state row — the filter is re-evaluated on the next cycle.
+    if (targetMember.recordReverseFilter && !targetMember.recordReverseFilter(localData)) {
+      return { type: "skip" };
+    }
+
     // Spec: specs/field-mapping.md §1.6 — reverse_required guard.
     // Suppress dispatch when a required field is null/absent in the outbound-mapped record.
     if (isDispatchBlocked(localData, targetMember.outbound)) return { type: "skip" };
@@ -1675,6 +1691,19 @@ export class SyncEngine {
     for (const record of records) {
       const raw = record.data as Record<string, unknown>;
       const stripped = Object.fromEntries(Object.entries(raw).filter(([k]) => !k.startsWith("_")));
+
+      // Spec: specs/field-mapping.md §5.1 — record-level filter on flat (non-array) members.
+      // Applied to the raw stripped record before inbound mapping.
+      if (sourceMember.recordFilter && !sourceMember.recordFilter(stripped)) {
+        // Record fails filter: clear any existing shadow so it no longer contributes.
+        // TODO: see PLAN_DELETE_PROPAGATION.md — if this was the only source,
+        // the canonical goes stale but no delete dispatch is issued.
+        const existingForDelete = dbGetShadow(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
+        if (existingForDelete) dbDeleteShadow(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
+        results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: "", targetId: record.id });
+        continue;
+      }
+
       const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
 
       const assocSentinel = record.associations === undefined
@@ -2036,6 +2065,12 @@ export class SyncEngine {
         results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
       }
       return { results, hasError: false };
+    }
+
+    // Spec: specs/field-mapping.md §6 — apply ordering to the leaf array after all patches,
+    // before write-back to the target connector.
+    if (collapseTarget.orderBy || collapseTarget.crdtOrder || collapseTarget.crdtLinkedList) {
+      applySortToLeafArray(patchedData, chain, collapseTarget);
     }
 
     // Write the patched parent back to the target connector

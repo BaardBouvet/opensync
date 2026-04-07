@@ -109,27 +109,68 @@ export function expandArrayRecord(
 
   for (let i = 0; i < node.length; i++) {
     const element = node[i];
-    if (element === null || typeof element !== 'object' || Array.isArray(element)) {
-      // Skip non-object elements (scalar arrays not yet supported)
+
+    // Spec: specs/field-mapping.md §3.3 — scalar array mode
+    const isScalar = member.scalar === true;
+    if (!isScalar) {
+      if (element === null || typeof element !== 'object' || Array.isArray(element)) {
+        // Skip non-object elements (use scalar: true for bare-scalar arrays)
+        continue;
+      }
+    } else {
+      // Scalar: skip null and undefined
+      if (element === null || element === undefined) continue;
+    }
+
+    let elementObj: Record<string, unknown>;
+    let elementKeyValue: string;
+
+    if (isScalar) {
+      // Spec: specs/field-mapping.md §3.3 — wrap scalar as { _value: element }
+      elementObj = { _value: element };
+      // Element identity is the string form of the scalar value (set semantics — duplicates deduplicated)
+      elementKeyValue = String(element);
+    } else {
+      elementObj = element as Record<string, unknown>;
+      elementKeyValue =
+        member.elementKey !== undefined && member.elementKey in elementObj
+          ? String(elementObj[member.elementKey])
+          : String(i);
+    }
+
+    // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.2 — forward filter.
+    // For scalar members, `element` binding is the raw scalar value (not the wrapped object).
+    const filterArg = isScalar ? element : elementObj;
+    if (member.elementFilter && !member.elementFilter(filterArg, rawData, i)) {
       continue;
     }
-    const elementObj = element as Record<string, unknown>;
-
-    // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.2 — forward filter
-    if (member.elementFilter && !member.elementFilter(elementObj, rawData, i)) {
-      continue;
-    }
-
-    // Stable element identity
-    const elementKeyValue =
-      member.elementKey !== undefined && member.elementKey in elementObj
-        ? String(elementObj[member.elementKey])
-        : String(i);
 
     const childId = `${parentId}#${member.arrayPath}[${elementKeyValue}]`;
 
     // Merge parent scope into element (element fields win on collision)
     const mergedData: Record<string, unknown> = { ...parentScope, ...elementObj };
+
+    // Spec: specs/field-mapping.md §6.2 — CRDT ordinal: inject _ordinal from source position
+    if (member.crdtOrder) {
+      mergedData["_ordinal"] = i;
+    }
+
+    // Spec: specs/field-mapping.md §6.3 — CRDT linked-list: inject _prev / _next pointers
+    if (member.crdtLinkedList) {
+      const keyFn = (el: unknown): string | null => {
+        if (el === null || el === undefined) return null;
+        if (isScalar) return String(el);
+        if (typeof el === "object" && !Array.isArray(el) && member.elementKey) {
+          const v = (el as Record<string, unknown>)[member.elementKey];
+          return v !== undefined ? String(v) : null;
+        }
+        return null;
+      };
+      const prevEl = i > 0 ? node[i - 1] : undefined;
+      const nextEl = i < node.length - 1 ? node[i + 1] : undefined;
+      mergedData["_prev"] = prevEl !== undefined ? (keyFn(prevEl) ?? String(i - 1)) : null;
+      mergedData["_next"] = nextEl !== undefined ? (keyFn(nextEl) ?? String(i + 1)) : null;
+    }
 
     childRecords.push({ id: childId, data: mergedData });
   }
@@ -193,6 +234,9 @@ export function expandArrayChain(
     arrayPath: level.arrayPath,
     elementKey: level.elementKey,
     parentFields: level.parentFields,
+    scalar: level.scalar,
+    crdtOrder: isLeaf ? level.crdtOrder : undefined,
+    crdtLinkedList: isLeaf ? level.crdtLinkedList : undefined,
     elementFilter: isLeaf ? elementFilter : undefined,
   });
 
@@ -258,4 +302,148 @@ export function patchNestedElement(
 
   arr[idx] = { ...(arr[idx] as Record<string, unknown>), ...localPatch };
   return true;
+}
+
+// ─── Array ordering utilities (specs/field-mapping.md §6) ────────────────────
+
+/**
+ * Strip CRDT synthetic fields from each element before write-back.
+ * If a field is explicitly mapped in outbound, the user wants it preserved.
+ * Spec: specs/field-mapping.md §6.2/§6.3
+ */
+function stripCrdtFields(
+  arr: Record<string, unknown>[],
+  member: Pick<ChannelMember, "crdtOrder" | "crdtLinkedList" | "outbound">,
+): void {
+  const mappedFields = new Set(member.outbound?.map((f) => f.source) ?? []);
+  for (const el of arr) {
+    if (member.crdtOrder && !mappedFields.has("_ordinal")) delete el["_ordinal"];
+    if (member.crdtLinkedList && !mappedFields.has("_prev")) delete el["_prev"];
+    if (member.crdtLinkedList && !mappedFields.has("_next")) delete el["_next"];
+  }
+}
+
+/**
+ * Spec: specs/field-mapping.md §6 — Apply post-collapse ordering to the leaf array.
+ *
+ * Navigates `rootData` through `chain` to reach the leaf array, then sorts it
+ * according to the ordering configuration on `member`.  Modifies the array in place.
+ *
+ * Only one of orderBy / crdtOrder / crdtLinkedList should be set on `member`
+ * (mutual exclusion enforced at config-load time).
+ *
+ * Strips CRDT synthetic fields after sorting so they don't reach the target connector
+ * unless explicitly mapped via outbound.
+ */
+export function applySortToLeafArray(
+  rootData: Record<string, unknown>,
+  chain: ExpansionChainLevel[],
+  member: Pick<ChannelMember, "orderBy" | "crdtOrder" | "crdtLinkedList" | "elementKey" | "outbound">,
+): void {
+  if (!member.orderBy?.length && !member.crdtOrder && !member.crdtLinkedList) return;
+
+  // Navigate to the leaf array through intermediate hops
+  let node: Record<string, unknown> = rootData;
+  for (let i = 0; i < chain.length - 1; i++) {
+    const hop = chain[i]!;
+    const arr = node[hop.arrayPath];
+    if (!Array.isArray(arr) || arr.length === 0) return;
+    // Pick the first element as the intermediate (for multi-level, the caller already
+    // isolated the specific root so the array has exactly one matching parent).
+    // If elementKey is defined on the hop, we could navigate precisely, but for the
+    // current collapse-batch model (one root per call) the first element is always correct.
+    const first = arr[0];
+    if (first === null || typeof first !== "object" || Array.isArray(first)) return;
+    node = first as Record<string, unknown>;
+  }
+
+  const leafLevel = chain[chain.length - 1]!;
+  const leafArr = node[leafLevel.arrayPath];
+  if (!Array.isArray(leafArr)) return;
+
+  const elems = leafArr as Record<string, unknown>[];
+
+  if (member.orderBy?.length) {
+    // Spec: §6.1 — multi-key custom sort
+    elems.sort((a, b) => {
+      for (const key of member.orderBy!) {
+        const av = a[key.field];
+        const bv = b[key.field];
+        const an = Number(av), bn = Number(bv);
+        let cmp: number;
+        if (Number.isFinite(an) && Number.isFinite(bn)) {
+          cmp = an - bn;
+        } else {
+          cmp = String(av ?? "").localeCompare(String(bv ?? ""));
+        }
+        if (cmp !== 0) return key.direction === "desc" ? -cmp : cmp;
+      }
+      return 0;
+    });
+  } else if (member.crdtOrder) {
+    // Spec: §6.2 — sort by _ordinal ascending; elements without _ordinal sort last
+    elems.sort((a, b) => {
+      const ao = a["_ordinal"], bo = b["_ordinal"];
+      if (ao === undefined && bo === undefined) return 0;
+      if (ao === undefined) return 1;
+      if (bo === undefined) return -1;
+      return Number(ao) - Number(bo);
+    });
+    stripCrdtFields(elems, member);
+  } else if (member.crdtLinkedList) {
+    // Spec: §6.3 — linked-list reconstruction from _prev / _next pointers
+    // Build a map from elementKey value → element
+    const keyField = member.elementKey;
+    const keyOf = (el: Record<string, unknown>): string => {
+      if (keyField) return String(el[keyField] ?? "");
+      // fall back to _prev/_next sibling detection by position
+      return "";
+    };
+
+    const byKey = new Map<string, Record<string, unknown>>();
+    const keyList: string[] = [];
+    for (const el of elems) {
+      const k = keyOf(el);
+      if (k) { byKey.set(k, el); keyList.push(k); }
+    }
+
+    if (byKey.size === 0) {
+      // No keys — can't reconstruct; leave in place
+      stripCrdtFields(elems, member);
+      return;
+    }
+
+    // Find the head: element whose _prev is null or not in the map
+    let headKey: string | undefined;
+    for (const [k, el] of byKey) {
+      const prev = el["_prev"];
+      if (prev === null || prev === undefined || !byKey.has(String(prev))) {
+        headKey = k;
+        break;
+      }
+    }
+    if (!headKey) headKey = keyList[0]; // cycle guard fallback
+
+    // Walk the chain
+    const ordered: Record<string, unknown>[] = [];
+    const visited = new Set<string>();
+    let cursor: string | null | undefined = headKey;
+    while (cursor && byKey.has(cursor) && !visited.has(cursor)) {
+      const el = byKey.get(cursor)!;
+      ordered.push(el);
+      visited.add(cursor);
+      const next = el["_next"];
+      cursor = (next !== null && next !== undefined) ? String(next) : null;
+    }
+
+    // Append any elements not reached (broken chain or cycle guard)
+    for (const [k, el] of byKey) {
+      if (!visited.has(k)) ordered.push(el);
+    }
+
+    // Replace in-place
+    for (let i = 0; i < ordered.length; i++) elems[i] = ordered[i]!;
+
+    stripCrdtFields(elems, member);
+  }
 }

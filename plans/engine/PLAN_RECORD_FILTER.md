@@ -1,6 +1,6 @@
 # Record-Level Filter and Routing
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** S  
 **Domain:** engine  

@@ -86,6 +86,15 @@ export const MappingEntrySchema = z.object({
   // Element filters (plans/engine/PLAN_ELEMENT_FILTER.md)
   filter: z.string().optional(),         // JS expression string — forward pass element filter
   reverse_filter: z.string().optional(), // JS expression string — reverse pass element filter
+  // Scalar array expansion (specs/field-mapping.md §3.3)
+  scalar: z.boolean().optional(),        // when true, elements are bare scalars; mutually exclusive with element_key
+  // Array ordering (specs/field-mapping.md §6)
+  order_by: z.array(z.object({
+    field: z.string(),
+    direction: z.enum(["asc", "desc"]).default("asc"),
+  })).optional(),
+  order: z.boolean().optional(),
+  order_linked_list: z.boolean().optional(),
 });
 
 export const MappingsFileSchema = z.object({

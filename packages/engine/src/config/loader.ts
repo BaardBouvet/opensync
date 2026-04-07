@@ -55,6 +55,14 @@ export interface FieldMapping {
    *  winning source, preventing incoherent field mixes (e.g. address parts from different sources).
    *  Spec: specs/field-mapping.md §1.8 */
   group?: string;
+  /** Resolution-time incremental reducer (TypeScript embedded API only — not serialisable to YAML).
+   *  Called instead of fieldStrategies / global strategy when present.
+   *  Runs after the group pre-pass and normalize precision-loss guard.
+   *  @param incoming The value arriving from the current source.
+   *  @param existing The current canonical value (previous winner). `undefined` on first ingest.
+   *  @returns The new canonical value to store.
+   *  Spec: specs/field-mapping.md §2.3 */
+  resolve?: (incoming: unknown, existing: unknown | undefined) => unknown;
 }
 
 export type FieldMappingList = FieldMapping[];
@@ -72,6 +80,12 @@ export interface ExpansionChainLevel {
   arrayPath: string;
   elementKey?: string;
   parentFields?: Record<string, string | { path?: string; field: string }>;
+  /** Spec: specs/field-mapping.md §3.3 — elements are bare scalars, not objects. */
+  scalar?: boolean;
+  // Spec: specs/field-mapping.md §6 — ordering (leaf level only)
+  orderBy?: Array<{ field: string; direction: "asc" | "desc" }>;
+  crdtOrder?: boolean;
+  crdtLinkedList?: boolean;
 }
 
 export interface ChannelMember {
@@ -102,6 +116,23 @@ export interface ChannelMember {
   /** Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.3 — reverse filter.
    * When set, collapse patches are only applied to elements for which this returns true. */
   elementReverseFilter?: (element: unknown, parent: unknown, index: number) => boolean;
+  /** Spec: specs/field-mapping.md §3.3 — scalar array mode.
+   * When true, elements at arrayPath are bare scalars. Each value is wrapped as { _value: element }.
+   * Mutually exclusive with elementKey at config-load time. */
+  scalar?: boolean;
+  // Spec: specs/field-mapping.md §6 — ordering (leaf level only; applied during collapse)
+  orderBy?: Array<{ field: string; direction: "asc" | "desc" }>;
+  crdtOrder?: boolean;
+  crdtLinkedList?: boolean;
+  /** Spec: specs/field-mapping.md §5.1 — forward record filter (flat members only).
+   * When set, only source records for which this returns true contribute to resolution.
+   * Records that previously matched but now fail are treated as soft-delete contributions
+   * (shadow cleared). Not present on array expansion members (those use elementFilter). */
+  recordFilter?: (record: Record<string, unknown>) => boolean;
+  /** Spec: specs/field-mapping.md §5.2 — reverse record filter (flat members only).
+   * When set, canonical entities for which this returns false are skipped for this connector.
+   * No written_state row is written. Not present on array expansion members. */
+  recordReverseFilter?: (record: Record<string, unknown>) => boolean;
 }
 
 export interface ChannelConfig {
@@ -136,7 +167,7 @@ export interface ConflictConfig {
   strategy: "lww" | "field_master";
   fieldMasters?: Record<string, string>;
   connectorPriorities?: Record<string, number>;
-  fieldStrategies?: Record<string, { strategy: "coalesce" | "last_modified" | "collect" }>;
+  fieldStrategies?: Record<string, { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" }>;
 }
 
 export interface ResolvedConfig {
@@ -282,6 +313,15 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       if (!entry.array_path) {
         throw new Error(`Mapping entry in channel "${entry.channel}" with parent "${entry.parent}" must declare array_path`);
       }
+      // Spec: specs/field-mapping.md §3.3 — scalar: true and element_key are mutually exclusive
+      if (entry.scalar && entry.element_key) {
+        throw new Error(`Mapping in channel "${entry.channel}" with scalar: true must not declare element_key`);
+      }
+      // Spec: specs/field-mapping.md §6 — ordering methods are mutually exclusive per entry
+      const orderCount = [entry.order_by, entry.order, entry.order_linked_list].filter(Boolean).length;
+      if (orderCount > 1) {
+        throw new Error(`Mapping in channel "${entry.channel}" specifies more than one ordering method (order_by, order, order_linked_list); only one is allowed`);
+      }
       // Spec: specs/field-mapping.md §3.4 — walk the full parent chain transitively
       const chainResult = resolveExpansionChain(entry, namedMappings);
       resolvedConnectorId = entry.connector ?? chainResult.connectorId;
@@ -303,9 +343,26 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
     const inbound = entry.fields ? buildInbound(entry.fields) : undefined;
     const outbound = entry.fields ? buildOutbound(entry.fields) : undefined;
 
-    // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.2 — compile filter expressions once at load time
-    const elementFilter = entry.filter ? compileElementFilter(entry.filter, entry.channel) : undefined;
-    const elementReverseFilter = entry.reverse_filter ? compileElementFilter(entry.reverse_filter, entry.channel) : undefined;
+    // Spec: specs/field-mapping.md §3.2/§5 — compile filter expressions once at load time.
+    // Two compilation paths based on context: array expansion members use element-level
+    // bindings (element, parent, index); flat members use record-level binding (record).
+    const isArrayMember = !!(entry.array_path || entry.parent);
+
+    // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.2 — array expansion element filters
+    const elementFilter = isArrayMember && entry.filter
+      ? compileElementFilter(entry.filter, entry.channel)
+      : undefined;
+    const elementReverseFilter = isArrayMember && entry.reverse_filter
+      ? compileElementFilter(entry.reverse_filter, entry.channel)
+      : undefined;
+
+    // Spec: specs/field-mapping.md §5.1/§5.2 — flat member record-level filters
+    const recordFilter = !isArrayMember && entry.filter
+      ? compileRecordFilter(entry.filter, entry.channel)
+      : undefined;
+    const recordReverseFilter = !isArrayMember && entry.reverse_filter
+      ? compileRecordFilter(entry.reverse_filter, entry.channel)
+      : undefined;
 
     ch.members.push({
       name: entry.name,
@@ -321,8 +378,15 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       parentFields: entry.parent_fields as Record<string, string | { path?: string; field: string }> | undefined,
       elementKey: entry.element_key,
       expansionChain,
+      scalar: entry.scalar,
+      // Ordering (specs/field-mapping.md §6)
+      orderBy: entry.order_by as Array<{ field: string; direction: "asc" | "desc" }> | undefined,
+      crdtOrder: entry.order ?? undefined,
+      crdtLinkedList: entry.order_linked_list ?? undefined,
       elementFilter,
       elementReverseFilter,
+      recordFilter,
+      recordReverseFilter,
     });
   }
 
@@ -399,6 +463,10 @@ function resolveExpansionChain(
       arrayPath: cursor.array_path!,
       elementKey: cursor.element_key,
       parentFields: cursor.parent_fields as Record<string, string | { path?: string; field: string }> | undefined,
+      scalar: cursor.scalar,
+      orderBy: cursor.order_by as Array<{ field: string; direction: "asc" | "desc" }> | undefined,
+      crdtOrder: cursor.order ?? undefined,
+      crdtLinkedList: cursor.order_linked_list ?? undefined,
     });
     cursor = parentEntry;
   }
@@ -490,4 +558,27 @@ function compileElementFilter(
     );
   }
   return (element, parent, index) => Boolean(fn(element, parent, index));
+}
+
+// ─── compileRecordFilter ──────────────────────────────────────────────────────
+
+/** Spec: specs/field-mapping.md §5.1/§5.2
+ * Compile a record-level filter/reverse_filter expression string into a typed predicate.
+ * Throws at config load time if the expression cannot be parsed.
+ * Security note: new Function executes arbitrary JS — disable in untrusted multi-tenant
+ * deployments or isolate in a worker. See PLAN_RECORD_FILTER.md §6. */
+function compileRecordFilter(
+  expression: string,
+  channelId: string,
+): (record: Record<string, unknown>) => boolean {
+  let fn: (record: Record<string, unknown>) => unknown;
+  try {
+    // eslint-disable-next-line no-new-func
+    fn = new Function("record", `return (${expression});`) as typeof fn;
+  } catch (err) {
+    throw new Error(
+      `Record filter expression in channel "${channelId}" failed to compile: ${String(err)}\n  Expression: ${expression}`,
+    );
+  }
+  return (record) => Boolean(fn(record));
 }

@@ -1,6 +1,6 @@
 # Plan: Scalar Array Expansion
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** S  
 **Domain:** Engine  

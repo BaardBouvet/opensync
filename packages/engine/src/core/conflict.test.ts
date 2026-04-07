@@ -256,3 +256,234 @@ describe("FG8: new record (no shadow) — all fields accepted regardless of grou
     expect(result).toEqual({ street: "2 Oak", city: "Shelby" });
   });
 });
+
+// ═══ RS: collect strategy ════════════════════════════════════════════════════
+// Spec: specs/field-mapping.md §2.4
+// Plans: plans/engine/PLAN_RESOLUTION_STRATEGIES.md §4.1
+
+describe("RS1: collect — first source sets initial scalar", () => {
+  it("first source with no shadow: field accepted via fast-path → scalar returned as-is", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { tags: { strategy: "collect" } },
+    };
+    // No existing shadow (first ingest) → fast-path returns incoming unchanged
+    const result = resolveConflicts(
+      { tags: "vip" },
+      undefined,
+      "crm", 100,
+      config,
+    );
+    expect(result).toEqual({ tags: "vip" });
+  });
+});
+
+describe("RS2: collect — second source appends to scalar → array", () => {
+  it("second source sends a different value; accumulates into array", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { tags: { strategy: "collect" } },
+    };
+    const existingShadow = shadow({ tags: { val: "vip", src: "crm", ts: 100 } });
+    const result = resolveConflicts(
+      { tags: "churned" },
+      existingShadow,
+      "erp", 200,
+      config,
+    );
+    expect(result).toEqual({ tags: ["vip", "churned"] });
+  });
+});
+
+describe("RS3: collect — duplicate value not re-added", () => {
+  it("third source sends same as existing element → array value unchanged (no new element)", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { tags: { strategy: "collect" } },
+    };
+    const existingShadow = shadow({ tags: { val: ["vip", "churned"], src: "crm", ts: 100 } });
+    const result = resolveConflicts(
+      { tags: "vip" },
+      existingShadow,
+      "erp", 200,
+      config,
+    );
+    // "vip" already in array — collect returns the existing array (no new element added)
+    expect(result).toEqual({ tags: ["vip", "churned"] });
+  });
+});
+
+describe("RS4: collect — merges unique values from array source", () => {
+  it("incoming is an array; unique elements are appended", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { tags: { strategy: "collect" } },
+    };
+    // existing has ["a", "b"], incoming is "c"
+    const existingShadow = shadow({ tags: { val: ["a", "b"], src: "crm", ts: 100 } });
+    const result = resolveConflicts(
+      { tags: "c" },
+      existingShadow,
+      "erp", 200,
+      config,
+    );
+    expect(result).toEqual({ tags: ["a", "b", "c"] });
+  });
+});
+
+// ═══ BO: bool_or strategy ════════════════════════════════════════════════════
+// Spec: specs/field-mapping.md §2.5
+// Plans: plans/engine/PLAN_RESOLUTION_STRATEGIES.md §4.2
+
+describe("BO1: bool_or — first source sends true: accepted", () => {
+  it("incoming true accepted when shadow holds false", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ deleted: true }, existingShadow, "erp", 200, config);
+    expect(result).toEqual({ deleted: true });
+  });
+});
+
+describe("BO2: bool_or — first source sends false (no prior shadow): accepted via fast-path", () => {
+  it("first ingest (no shadow) falls through to fast-path", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const result = resolveConflicts({ deleted: false }, undefined, "erp", 200, config);
+    expect(result).toEqual({ deleted: false });
+  });
+});
+
+describe("BO3: bool_or — existing true, incoming false: no overwrite", () => {
+  it("existing shadow = true; incoming false must not overwrite", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const existingShadow = shadow({ deleted: { val: true, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ deleted: false }, existingShadow, "erp", 200, config);
+    expect(result).toEqual({});
+  });
+});
+
+describe("BO4: bool_or — existing false, incoming true: updated to true", () => {
+  it("shadow = false → incoming true causes update", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ deleted: true }, existingShadow, "erp", 200, config);
+    expect(result).toEqual({ deleted: true });
+  });
+});
+
+describe("BO5: bool_or — both false: no change", () => {
+  it("existing false, incoming false → no resolved field", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ deleted: false }, existingShadow, "erp", 200, config);
+    expect(result).toEqual({});
+  });
+});
+
+describe("BO6: bool_or — null shadow, truthy string incoming: updated to true", () => {
+  it("shadow = null/undefined, incoming truthy string → resolved to true", () => {
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { deleted: { strategy: "bool_or" } },
+    };
+    const existingShadow = shadow({ deleted: { val: null, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ deleted: "yes" }, existingShadow, "erp", 200, config);
+    expect(result).toEqual({ deleted: true });
+  });
+});
+
+// ═══ ER: expression resolver (resolve function) ══════════════════════════════
+// Spec: specs/field-mapping.md §2.3
+// Plans: plans/engine/PLAN_RESOLUTION_STRATEGIES.md §4.3
+
+describe("ER1: resolve — first source sets initial value", () => {
+  it("Math.max resolver: first source (no existing) returns incoming value", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "score", resolve: (v, acc) => Math.max(Number(v) || 0, Number(acc) || 0) },
+    ];
+    const result = resolveConflicts({ score: 42 }, undefined, "crm", 100, lww, fieldMappings);
+    expect(result).toEqual({ score: 42 });
+  });
+});
+
+describe("ER2: resolve — second source with higher value wins", () => {
+  it("Math.max resolver: incoming 99 > existing 42 → resolved = 99", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "score", resolve: (v, acc) => Math.max(Number(v) || 0, Number(acc) || 0) },
+    ];
+    const existingShadow = shadow({ score: { val: 42, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ score: 99 }, existingShadow, "erp", 200, lww, fieldMappings);
+    expect(result).toEqual({ score: 99 });
+  });
+});
+
+describe("ER3: resolve — second source with lower value: existing preserved", () => {
+  it("Math.max resolver: incoming 5 < existing 42 → resolver returns 42 (max stays)", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "score", resolve: (v, acc) => Math.max(Number(v) || 0, Number(acc) || 0) },
+    ];
+    const existingShadow = shadow({ score: { val: 42, src: "crm", ts: 100 } });
+    const result = resolveConflicts({ score: 5 }, existingShadow, "erp", 200, lww, fieldMappings);
+    // resolver returns 42 (max(5,42)); downstream noop check will suppress if shadow is already 42
+    expect(result).toEqual({ score: 42 });
+  });
+});
+
+describe("ER4: resolve — resolver returning undefined produces noop", () => {
+  it("resolve returns undefined → field not emitted", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "computed", resolve: () => undefined },
+    ];
+    const existingShadow = shadow({ computed: { val: "old", src: "crm", ts: 100 } });
+    const result = resolveConflicts({ computed: "new" }, existingShadow, "erp", 200, lww, fieldMappings);
+    expect(result).toEqual({ computed: undefined });
+  });
+});
+
+describe("ER5: resolve takes precedence over fieldStrategies", () => {
+  it("resolve function wins over fieldStrategies collect when both present", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "score", resolve: (v, _acc) => String(v).toUpperCase() },
+    ];
+    const config: ConflictConfig = {
+      strategy: "lww",
+      fieldStrategies: { score: { strategy: "collect" } },
+    };
+    const existingShadow = shadow({ score: { val: "alpha", src: "crm", ts: 100 } });
+    const result = resolveConflicts({ score: "beta" }, existingShadow, "erp", 200, config, fieldMappings);
+    // resolve takes precedence → "BETA" (not ["alpha", "beta"])
+    expect(result).toEqual({ score: "BETA" });
+  });
+});
+
+describe("ER6: resolve runs after normalize guard", () => {
+  it("normalize guard suppresses resolve when value is precision-equivalent", () => {
+    const strip = (v: unknown) => String(v).replace(/\s/g, "");
+    const fieldMappings: FieldMappingList = [
+      {
+        target: "code",
+        normalize: strip,
+        resolve: (_v, _acc) => "SHOULD_NOT_APPEAR",
+      },
+    ];
+    const existingShadow = shadow({ code: { val: "ABC123", src: "crm", ts: 100 } });
+    // Incoming "ABC 123" normalizes to same as existing "ABC123" → noop guard fires before resolve
+    const result = resolveConflicts({ code: "ABC 123" }, existingShadow, "erp", 200, lww, fieldMappings);
+    expect(result).toEqual({});
+  });
+});
+

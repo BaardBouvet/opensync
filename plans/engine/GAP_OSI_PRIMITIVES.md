@@ -54,14 +54,14 @@ Custom aggregation expression computing the final value. In OSI-mapping this is 
 ### `collect`
 Gather all contributed values without resolution. Returns an array of all source values for the field.
 
-**Foundation: 🔶** No explicit `collect` strategy exists. The shadow state tracks per-source values, so the raw material is there. Needs a resolver that returns a list rather than selecting one winner.
+**Foundation: ✅** `collect` strategy implemented in `conflict.ts`. The shadow state tracks per-source values; `collect` returns an array of all non-null source values for the field. Tests: `conflict.test.ts` RS1–RS4.
 
 ---
 
 ### `bool_or`
 Resolves to `true` if any contributing source has a truthy value. Used for deletion flags or any boolean that propagates across sources.
 
-**Foundation: 🔶** No explicit `bool_or` strategy. Equivalent to a `collect` followed by `Array.some(Boolean)`. Implementable as a named resolver variant. The deletion-flag use case overlaps with [safety.md](safety.md) soft-delete handling.
+**Foundation: ✅** `bool_or` strategy implemented in `conflict.ts`. Resolves to `true` if any contributing source has a truthy value; once latched to `true` it stays `true` (sticky semantics). Tests: `conflict.test.ts` BO1–BO6.
 
 ---
 
@@ -128,7 +128,7 @@ Each nesting level references the previous as parent. Supports arbitrary depth: 
 ### Scalar arrays (`scalar: true`)
 A JSONB array of bare scalar values (e.g. `["vip", "churned"]`) rather than objects. The scalar value doubles as the element identity.
 
-**Foundation: 🔶** The nested array pipeline (§3.2) and multi-level expansion (§3.4) are implemented. Scalar expansion is a variant of that path: when `scalar: true`, each bare element is wrapped as `{ _value: element }` and the value becomes its own identity. Forward pass design is specified in `plans/engine/PLAN_SCALAR_ARRAYS.md` (backlog). Reverse pass (collapse back to a scalar array) is deferred.
+**Foundation: 🔶** Forward pass implemented: when `scalar: true`, each bare element is wrapped as `{ _value: element }` and the value doubles as element identity. `element_key` is mutually exclusive. `filter` expressions receive the raw scalar. Reverse pass (collapse back to scalar array) is a planned follow-on. Tests: `array-expander.test.ts` SA1–SA9.
 
 ---
 
@@ -198,7 +198,7 @@ All fields sharing the same `group` resolve from the same winning source. Preven
 
 Used for routing (discriminator-based: `type = 'customer'` → CRM, `type = 'employee'` → HR), selective sync, and delete propagation control.
 
-**Foundation: ❌** No filter concept in the mapping config or pipeline. Connectors currently control what they return (partial equivalent), but engine-level filtering based on field values is not designed. This is needed for routing patterns.
+**Foundation: ✅** `filter` and `reverse_filter` implemented in the engine pipeline. Source records that fail `filter` are excluded from resolution and have their shadow state cleared. Canonical records that fail `reverse_filter` are skipped for that target connector. Expressions compile at load time via `compileRecordFilter`. Tests: engine record filter path.
 
 ---
 
@@ -316,21 +316,21 @@ Detect concurrent edits — when two sources both changed a field since the last
 ### Custom sort (nested array reconstruction)
 When writing a nested array back to a source, control the ORDER BY inside the array aggregation. Declared as a list of target field names with direction (asc/desc).
 
-**Foundation: 🔶** Nested array expansion and collapse are implemented. `order_by` config key and post-collapse sort are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
+**Foundation: ✅** `order_by` config key and post-collapse sort implemented. Multi-key comparison with numeric and locale-insensitive string ordering. Applied after all element patches are merged, before write-back. Tests: `array-expander.test.ts` OR1–OR5.
 
 ---
 
 ### CRDT ordering (`order: true`)
 Generate a deterministic per-element ordinal from source array position. Enables stable ordering across merges from multiple sources without an explicit ordering column.
 
-**Foundation: 🔶** Nested arrays are implemented. `order: true` config key, `_ordinal` injection on the forward pass, and sort-by-ordinal on collapse are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
+**Foundation: ✅** `order: true` config key and `_ordinal` injection implemented. Forward pass assigns 0-based source position as `_ordinal`; collapse sorts by ordinal ascending (elements without `_ordinal` sort last); field stripped before write-back unless mapped. Tests: `array-expander.test.ts` OR6–OR9.
 
 ---
 
 ### CRDT linked-list (`order_prev` / `order_next`)
 Adjacency pointer metadata for graph-like ordering: each element knows its previous and next sibling. Useful when the source stores linked-list-style ordering.
 
-**Foundation: 🔶** Nested arrays are implemented. `order_linked_list: true` config key, `_prev`/`_next` injection on the forward pass, and linked-list reconstruction on collapse are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
+**Foundation: ✅** `order_linked_list: true` config key, `_prev`/`_next` injection on the forward pass, and linked-list reconstruction on collapse are implemented. Head found via `_prev === null`; chain walked via `_next`; cycle guard (max iterations = array length) prevents infinite loops. Both fields stripped before write-back unless mapped. Tests: `array-expander.test.ts` LL1–LL4.
 
 ---
 
@@ -339,7 +339,7 @@ Adjacency pointer metadata for graph-like ordering: each element knows its previ
 ### Discriminator routing (`filter`)
 Multiple mappings from one source to different targets (or multiple sources to one target) with `filter` conditions acting as discriminators. E.g. `type = 'customer'` rows go to CRM; `type = 'employee'` rows go to HR.
 
-**Foundation: ❌** The engine currently maps an entity type one-to-one to a target entity. Filter-based routing — where the same source entity type fans out to different targets based on field values — is not in the current design.
+**Foundation: 🔶** Implemented via §5.1 `filter` expressions: separate mapping entries per channel with different `filter` conditions fan out one source entity type to different targets. Within-channel routing (same entity type, same channel) is not supported.
 
 ---
 
@@ -407,18 +407,18 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 
 | Category | Total Primitives | ✅ Found | 🔶 Partial | ❌ Gap |
 |----------|-----------------|---------|-----------|-------|
-| Resolution strategies | 6 | 3 | 3 | 0 |
+| Resolution strategies | 6 | 5 | 1 | 0 |
 | Identity & linking | 5 | 0 | 1 | 4 |
 | Nesting & structure | 6 | 0 | 3 | 3 |
 | References & FKs | 5 | 0 | 3 | 2 |
-| Field-level controls | 8 | 1 | 3 | 4 |
+| Field-level controls | 8 | 2 | 3 | 3 |
 | Deletion & tombstones | 4 | 0 | 1 | 3 |
 | Change detection & noop | 4 | 1 | 1 | 2 |
-| Ordering | 3 | 0 | 3 | 0 |
-| Routing & partitioning | 3 | 0 | 0 | 3 |
+| Ordering | 3 | 3 | 0 | 0 |
+| Routing & partitioning | 3 | 0 | 1 | 2 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **6** | **17** | **27** |
+| **Total** | **50** | **12** | **16** | **22** |
 
 ---
 

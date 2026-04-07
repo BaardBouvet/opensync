@@ -242,6 +242,17 @@ export function dbSetShadow(
   ).run(connectorId, entityName, externalId, canonicalId, JSON.stringify(fieldData));
 }
 
+export function dbDeleteShadow(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  externalId: string,
+): void {
+  db.prepare(
+    "DELETE FROM shadow_state WHERE connector_id = ? AND entity_name = ? AND external_id = ?",
+  ).run(connectorId, entityName, externalId);
+}
+
 export function dbGetAllShadowForEntity(
   db: Db,
   connectorId: string,
