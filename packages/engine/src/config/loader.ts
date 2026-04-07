@@ -55,6 +55,11 @@ export interface FieldMapping {
    *  winning source, preventing incoherent field mixes (e.g. address parts from different sources).
    *  Spec: specs/field-mapping.md §1.8 */
   group?: string;
+  /** Connector-side field names read by `expression`. Declared for lineage: when present,
+   *  `buildChannelLineage` emits one ConnectorFieldNode per source (fan-in arrow). When absent
+   *  and expression is set, the diagram shows an `(expression)` placeholder pill.
+   *  Spec: specs/field-mapping.md §1.3 */
+  sources?: string[];
   /** Resolution-time incremental reducer (TypeScript embedded API only — not serialisable to YAML).
    *  Called instead of fieldStrategies / global strategy when present.
    *  Runs after the group pre-pass and normalize precision-loss guard.
@@ -492,6 +497,7 @@ function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
     reverseRequired: f.reverseRequired,
     default: f.default,
     group: f.group,
+    sources: f.sources,
   }));
 }
 
@@ -503,6 +509,7 @@ function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
     direction: f.direction,
     reverseRequired: f.reverseRequired,
     group: f.group,
+    sources: f.sources,
   }));
 }
 

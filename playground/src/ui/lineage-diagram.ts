@@ -164,6 +164,7 @@ function createSVGPath(
   connectorKey: string,
   passthrough: boolean,
   side: "left" | "right",
+  dashed = false,
 ): SVGPathElement {
   const el = document.createElementNS("http://www.w3.org/2000/svg", "path");
   const curve = Math.abs(x2 - x1) * 0.5;
@@ -174,6 +175,7 @@ function createSVGPath(
   el.dataset.side = side;
   el.classList.add("ld-line");
   if (passthrough) el.classList.add("ld-line-passthrough");
+  if (dashed)      el.classList.add("ld-line-dashed");
   return el;
 }
 
@@ -268,7 +270,7 @@ function drawSide(
         if (pillRect.width === 0 && pillRect.height === 0) continue;
         const chipRect = relRect(chip, graphEl);
         const [x1, y1, x2, y2] = endpoints(pillRect, chipRect, side);
-        const path = createSVGPath(x1, y1, x2, y2, f.canonicalField, mk, false, side);
+        const path = createSVGPath(x1, y1, x2, y2, f.canonicalField, mk, false, side, f.isParentField);
         svgEl.appendChild(path);
       }
     }
@@ -449,9 +451,12 @@ function buildEntityHeader(
 function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
   const node = document.createElement("div");
   node.className = "ld-field-node";
-  if (f.isAssoc) node.classList.add("ld-field-node-assoc");
-  node.dataset.memberKey = memberKey(f.connectorId, f.entity);
-  node.dataset.sourceField = f.sourceField;
+  if (f.isAssoc)                  node.classList.add("ld-field-node-assoc");
+  if (f.isParentField)            node.classList.add("ld-field-node-parent");
+  if (f.isExpressionPlaceholder)  node.classList.add("ld-field-node-expr-placeholder");
+  if (f.hasExpression)            node.classList.add("ld-field-node-expr");
+  node.dataset.memberKey     = memberKey(f.connectorId, f.entity);
+  node.dataset.sourceField   = f.sourceField;
   node.dataset.canonicalField = f.canonicalField;
   if (f.isAssoc) {
     const marker = document.createElement("span");
@@ -459,8 +464,24 @@ function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
     marker.textContent = "◇";
     node.appendChild(marker);
     node.appendChild(document.createTextNode(f.sourceField));
+  } else if (f.isExpressionPlaceholder) {
+    const em = document.createElement("em");
+    em.textContent = f.sourceField; // "(expression)"
+    node.appendChild(em);
   } else {
     node.textContent = f.sourceField;
+    if (f.isParentField) {
+      const suffix = document.createElement("span");
+      suffix.className = "ld-parent-marker";
+      suffix.textContent = " ↑";
+      node.appendChild(suffix);
+    }
+    if (f.hasExpression) {
+      const marker = document.createElement("span");
+      marker.className = "ld-expr-marker";
+      marker.textContent = " ƒ";
+      node.appendChild(marker);
+    }
   }
   return node;
 }
@@ -548,7 +569,7 @@ function buildCentreColumn(lineage: ChannelLineage): HTMLElement {
     chip.className = "ld-canonical-chip";
     chip.dataset.canonicalField = node.fieldName;
     if (node.isIdentity) chip.classList.add("ld-canonical-identity");
-    if (node.isAssoc) chip.classList.add("ld-canonical-chip-assoc");
+    if (node.isAssoc)    chip.classList.add("ld-canonical-chip-assoc");
     const nameSpan = document.createElement("span");
     nameSpan.className = "ld-canonical-name";
     if (node.isAssoc) {
@@ -561,6 +582,13 @@ function buildCentreColumn(lineage: ChannelLineage): HTMLElement {
       nameSpan.textContent = node.fieldName === "*" ? "(all fields)" : node.fieldName;
     }
     chip.appendChild(nameSpan);
+    if (node.hasResolver) {
+      const badge = document.createElement("span");
+      badge.className = "ld-resolver-badge";
+      badge.textContent = "ƒ";
+      badge.title = "Custom resolver function";
+      chip.appendChild(badge);
+    }
     col.appendChild(chip);
   }
 

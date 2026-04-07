@@ -603,3 +603,49 @@ is resized (e.g. user drags `#resize-handle`).
 
 When the user saves and reloads config, `renderLineageDiagram()` is called fresh the next
 time the user opens the `lineage` tab.
+
+---
+
+### § 11.11 Array-expansion channels — lifecycle skip
+
+Channels that contain at least one member with `arrayPath` skip the
+collect → discover → onboard lifecycle step. They are bootstrapped on the first regular
+poll tick instead. `buildSeedClusters` returns `[]` for these channels.
+
+```ts
+const isArrayChannel = (ch: ChannelConfig): boolean =>
+  ch.members.some((m) => m.arrayPath !== undefined);
+```
+
+`FIXED_SYSTEMS` may include systems (e.g. `webshop`) that are not participants of every
+channel — unused connectors simply return empty records on `read()`.
+
+---
+
+### § 11.12 Array-source entity labels in lineage diagram
+
+When a `ChannelMember` has `arrayPath`, `buildChannelLineage` uses
+`${member.sourceEntity ?? member.entity}.${member.arrayPath}[]` as the entity display label
+(e.g. `purchases.lines[]`). The logical entity name (`member.entity`) remains the key for
+shadow state and watermarks.
+
+---
+
+### § 11.13 Expression lineage and resolver badge
+
+**`sources` fan-in.** When a `FieldMapping` has `expression` and a non-empty `sources` list,
+`buildChannelLineage` emits one `ConnectorFieldNode` per source with `hasExpression: true`.
+The diagram renders each source as a separate field pill connected to the canonical node.
+
+**Expression placeholder.** When `expression` is present but `sources` is absent or empty,
+a single `ConnectorFieldNode` with `sourceField: "(expression)"` and
+`isExpressionPlaceholder: true` is emitted. The pill is rendered in italic with an amber
+border to indicate that the exact source fields are not declared.
+
+**Parent-field marker.** Fields injected from the parent record via `parentFields` carry
+`isParentField: true`. They are rendered with a `↑` suffix on the pill and a dashed SVG
+connector line.
+
+**Resolver badge.** When at least one inbound `FieldMapping` for a canonical field carries a
+`resolve` function, the canonical chip shows a small `ƒ` badge (class `ld-resolver-badge`).
+

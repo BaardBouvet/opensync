@@ -20,6 +20,20 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
   connectors that omit their PK from `record.data` to expose it as a plain canonical
   field and participate in cross-connector FK patterns without UUID translation.
   Spec: `specs/field-mapping.md §4.1`.
+- `sources?: string[]` on `FieldMapping`: explicit declaration of which connector-side
+  fields an `expression` reads. Used by the lineage diagram — declares fan-in arrows when
+  present; falls back to an `(expression)` placeholder pill when absent.
+  Spec: `specs/field-mapping.md §1.3`.
+- Playground — **array-demo scenario**: webshop purchases with nested `lines` arrays sync
+  bidirectionally with ERP flat `orderLines`. Demonstrates array expansion (§3.2) and
+  collapse in a browser-playable scenario.
+- Playground — `isArrayChannel` boot guard: channels with `arrayPath` members skip the
+  collect → discover → onboard lifecycle step and are bootstrapped on first poll.
+  Spec: `specs/playground.md §11.11`.
+- Playground — lineage diagram enhancements: array-source entity labels (`purchases.lines[]`),
+  parent-field pills with `↑` suffix and dashed connector lines, `(expression)` placeholder
+  pills, expression fan-in arrows, and resolver `ƒ` badge on canonical chips.
+  Spec: `specs/playground.md §11.12–11.13`.
 
 ### Added
 - Engine: `bool_or` per-field resolution strategy (specs/field-mapping.md §2.5). Once any source

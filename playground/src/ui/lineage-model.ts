@@ -8,6 +8,9 @@ export interface CanonicalNode {
   isIdentity: boolean;
   // True when this canonical node represents an association predicate (assocMappings).
   isAssoc: boolean;
+  /** At least one inbound FieldMapping for this canonical field carries a `resolve` function.
+   *  Displayed as a small ƒ badge on the canonical pill. */
+  hasResolver?: boolean;
 }
 
 export interface ConnectorFieldNode {
@@ -20,6 +23,18 @@ export interface ConnectorFieldNode {
   direction: "bidirectional" | "forward_only" | "reverse_only";
   // True when this node represents an association predicate mapping (assocMappings).
   isAssoc: boolean;
+  /** True when this node belongs to a member that has arrayPath (array-source member).
+   *  The entity label in the diagram shows e.g. `purchases.lines[]`. */
+  isArraySource?: boolean;
+  /** True when this field is injected from the parent record via parentFields.
+   *  Rendered with a ↑ suffix and a dashed connector line. */
+  isParentField?: boolean;
+  /** True when this node is one of the declared `sources` of an expression mapping.
+   *  The canonical pill shows a fan-in arrow from each source. */
+  hasExpression?: boolean;
+  /** True when the mapping has an `expression` but no `sources` list declared.
+   *  Displayed as an italic "(expression)" placeholder pill with amber border. */
+  isExpressionPlaceholder?: boolean;
 }
 
 export interface ChannelLineage {
@@ -35,12 +50,19 @@ export interface ChannelLineage {
 export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
   const identitySet = new Set(channel.identityFields ?? []);
   // Map from canonical name → { isAssoc } so fields are listed first, assoc predicates second.
-  const canonicalMap = new Map<string, { isAssoc: boolean }>();
+  const canonicalMap = new Map<string, { isAssoc: boolean; hasResolver: boolean }>();
   const inboundFields: ConnectorFieldNode[] = [];
   const outboundFields: ConnectorFieldNode[] = [];
 
   for (const member of channel.members) {
-    const { connectorId, entity } = member;
+    const { connectorId } = member;
+    // Array-source members: display entity as `sourceEntity.arrayPath[]`.
+    const isArraySource = member.arrayPath !== undefined;
+    const entity = isArraySource
+      ? `${member.sourceEntity ?? member.entity}.${member.arrayPath}[]`
+      : member.entity;
+    // Set of field names injected from the parent record via parentFields.
+    const parentFieldKeys = new Set(Object.keys(member.parentFields ?? {}));
 
     if (!member.inbound || member.inbound.length === 0) {
       // Pass-through: synthetic wildcard node.
@@ -51,19 +73,58 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
         canonicalField: "*",
         direction: "bidirectional",
         isAssoc: false,
+        isArraySource: isArraySource || undefined,
       });
     } else {
       for (const f of member.inbound) {
         const canonicalField = f.target;
-        if (!canonicalMap.has(canonicalField)) canonicalMap.set(canonicalField, { isAssoc: false });
-        inboundFields.push({
-          connectorId,
-          entity,
-          sourceField: f.source ?? f.target,
-          canonicalField,
-          direction: f.direction ?? "bidirectional",
-          isAssoc: false,
-        });
+        const canonicalEntry = canonicalMap.get(canonicalField) ?? { isAssoc: false, hasResolver: false };
+        // Mark canonical field with resolver badge when the mapping declares resolve.
+        if (f.resolve) canonicalEntry.hasResolver = true;
+        if (!canonicalMap.has(canonicalField)) canonicalMap.set(canonicalField, canonicalEntry);
+        else canonicalMap.set(canonicalField, canonicalEntry);
+
+        if (f.expression) {
+          if (f.sources && f.sources.length > 0) {
+            // Fan-in: one node per declared source field.
+            for (const src of f.sources) {
+              inboundFields.push({
+                connectorId,
+                entity,
+                sourceField: src,
+                canonicalField,
+                direction: f.direction ?? "bidirectional",
+                isAssoc: false,
+                isArraySource: isArraySource || undefined,
+                isParentField: parentFieldKeys.has(src) || undefined,
+                hasExpression: true,
+              });
+            }
+          } else {
+            // Expression with no declared sources: placeholder pill.
+            inboundFields.push({
+              connectorId,
+              entity,
+              sourceField: "(expression)",
+              canonicalField,
+              direction: f.direction ?? "bidirectional",
+              isAssoc: false,
+              isArraySource: isArraySource || undefined,
+              isExpressionPlaceholder: true,
+            });
+          }
+        } else {
+          inboundFields.push({
+            connectorId,
+            entity,
+            sourceField: f.source ?? f.target,
+            canonicalField,
+            direction: f.direction ?? "bidirectional",
+            isAssoc: false,
+            isArraySource: isArraySource || undefined,
+            isParentField: parentFieldKeys.has(f.source ?? f.target) || undefined,
+          });
+        }
       }
     }
 
@@ -75,10 +136,11 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
         canonicalField: "*",
         direction: "bidirectional",
         isAssoc: false,
+        isArraySource: isArraySource || undefined,
       });
     } else {
       for (const f of member.outbound) {
-        if (!canonicalMap.has(f.target)) canonicalMap.set(f.target, { isAssoc: false });
+        if (!canonicalMap.has(f.target)) canonicalMap.set(f.target, { isAssoc: false, hasResolver: false });
         outboundFields.push({
           connectorId,
           entity,
@@ -86,6 +148,8 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
           canonicalField: f.target,
           direction: f.direction ?? "bidirectional",
           isAssoc: false,
+          isArraySource: isArraySource || undefined,
+          isParentField: parentFieldKeys.has(f.source ?? f.target) || undefined,
         });
       }
     }
@@ -94,7 +158,7 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
     // at the bottom of the entity's expanded pill, visually grouped below fields.
     if (member.assocMappings) {
       for (const a of member.assocMappings) {
-        if (!canonicalMap.has(a.target)) canonicalMap.set(a.target, { isAssoc: true });
+        if (!canonicalMap.has(a.target)) canonicalMap.set(a.target, { isAssoc: true, hasResolver: false });
         inboundFields.push({
           connectorId,
           entity,
@@ -116,13 +180,14 @@ export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
   }
 
   // If all members are pass-through with no assoc mappings, add the synthetic "*" canonical node.
-  if (canonicalMap.size === 0) canonicalMap.set("*", { isAssoc: false });
+  if (canonicalMap.size === 0) canonicalMap.set("*", { isAssoc: false, hasResolver: false });
 
   const canonicalFields: CanonicalNode[] = Array.from(canonicalMap.entries()).map(
     ([name, info]) => ({
       fieldName: name,
       isIdentity: identitySet.has(name),
       isAssoc: info.isAssoc,
+      hasResolver: info.hasResolver || undefined,
     }),
   );
 

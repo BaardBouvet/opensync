@@ -58,6 +58,9 @@ export const FieldMappingEntrySchema = z.object({
   default: z.unknown().optional(),
   /** Spec: specs/field-mapping.md §1.8 */
   group: z.string().optional(),
+  /** Spec: specs/field-mapping.md §1.3 — connector-side fields read by expression.
+   *  Declared for lineage; without this the diagram shows (expression) placeholder. */
+  sources: z.array(z.string()).optional(),
 });
 
 export const AssocPredicateMappingSchema = z.object({

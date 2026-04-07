@@ -49,6 +49,19 @@ export const FIXED_SEED: EntitySeedMap = {
         associations: [{ predicate: "orgId", targetEntity: "accounts", targetId: "acc2" }],
       },
     ],
+    orders: [
+      { id: "ord1", data: { orderRef: "ORD-1001", total: 299.90, status: "shipped", date: "2026-03-15" } },
+      { id: "ord2", data: { orderRef: "ORD-1002", total: 149.95, status: "pending", date: "2026-04-01" } },
+    ],
+    orderLines: [
+      { id: "ol1", data: { orderRef: "ORD-1001", lineNo: "L01", sku: "SKU-001", qty: 5,  unitPrice: 29.99 } },
+      { id: "ol2", data: { orderRef: "ORD-1001", lineNo: "L02", sku: "SKU-002", qty: 2,  unitPrice: 49.99 } },
+      { id: "ol3", data: { orderRef: "ORD-1002", lineNo: "L01", sku: "SKU-001", qty: 3,  unitPrice: 29.99 } },
+    ],
+    items: [
+      { id: "item1", data: { sku: "SKU-001", itemName: "Widget A", price: 29.99 } },
+      { id: "item2", data: { sku: "SKU-002", itemName: "Widget B", price: 49.99 } },
+    ],
   },
   hr: {
     orgs: [
@@ -68,7 +81,38 @@ export const FIXED_SEED: EntitySeedMap = {
       },
     ],
   },
+  webshop: {
+    purchases: [
+      {
+        id: "pu1",
+        data: {
+          purchaseRef: "ORD-1001",
+          accountDomain: "acme.com",
+          amount: 299.90,
+          state: "shipped",
+          couponCode: null,
+          lines: [
+            { lineNo: "L01", sku: "SKU-001", quantity: 5, linePrice: 29.99 },
+            { lineNo: "L02", sku: "SKU-002", quantity: 2, linePrice: 49.99 },
+          ],
+        },
+      },
+      {
+        id: "pu2",
+        data: {
+          purchaseRef: "ORD-1002",
+          accountDomain: "globex.com",
+          amount: 149.95,
+          state: "pending",
+          couponCode: "SAVE10",
+          lines: [
+            { lineNo: "L01", sku: "SKU-001", quantity: 3, linePrice: 29.99 },
+          ],
+        },
+      },
+    ],
+  },
 };
 
 /** Connector IDs available in every scenario. */
-export const FIXED_SYSTEMS = ["crm", "erp", "hr"] as const;
+export const FIXED_SYSTEMS = ["crm", "erp", "hr", "webshop"] as const;

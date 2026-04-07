@@ -115,7 +115,14 @@ The `direction` guard applies before expressions: `forward_only` entries are ski
 
 When `expression` is present, the `source` field is not used on the inbound pass — the expression synthesises the value from any fields in the record.
 
-**Status: implemented (OSI-mapping §5 "Field expressions").**
+**`sources` — lineage hint for expressions.** When `expression` is present, the optional `sources` array names the connector-side fields that the expression reads. This is a declaration for tooling (lineage diagram, static analysis) and has no effect at runtime. When `sources` is absent and `expression` is present, the lineage diagram shows an `(expression)` placeholder instead of per-field fan-in arrows.
+
+```ts
+{ target: "fullName", sources: ["firstName", "lastName"],
+  expression: (r) => `${r.firstName} ${r.lastName}` }
+```
+
+**Status: implemented (OSI-mapping §5 "Field expressions"). `sources` implemented.**
 
 ---
 

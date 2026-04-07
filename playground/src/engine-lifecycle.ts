@@ -119,6 +119,11 @@ function buildConfig(scenario: ScenarioDefinition, connectors: Map<string, InMem
  * non-null slot; other member slots are null (not yet linked).
  * Spec: specs/playground.md § 10
  */
+/** Spec: specs/playground.md § 11.11 — channels with an array-source member skip
+ * the collect→discover→onboard lifecycle step; they are bootstrapped on first poll. */
+const isArrayChannel = (ch: ChannelConfig): boolean =>
+  ch.members.some((m) => m.arrayPath !== undefined);
+
 function buildSeedClusters(
   channelId: string,
   connectors: Map<string, InMemoryConnector>,
@@ -126,6 +131,8 @@ function buildSeedClusters(
 ): ChannelCluster[] {
   const ch = channels.find((c) => c.id === channelId);
   if (!ch) return [];
+  // Array-expansion channels have no pre-onboard state to show.
+  if (isArrayChannel(ch)) return [];
   const clusters: ChannelCluster[] = [];
   ch.members.forEach((member, mi) => {
     const conn = connectors.get(member.connectorId);
@@ -181,9 +188,12 @@ export async function startEngine(
   const engine = new SyncEngine(config, db);
 
   // 4. Onboard any uninitialised channels
+  // Array-expansion channels are skipped here — they are bootstrapped on first poll.
+  // Spec: specs/playground.md § 11.11
   const onboardResults = new Map<string, Awaited<ReturnType<SyncEngine["onboard"]>>>();
   for (const ch of config.channels) {
     if (engine.channelStatus(ch.id) !== "uninitialized") continue;
+    if (isArrayChannel(ch)) continue;
 
     const collects = [];
     for (const member of ch.members) {
