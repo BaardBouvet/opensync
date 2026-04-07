@@ -86,7 +86,8 @@ bun test packages/sdk/
 
 **Changelog discipline:**
 - Add an entry to `CHANGELOG.md` for every feature added or bug fixed
-- Format: `## [Unreleased]` section, then `### Added` / `### Fixed` / `### Changed`
+- **During development:** add concise bullets under `## [Unreleased]`, grouped under `### Added`, `### Fixed`, or `### Changed`. One bullet per thing; keep it short.
+- **When cutting a release:** distill the `[Unreleased]` bullets into a polished release entry — short intro paragraph (1–3 sentences) then bold-label bullets (`- **Thing** — one sentence.`). Remove all the temporary working notes. See `[0.1.0]` as the canonical example of the finished style.
 
 **Bug-fix discipline (TDD):**
 - Before fixing a bug, write a failing test that reproduces it exactly

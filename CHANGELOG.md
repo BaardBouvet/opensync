@@ -5,67 +5,39 @@ All notable changes to OpenSync are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
-Agents: add an entry under `[Unreleased]` for every feature added or bug fixed.
-Use `### Added`, `### Fixed`, or `### Changed` as appropriate.
-Move `[Unreleased]` to a dated version heading when a release is cut.
+During development: add bullets under `[Unreleased]` using `### Added` / `### Fixed` / `### Changed`.
+At release: distill into a short intro paragraph + bold-label bullets, remove the working notes. See `[0.1.0]`.
 
 ---
 
 ## [0.2.0] — 2026-04-07
 
-### Fixed
+Array sync in the browser playground. The `array-demo` scenario now works end-to-end:
+webshop purchases with nested `lines` arrays sync bidirectionally with ERP flat `orderLines`,
+expanding on ingest and collapsing on write-back. Several engine and UI bugs uncovered while
+building this scenario are fixed.
 
-- **Engine — array sub-object cards were empty in the playground.** The engine now records
-  the source connector's child external ID in `identity_map` and writes a `shadow_state` row
-  (entity = logical child entity name) for each expanded array element. This makes
-  `getChannelIdentityMap` return a non-null slot for array-source members so the cluster view
-  renders webshop order-line cards with their actual field values.
-- **Engine — identity matching failed across channels with different entity names.**
-  `_resolveCanonical` now searches `shadow_state` across all entity names used by other channel
-  members (not just the source member's own entity). Without this, connectors using different
-  entity names (e.g. `order_lines` vs `orderLines`) silently skipped identity matching and
-  created duplicate canonical IDs instead of linking correctly.
-- **Playground — ERP orderLines were missing on boot.** The ERP seed now includes an explicit
-  `orderLines: []` entry so the in-memory connector registers the entity definition. Records
-  are populated by the engine from webshop expansion during the warmup ingest pass.
-- **Playground — array-demo collapse wrote wrong fields back to webshop.** The webshop member's
-  `outbound` field mapping had `source`/`target` swapped. `applyMapping` outbound reads
-  `data[m.target]` (canonical name) and writes `result[m.source]` (connector name). With the
-  mapping inverted only `sku` (same name on both sides) was ever written back to the purchase's
-  `lines` array; `quantity`, `linePrice`, and `purchaseRef` were silently dropped on every
-  ERP→webshop collapse.
-- **Playground — array sub-object cards flashed on every poll tick.** `updateWatermarks()`
-  only covers records that appear in `snapshotFull()` (real entities). Synthesized sub-object
-  records never appeared there, so `lastWatermarks` had no entry and `prevWm === undefined`
-  every tick. Fixed by writing the watermark into `lastWatermarks` immediately after each
-  card render in the cluster loop.
-
-### Added
-
-- **Playground — parent record link on array sub-object cards.** Each webshop `order_lines`
-  card now shows a teal `↑ purchases: <id>` badge that navigates to and highlights the parent
-  `purchases` record, matching the association-badge interaction pattern.
-- **Playground — tab activity dots.** Non-active channel tabs show a pulsing green dot when
-  they contain new or updated records since the last render pass. The dot clears immediately
-  when the tab is clicked. This makes it easy to notice that editing a `purchases` record
-  propagates to the `order-lines` channel.
-- **Playground — column order is now alphabetical by connector ID.** Previously the display
-  order was inherited from the engine's ingest ordering (which may differ between channels).
-  Columns are now sorted by `connectorId` for visual consistency across channel tabs.
-- **Playground — array sub-object cards are read-only.** The Edit and Delete buttons are
-  hidden on cards produced by array expansion. In their place a small annotation
-  `⊂ <entity>.<arrayPath>` is shown, with a tooltip explaining that the parent record should
-  be edited. The `+ New` button is also hidden in the column header.
-- **Playground — shadow_state detail panel is resizable.** A 5 px drag handle between the
-  metadata table and the field detail panel in the `shadow_state` dev-tools tab allows the
-  right panel width to be adjusted (160–600 px).
-
-### Changed
-
-- **Playground array-demo scenario** now uses `identityGroups: [{ fields: ["orderRef", "lineNo"] }]`
-  (compound AND group) instead of `identityFields: ["orderRef", "lineNo"]` (two separate
-  single-field OR groups). Both fields must match simultaneously to link records; this
-  prevents `L01` from matching across different orders.
+- **Engine — child identity link** — array-expanded children now have their source connector
+  ID recorded in `identity_map` and a `shadow_state` row written. Fixes empty order-line cards
+  in the playground.
+- **Engine — cross-entity-name canonical lookup** — `_resolveCanonical` now searches shadow
+  state across all entity names used by other channel members, not just the source member's
+  own entity. Fixes silent duplicate canonicals when connectors use different names for the
+  same entity (e.g. `order_lines` vs `orderLines`).
+- **Playground — ERP seed** — added empty `orderLines: []` so the connector registers the
+  entity on boot; removed pre-seeded rows that caused duplicates after engine expansion.
+- **Playground — outbound mapping** — corrected swapped `source`/`target` in the webshop
+  array-member mapping; `quantity`, `linePrice`, and `purchaseRef` now write back correctly.
+- **Playground — array sub-object cards** — read-only (no Edit/Delete); show an embedded
+  annotation `⊂ entity.arrayPath` and a teal `↑ purchases: <id>` badge that scrolls to the
+  parent record.
+- **Playground — tab activity dots** — pulsing green dot on inactive channel tabs that
+  received changes since last viewed; clears on tab click.
+- **Playground — column sort** — channel member columns sorted alphabetically by connector ID.
+- **Playground — flash fix** — sub-object watermarks now stored immediately after card render
+  so first-paint does not trigger false highlights on the next tick.
+- **Playground — resizable shadow panel** — drag handle between SQL and JSON halves of the
+  dev-tools shadow view (160–600 px).
 
 ---
 
