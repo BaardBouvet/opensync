@@ -21,7 +21,6 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_IDEMPOTENCY_BATCH.md](engine/PLAN_IDEMPOTENCY_BATCH.md) | Idempotency and batch action design | review - may belong in specs/sync-engine.md | — |
 | [engine/GAP_OSI_PRIMITIVES.md](engine/GAP_OSI_PRIMITIVES.md) | Gap analysis: OSI-mapping schema primitives vs OpenSync - mapping inspiration | reference | — |
 | [engine/PLAN_LOOKUP_MERGE_ETAG.md](engine/PLAN_LOOKUP_MERGE_ETAG.md) | Engine-side lookup-merge and ETag threading | backlog | — |
-| [engine/PLAN_TS_LINTING.md](engine/PLAN_TS_LINTING.md) | Code quality toolchain (linting, formatting, type hygiene) | backlog | — |
 | [engine/GAP_ENGINE_DECISIONS.md](engine/GAP_ENGINE_DECISIONS.md) | Gap analysis: key engine design decisions and their rationale | reference | — |
 | [engine/PLAN_CONFIG_VALIDATION.md](engine/PLAN_CONFIG_VALIDATION.md) | Config cross-reference validation (channels, connectors, auth) | backlog | — |
 | [engine/PLAN_DB_MIGRATIONS.md](engine/PLAN_DB_MIGRATIONS.md) | Post-release database migration infrastructure plan | deferred — post-release | — |
@@ -39,6 +38,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_DELETE_PROPAGATION.md](engine/PLAN_DELETE_PROPAGATION.md) | Opt-in delete propagation: explicit signal (record.deleted = true) + mark-and-sweep; per-channel config, circuit breaker integration | draft | — |
 | [engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md](engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md) | Declare canonical field and association schema on channel definitions; validation that mapping targets match declared canonicals | draft | M |
 | [engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md](engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md) | Per-field union-find identity matching: replace composite-key discover/addConnector/resolveCanonical with connected-components algorithm so A=B via email + B=C via taxId → A=B=C | complete | M |
+| [engine/PLAN_LINK_GROUP.md](engine/PLAN_LINK_GROUP.md) | Confirm `link_group` (OSI-mapping §2 composite identity keys) is covered by `identityGroups`; close stale 🔶 entries in GAP_OSI_PRIMITIVES.md and field-mapping.md §10 | complete | XS |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
 | [engine/PLAN_FIELD_EXPRESSIONS.md](engine/PLAN_FIELD_EXPRESSIONS.md) | Field expressions: `expression` / `reverseExpression` function fields on `FieldMapping` for combine, normalize, and decompose transforms in the embedded API | complete | S |
 | [engine/PLAN_NORMALIZE_NOOP.md](engine/PLAN_NORMALIZE_NOOP.md) | Per-field `normalize` function applied at diff time to both incoming and shadow values; prevents precision-loss connectors from triggering infinite update loops | complete | S |
@@ -55,8 +55,12 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_RECORD_FILTER.md](engine/PLAN_RECORD_FILTER.md) | Record-level `record_filter` / `record_reverse_filter` on mapping entries: exclude source records from resolution and canonical entities from reverse dispatch; enables discriminator routing and route-combined patterns | complete | S |
 | [engine/PLAN_WRITTEN_STATE.md](engine/PLAN_WRITTEN_STATE.md) | `written_state` table: records last-written field values per target connector per entity; enables target-centric noop suppression, nested-array element tombstoning, and derived timestamps | complete | M |
 | [engine/PLAN_CROSS_CHANNEL_EXPANSION.md](engine/PLAN_CROSS_CHANNEL_EXPANSION.md) | Cross-channel array expansion: `source_entity` + `parent_channel` mapping keys allow a child entity to live in a different channel than its parent; engine reads the parent connector entity and fans out into the child channel | complete | M || [engine/PLAN_PENDING_WRITES.md](engine/PLAN_PENDING_WRITES.md) | `pending_writes` table + retry loop: recover silently-dropped fan-out writes when a target connector errors; mirrors `deferred_associations` pattern | draft | S |
-| [engine/PLAN_FK_REFERENCE_TRANSLATION.md](engine/PLAN_FK_REFERENCE_TRANSLATION.md) | FK field translation pipeline: `references` (identity_map fast path) + `references_field` (shadow_state field scan for cross-connector FKs via named canonical fields); `canonical_redirects` for merge-safe stale-UUID resolution | backlog | M |
+| [engine/PLAN_PK_AS_CHANNEL_FIELD.md](engine/PLAN_PK_AS_CHANNEL_FIELD.md) | Map a connector's own PK (`record.id`) as a canonical data field via `source: "id"` in field mappings; enables cross-connector FK references by giving foreign PKs a shared canonical name | complete | XS |
 | [engine/PLAN_SCALAR_ARRAYS.md](engine/PLAN_SCALAR_ARRAYS.md) | Scalar array expansion (`scalar: true`): expand bare-scalar JSON arrays into flat child records via `_value` field; forward pass only; reverse pass (collapse) deferred | complete | S |
+| [engine/PLAN_HARD_DELETE.md](engine/PLAN_HARD_DELETE.md) | Hard delete detection: `full_snapshot: true` entity-absence detection (synthesize deleted records when IDs vanish from full-snapshot reads) + element-absence detection (clear stale child shadow rows after array expansion, force collapse write) | proposed | M |
+| [engine/PLAN_SOFT_DELETE_INSPECTION.md](engine/PLAN_SOFT_DELETE_INSPECTION.md) | Soft delete field inspection: `soft_delete:` mapping config with `deleted_flag`, `timestamp`, `active_flag`, and `expression` strategies; compiled at load time; sets `record.deleted = true` before the standard `_processRecords` path | proposed | S |
+| [engine/REPORT_ARRAY_PATH_EXPRESSION.md](engine/REPORT_ARRAY_PATH_EXPRESSION.md) | Decision record: expression-based `array_path` rejected — canonical ID stability, collapse reversibility, and static config guarantees require a dotted-path string; polymorphic cases solved by connector normalization or multiple expansion members with `record_filter` | reference | — |
+| [engine/PLAN_FIELD_TIMESTAMPS.md](engine/PLAN_FIELD_TIMESTAMPS.md) | Per-field timestamps: connector-supplied (`lastModifiedField` per-field config + mapping-level `last_modified` column) and engine-derived (`derive_timestamps: true` — compare incoming against shadow to assign ingestTs only to changed fields); enables `last_modified` LWW for timestampless sources | proposed | M |
 ## connectors/ — Connector research and cleanup plans
 
 | File | What it covers | Status | Effort |
@@ -75,6 +79,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/PLAN_FILE_INGEST.md](connectors/PLAN_FILE_INGEST.md) | File-based ingest via SFTP, CSV, and XML: transport+parser architecture, SFTP connector, SDK csv/xml helpers, watermark strategy (mtime/hash), row-per-entity mode, write-back, HTTP/S file polling | draft | L |
 | [connectors/PLAN_ASYNC_EXPORT_TRANSPORT.md](connectors/PLAN_ASYNC_EXPORT_TRANSPORT.md) | Async export transport: POST job → poll status → download result file(s); AsyncExportTransport interface, transport.asyncExport() factory, backoff/timeout poll loop, Salesforce Bulk API and HubSpot examples | draft | M |
 | [connectors/PLAN_READ_RECORD_UPDATED_AT.md](connectors/PLAN_READ_RECORD_UPDATED_AT.md) | Add `updatedAt?: string` to `ReadRecord`; engine uses it as the per-record LWW timestamp instead of engine ingest time (`Date.now()`) | draft | S |
+| [connectors/PLAN_READ_RECORD_CREATED_AT.md](connectors/PLAN_READ_RECORD_CREATED_AT.md) | Add `createdAt?: string` to `ReadRecord`; shadow stores immutable origin timestamp; new `origin_wins` mapping-level strategy + stable `last_modified` tie-breaking via source age | draft | M |
 
 ## demo/ — CLI demo runner plans
 
@@ -96,6 +101,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [playground/PLAN_PLAYGROUND_MVU.md](playground/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
 | [playground/PLAN_PLAYGROUND_SMB_SEED.md](playground/PLAN_PLAYGROUND_SMB_SEED.md) | Expand playground seed to four systems (crm/erp/hr/webshop), six entity concepts, richer fields, intentionally unmapped fields, and a new smb-demo scenario | backlog | S |
 | [playground/PLAN_ARRAY_DEMO_SCENARIO.md](playground/PLAN_ARRAY_DEMO_SCENARIO.md) | Playground array-demo scenario: extend ERP seed with embedded-lines orders, add webshop system, add order-lines array-expansion channel, fix lifecycle to skip onboard for array-expansion channels | draft | S |
+| [playground/PLAN_LINEAGE_ARRAY_EXPRESSIONS.md](playground/PLAN_LINEAGE_ARRAY_EXPRESSIONS.md) | Lineage diagram: array-expansion entity labels and parentField annotation; expression fan-in via `sources[]` + static analysis fallback; `resolve` hook indicator on canonical pills | draft | M |
 | [playground/PLAN_NOTIFICATION_POLL.md](playground/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | complete | — |
 | [playground/PLAN_AGENT_PANEL.md](playground/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
 | [playground/PLAN_URL_HISTORY.md](playground/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
@@ -121,6 +127,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [meta/PLAN_RELEASE_PROCEDURE.md](meta/PLAN_RELEASE_PROCEDURE.md) | Release procedure: tag-triggered GitHub Pages deploy, GitHub Release creation, human checklist; npm publish deferred to M1 | backlog | S |
 | [meta/PLAN_DOCS_SITE.md](meta/PLAN_DOCS_SITE.md) | Host a VitePress documentation site at `/docs/` alongside the playground on GitHub Pages — analysis of mdBook, VitePress, Docusaurus, MDX-in-Vite; recommendation and CI plan | draft | M |
 | [meta/PLAN_REMOVE_WASM_FROM_HISTORY.md](meta/PLAN_REMOVE_WASM_FROM_HISTORY.md) | Expunge sql.js WASM binaries from git history; add gitignore rule; use git filter-repo | complete | XS |
+| [meta/PLAN_TS_LINTING.md](meta/PLAN_TS_LINTING.md) | Code quality toolchain (linting, formatting, type hygiene) | backlog | — |
 | [meta/REPORT_ASSOCIATION_NAMING.md](meta/REPORT_ASSOCIATION_NAMING.md) | Naming analysis for the `Association` concept — candidates (link, edge, ref, rel, assoc), collision map, migration scope, recommendation | draft | — |
 
 ## ecosystem/ — Related tools, frameworks, and standards in the broader integration space

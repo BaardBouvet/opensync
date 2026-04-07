@@ -1,7 +1,7 @@
 # OSI-Mapping Primitive Coverage
 
 **Status:** reference  
-**Date:** 2026-04-03  
+**Date:** 2026-04-07  
 
 This spec catalogs every primitive from the [OSI-mapping schema](https://github.com/BaardBouvet/OSI-mapping) and assesses whether OpenSync has the architectural foundation to support it. The goal is not to implement them today, but to validate that nothing in the current design forecloses any primitive, and to record where gaps exist.
 
@@ -26,7 +26,7 @@ Per-field strategies that determine how conflicts between sources are resolved. 
 ### `identity`
 Match records across sources — records with the same identity field value(s) are merged into one unified entity via transitive closure. Every target needs at least one identity field.
 
-**Foundation: ✅** OpenSync's `IdentityMap` (see [identity.md](identity.md)) provides hub-and-spoke identity with global UUIDs and `entity_links`. The concept of a field acting as a match key is present. Transitive closure is a gap (see §2).
+**Foundation: ✅** OpenSync's `IdentityMap` (see [identity.md](identity.md)) provides hub-and-spoke identity with global UUIDs and `entity_links`. The concept of a field acting as a match key is present. Transitive closure is also implemented (see §2).
 
 ---
 
@@ -47,7 +47,7 @@ Most recently changed value wins. Requires a timestamp field on the mapping or p
 ### `expression`
 Custom aggregation expression computing the final value. In OSI-mapping this is SQL (`max(score)`, `count(*)`, etc.) run inside the resolution view over all contributed values.
 
-**Foundation: 🔶** OpenSync uses TypeScript transform functions, not SQL aggregations. The concept of a user-defined resolver is present (conflict resolution is pluggable per the backend interface), but the SQL aggregation model is different. Supporting this either requires a query-engine backend (Postgres-based, as OSI-mapping's reference engine uses) or a TypeScript equivalent where the user provides a reducer function. Architecture does not foreclose this — it is a resolver strategy variant.
+**Foundation: ✅** TypeScript incremental reducer hook implemented in `conflict.ts`. A `resolve: (incoming, existing) => canonical` function on a `FieldMapping` receives the new source value and the current accumulated canonical value and returns the next canonical value (covering `max`, `min`, `sum`, `count`, `concat` and any custom reduction). OSI-mapping's SQL aggregation model is different but the semantic is equivalent — all OSI-mapping expression use-cases are addressable with this approach. Tests: `conflict.test.ts` ER1–ER6.
 
 ---
 
@@ -70,14 +70,14 @@ Resolves to `true` if any contributing source has a truthy value. Used for delet
 ### Composite keys (`link_group`)
 Multiple `identity` fields form a compound match key. Records link only when **all** fields in the group match as a tuple. Multiple `link_group` values on the same target act as OR (match on any group links the records).
 
-**Foundation: 🔶** Current identity linking uses a single external ID per connector instance. Compound keys (e.g. first_name + last_name + dob) are not addressable. The entity_links table uses a single `external_id` column. Supporting composite keys requires either serializing a composite key into `external_id` or extending the schema to support multi-field identity tuples.
+**Foundation: ✅** Fully covered by `identityGroups` (AND-within-group, OR-across-groups). Declared at channel level in `channels.yaml`; the engine applies union-find with transitive closure. The blank-field exclusion rule (absent or empty fields do not participate in matching) is also implemented. Tests: `transitive-identity.test.ts` T-LG-1 – T-LG-4. See `PLAN_LINK_GROUP.md` and `specs/identity.md §Compound Identity Groups`.
 
 ---
 
 ### Transitive closure
 Entity linking is computed via connected-components: if A matches B (shared email) and B matches C (shared tax ID), then A=B=C even though A and C share no field directly. This is a graph algorithm, not a pairwise lookup.
 
-**Foundation: ❌** Current `IdentityMap.linkExternalId` creates direct entity_links without building a graph. Pairwise matching is used during discovery (see [discovery.md](discovery.md)) but transitive closure across more than two systems is not guaranteed. A graph-based identity layer (e.g. union-find / connected components) needs to be designed.
+**Foundation: ✅** Implemented in the engine via union-find / connected-components over `entity_links`. During `discover()`, per-field identity matches are built into a graph and connected components are resolved before any entity UUID is assigned. A=B=C chains are handled correctly. See `PLAN_TRANSITIVE_CLOSURE_IDENTITY.md` (complete) and `specs/identity.md § Field-Value-Based Matching`.
 
 ---
 
@@ -114,14 +114,14 @@ A sub-entity whose fields come from the same source row as the parent. Declared 
 ### Nested arrays (`parent` + `array` / `array_path`)
 A source record contains a JSONB array column (e.g. `order.lines`). The child mapping expands each array element into its own target entity row. `array_path` supports a dotted nested JSON path. `parent_fields` brings parent-row values into scope for each child element.
 
-**Foundation: ❌** No JSONB array expansion in the current pipeline. Connectors are expected to yield flat `NormalizedRecord` objects. Array-of-objects nesting is a structural transformation that needs to be designed into the forward pipeline.
+**Foundation: ✅** Full forward expand + reverse collapse (reassembly) pipeline implemented. `array_path` supports dotted JSON paths. `parent_fields` injection supported. `element_key` provides stable element identity; falls back to index. Cross-channel array expansion also supported. Plans complete: `PLAN_NESTED_ARRAY_PIPELINE`, `PLAN_CROSS_CHANNEL_EXPANSION`, `PLAN_ARRAY_COLLAPSE`. Spec: `specs/field-mapping.md §3.2`.
 
 ---
 
 ### Deep nesting (multi-level `parent`)
 Each nesting level references the previous as parent. Supports arbitrary depth: order → lines → sub-lines.
 
-**Foundation: ❌** Depends on nested arrays (above). Deep nesting compounds the gap.
+**Foundation: ✅** Multi-level array expansion implemented. Each nesting level declares its own `parent:` reference and can carry further `array_path` keys; the engine resolves the chain recursively. Plan complete: `PLAN_MULTILEVEL_ARRAY_EXPANSION`. Spec: `specs/field-mapping.md §3.4`.
 
 ---
 
@@ -188,7 +188,7 @@ A regular target entity used as a lookup table (e.g. `country` with `name` and `
 ### Groups (atomic resolution)
 All fields sharing the same `group` resolve from the same winning source. Prevents mixing (e.g. address parts from different sources — if ERP wins `street`, it also wins `city` and `zip`).
 
-**Foundation: ❌** Conflict resolution is per-field independently in the current design. Atomic groups are not modeled. Requires grouping semantics in the resolution layer.
+**Foundation: ✅** `group` key implemented in `conflict.ts`. A pre-pass identifies which source wins the group (comparing timestamps across all group fields), then all group fields are resolved from that single winner. Plan complete: `PLAN_FIELD_GROUPS`. Tests: `conflict.test.ts` FG1–FG8. Spec: `specs/field-mapping.md §1.8`.
 
 ---
 
@@ -205,7 +205,7 @@ Used for routing (discriminator-based: `type = 'customer'` → CRM, `type = 'emp
 ### Derived fields (`default` / `default_expression`)
 Fallback values when no source provides data. `default` is a static value; `default_expression` is a SQL expression (e.g. `first_name || ' ' || last_name`).
 
-**Foundation: 🔶** TypeScript transforms can inject constants during forward processing. An explicit `default` /`default_expression` at the mapping layer is not in the config schema yet.
+**Foundation: ✅** `default` (static value) and `defaultExpression` (TypeScript function receiving the partially-built record) implemented in `config/loader.ts` and applied during `applyMapping()`. Plan complete: `PLAN_DEFAULT_VALUES`. Tests: `mapping.test.ts` DF1–DF7. Spec: `specs/field-mapping.md §1.5`.
 
 ---
 
@@ -242,7 +242,7 @@ A SQL expression with a `%s` placeholder applied to both the source snapshot and
 
 Also used for echo-aware resolution: a lower-precision source whose normalized value matches the golden record is not allowed to win resolution and degrade it.
 
-**Foundation: ❌** Noop detection (shadow state diff) compares raw values. Precision-loss tolerance is not modeled. Needs a per-field normalization transform applied at diff time.
+**Foundation: ✅** `normalize` per-field TypeScript function applied to both the incoming value and the stored shadow before the noop diff check. If `normalize(incoming) === normalize(shadow)`, the field is treated as noop. Secondary echo-aware resolution also applied: if `normalize(incoming) === normalize(golden)`, the lower-precision source cannot win resolution. Plan complete: `PLAN_NORMALIZE_NOOP`. Tests: `diff.test.ts` N1–N4, `conflict.test.ts` N5–N6. Spec: `specs/field-mapping.md §1.4`.
 
 ---
 
@@ -256,28 +256,28 @@ Detect source-side deletion signals without requiring a hard DELETE:
 
 Can suppress the row locally (default) or route the detection into a named target field for propagation.
 
-**Foundation: 🔶** [safety.md](safety.md) discusses soft deletes. The connector SDK allows connectors to signal deletion by omitting records from subsequent reads or via explicit delete events. Engine-level soft-delete field inspection (treating a field value as a deletion signal) is not designed — currently the connector must handle this interpretation itself.
+**Foundation: 🔶** Connector-reported deletion via `_deleted: true` on `NormalizedRecord` is implemented. Engine-level `soft_delete:` field inspection (treating a field value as a deletion signal, translating the three strategies listed above) is designed but not yet implemented — the connector still handles the signal interpretation itself. Spec: `specs/field-mapping.md §8.2`.
 
 ---
 
 ### Hard delete / `derive_tombstones`
 Detect entity absence: entities present in the `cluster_members` feedback table (i.e. previously inserted) but missing from the current source snapshot are treated as deleted. A synthetic row with `is_deleted = true` is contributed to resolution.
 
-**Foundation: ❌** No entity-absence detection pipeline. The engine does not currently compare previous-run entity sets against current-run entity sets to detect disappearances. This requires either full-snapshot comparison or the cluster_members writeback mechanism.
+**Foundation: 🔶** `written_state` is now implemented and provides the "last written" baseline needed for full-snapshot comparison. The `full_snapshot: true` mapping flag is designed (`specs/field-mapping.md §8.3`); the detection logic (compare current read set against `written_state` rows for this connector) requires implementation. All dependencies are met; design work remains.
 
 ---
 
 ### Element hard delete (child-level tombstones)
 Detect absence of nested array elements that were previously written. Elements present in `written_state` but absent in the current source contribute a synthetic `is_removed = true` row.
 
-**Foundation: ❌** Depends on nested arrays and written_state, both of which are gaps.
+**Foundation: 🔶** Both dependencies are now met: nested array expansion/collapse (`PLAN_NESTED_ARRAY_PIPELINE`, `PLAN_ARRAY_COLLAPSE`) and `written_state` (`PLAN_WRITTEN_STATE`) are implemented. The remaining gap is the element-absence detection logic itself — comparing current expanded elements against `written_state` rows for the target and synthesising deletion signals for missing keys.
 
 ---
 
 ### `reverse_required`
 When true on a field mapping, the entire row is excluded from reverse output if the resolved value for this field is null. Used for insert/delete propagation — rows without a required field become deletes.
 
-**Foundation: ❌** No per-field "exclude row from reverse if null" concept in the dispatch pipeline.
+**Foundation: ✅** `reverseRequired: true` on a `FieldMapping` is checked in `isDispatchBlocked()` (`core/mapping.ts`); if the outbound-mapped value for any `reverseRequired` field is null, the entire row is suppressed and no `written_state` entry is written. Plan complete: `PLAN_REVERSE_REQUIRED`. Tests: `mapping.test.ts` RR1–RR6. Spec: `specs/field-mapping.md §8.4`.
 
 ---
 
@@ -293,14 +293,14 @@ At forward time, the original source values are captured in `_base`. After resol
 ### Target-centric noop (`derive_noop` / `written_state`)
 After source-level change detection flags a change, a second comparison checks whether the resolved values actually differ from what was **last written to the target**. If not, classify as noop. Requires a `written_state` table maintained by the ETL after each sync.
 
-**Foundation: ❌** No `written_state` table concept. The current shadow state stores what was received from sources, not what was last written to targets. These are different when conflict resolution or transformation changes the value before writing.
+**Foundation: ✅** `written_state` table implemented. After each successful write the engine upserts `(connector_id, canonical_id, data)`. Before dispatching, `_dispatchToTarget()` compares the delta against the `written_state` row for that target; if all fields match, the write is suppressed. Plan complete: `PLAN_WRITTEN_STATE`. Spec: `specs/field-mapping.md §7.1`.
 
 ---
 
 ### `derive_timestamps`
 When source data lacks per-field timestamps (e.g. CSV imports), derive them by comparing current source values against previously written values. Changed fields get the current write timestamp; unchanged fields carry forward their prior timestamp.
 
-**Foundation: ❌** Depends on `written_state`. Shadow state tracks when values were received, not derived from write comparisons.
+**Foundation: ❌** `written_state` (the dependency) is now available. The derive-timestamps logic — comparing incoming fields against `written_state` rows and synthesising per-field timestamps — is designed (`specs/field-mapping.md §7.2`) but not yet implemented. The design requires `written_state` to be available at the **source** connector level, which is a different access pattern from the current target-centric write path.
 
 ---
 
@@ -346,14 +346,14 @@ Multiple mappings from one source to different targets (or multiple sources to o
 ### Route combined (routing + merging)
 A routing mapping handles a subset of records via `filter`; a separate plain mapping handles all records from another source. The two mappings merge into the same target entity via identity linking.
 
-**Foundation: ❌** Depends on filters. The identity linking foundation (once transitive closure is in place) supports merging from multiple mappings.
+**Foundation: ❌** Transitive closure and record-level filters are both implemented. The remaining gap is the engine correctly handling two mappings that contribute to the **same** target entity via identity linking when one has a `filter` condition — ensuring the filtered and unfiltered paths merge rather than overwrite.
 
 ---
 
 ### Element-set resolution (`elements: coalesce` / `elements: last_modified`)
 When multiple sources contribute elements to a nested array, resolve element-level conflicts — pick the winning source's version of each element by priority or timestamp.
 
-**Foundation: ❌** Depends on nested arrays.
+**Foundation: ❌** Nested array expansion and collapse are implemented. The gap is element-level conflict resolution: when multiple sources contribute elements to the same array, the engine needs a strategy (coalesce by element key, last-modified per element, etc.) for picking the winning version of each element.
 
 ---
 
@@ -407,36 +407,38 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 
 | Category | Total Primitives | ✅ Found | 🔶 Partial | ❌ Gap |
 |----------|-----------------|---------|-----------|-------|
-| Resolution strategies | 6 | 5 | 1 | 0 |
-| Identity & linking | 5 | 0 | 1 | 4 |
-| Nesting & structure | 6 | 0 | 3 | 3 |
+| Resolution strategies | 6 | 6 | 0 | 0 |
+| Identity & linking | 5 | 1 | 1 | 3 |
+| Nesting & structure | 6 | 2 | 4 | 0 |
 | References & FKs | 5 | 0 | 3 | 2 |
-| Field-level controls | 8 | 2 | 3 | 3 |
-| Deletion & tombstones | 4 | 0 | 1 | 3 |
-| Change detection & noop | 4 | 1 | 1 | 2 |
+| Field-level controls | 8 | 6 | 1 | 1 |
+| Deletion & tombstones | 4 | 1 | 3 | 0 |
+| Change detection & noop | 4 | 2 | 1 | 1 |
 | Ordering | 3 | 3 | 0 | 0 |
 | Routing & partitioning | 3 | 0 | 1 | 2 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **12** | **16** | **22** |
+| **Total** | **50** | **22** | **16** | **12** |
 
 ---
 
 ## Highest-Priority Foundation Work
 
-The gaps cluster into a few interconnected areas. Unblocking these unlocks the most primitives:
+Five of the six original high-priority foundation items are now done. Remaining work clusters around the items below.
 
-1. **Transitive closure identity** — needed by composite keys, external links, FK resolution, multi-source merge, N-way sync. A union-find / connected-components layer over `entity_links`.
+1. ~~**Transitive closure identity**~~ — ✅ done (`PLAN_TRANSITIVE_CLOSURE_IDENTITY`).
 
-2. **Nested array pipeline** — unlocks embedded objects, nested arrays, scalar arrays, element-level deletion, element ordering, dynamic resolution. Requires designing a forward expand + reverse aggregate path.
+2. ~~**Nested array pipeline**~~ — ✅ done (forward expand + reverse collapse, multi-level, cross-channel).
 
-3. **Filter/routing** — unlocks `filter`, `reverse_filter`, routing, route-combined, `reverse_required`. Needed for any discriminator-based partitioning.
+3. ~~**Filter/routing**~~ — ✅ flat record `filter`/`reverse_filter` done; within-channel routing variant still 🔶.
 
-4. **FK resolution pipeline** — unlocks `references`, `references_field`, vocabulary targets, reference preservation. Builds on transitive closure + identity map's `getExternalId`.
+4. **FK resolution pipeline** — unlocks `references`, `references_field`, vocabulary targets, reference preservation. Builds on transitive closure + `IdentityMap.getExternalId`. All dependencies are now met.
 
-5. **`written_state` / target-centric noop** — unlocks `derive_noop`, `derive_timestamps`, element hard-delete. Requires storing what was last written (not just what was last received).
+5. ~~**`written_state` / target-centric noop**~~ — ✅ done (`PLAN_WRITTEN_STATE`). Unblocks `derive_timestamps`, element tombstoning, and hard-delete detection — all now at 🔶 (foundation present, logic not yet wired).
 
-6. **Inline test framework** — unlocks the full testing primitive. High value for mapping validation independent of the above gaps.
+6. **Inline test framework** — high value for mapping validation. No dependencies on the above. Independent work.
+
+7. **Remaining identity gaps** — external link tables, cluster members writeback, cluster field. Require extending the identity layer beyond what transitive closure alone provides.
 
 ---
 

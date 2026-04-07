@@ -699,29 +699,48 @@ root source connector.
 
 ## 4. Foreign Key References
 
-### 4.1 Declaring a reference field
+### 4.1 PK as a canonical field (`id_field`)
+
+Some connectors include their primary key in `record.data` alongside other fields.
+A field mapping with `source: "<fieldName>"` captures it directly — no engine change
+is needed.
+
+Other connectors treat the PK as a transport-layer identifier and deliberately omit it
+from `record.data`. In those cases the optional `id_field` property on a channel member
+tells the engine to inject `record.id` into the stripped data map under the given name
+before running `applyMapping`:
 
 ```yaml
-fields:
-  - source: account_id      # local source ID for the referenced account
-    target: accountId
-    references: accounts    # canonical entity type being referenced
+- connector: erp
+  channel: accounts
+  entity: accounts
+  id_field: erpId          # inject record.id as "erpId" before mapping
+  fields:
+    - source: erpId
+      target: erpId        # erpId now appears in canonical
+    - source: name
+      target: name
 ```
 
-`references` declares a foreign-key relationship. The engine uses this declaration to:
+The full cross-connector FK pattern then requires no special engine mechanism beyond
+this:
 
-1. **Forward pass**: translate `account_id` from the source's local ID namespace to the canonical
-   UUID for the referenced `accounts` entity. If the canonical entity is not yet known, the
-   reference is deferred (see [identity.md](identity.md) §Deferred Associations).
+1. ERP declares `id_field: erpId` so `record.id = "ACC-001"` becomes available as
+   `erpId` in the mapping scope.
+2. HubSpot maps `source: erp_account_id, target: erpId` — pointing its custom
+   property at the same canonical field.
+3. Both sides carry the stable string `"ACC-001"`. No UUID translation; no special
+   engine path.
 
-2. **Reverse pass**: translate the canonical `accountId` UUID back to the target connector's local
-   ID for the `accounts` entity before writing.
+**Precedence:** if the connector also provides the field in `record.data`, the
+connector value wins (`{ ...idBase, ...raw }` — data overwrites the injection).
 
-This is distinct from the automatic association syncing described in [identity.md](identity.md) —
-`references` is for FK fields the connector explicitly stores on the record (e.g. a `contact`
-that stores `account_id`), while associations are implicit structural links.
+**Direction:** to prevent the injected PK from being written back as a data field
+when the engine dispatches updates to the same connector, add
+`direction: reverse_only` on the mapping entry. `reverse_only` reads the field into
+canonical on the forward pass but excludes it from the outbound payload.
 
-**Status: designed, not yet implemented (OSI-mapping §4 "Cross-entity references").**
+**Status: implemented (specs/field-mapping.md §4.1).**
 
 ---
 
@@ -1105,7 +1124,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | `expression` resolver | §1 | 🔶 TypeScript resolvers designed, not wired to config |
 | `collect` resolver | §1 | 🔶 data available in shadow state; resolver not built |
 | `bool_or` resolver | §1 | 🔶 implementable as collect variant; not built |
-| Composite keys (`link_group`) | §2 | 🔶 single-field identity only; composite needs schema change |
+| Composite keys (`link_group`) | §2 | ✅ `identityGroups` (AND-within-group, OR-across-groups); tests T-LG-1–T-LG-4 |
 | Transitive closure | §2 | ❌ pairwise only; union-find layer not designed |
 | External link tables | §2 | ❌ no third-party linkage feed |
 | Cluster members writeback | §2 | ❌ no feedback table after inserts |
@@ -1116,8 +1135,8 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Scalar arrays (`scalar: true`) | §3 | ❌ depends on nested arrays |
 | `source_path` extraction | §3 | 🔶 doable as expression; inline syntax not implemented |
 | Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
-| `references` (FK field) | §4 | 🔶 deferred associations exist; explicit FK declaration not wired |
-| FK reverse resolution | §4 | 🔶 `getExternalId` exists; not auto-wired into reverse mapping |
+| `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
+| FK reverse resolution | §4 | ✅ `direction: reverse_only` excludes injected PK from outbound dispatch |
 | Reference preservation after merge | §4 | 🔶 entity_links preserve original IDs; pipeline not wired |
 | `references_field` | §4 | ❌ no alternate-representation FK |
 | Vocabulary targets | §4 | ❌ no vocabulary entity concept |
@@ -1158,7 +1177,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Resolution strategies | 6 | 3 | 3 | 0 |
 | Identity & linking | 5 | 0 | 1 | 4 |
 | Nesting & structure | 6 | 0 | 2 | 4 |
-| References & FKs | 5 | 0 | 3 | 2 |
+| References & FKs | 5 | 2 | 1 | 2 |
 | Field-level controls | 8 | 1 | 3 | 4 |
 | Deletion & tombstones | 4 | 0 | 1 | 3 |
 | Change detection & noop | 4 | 1 | 1 | 2 |
@@ -1166,7 +1185,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Routing & partitioning | 3 | 0 | 0 | 3 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **6** | **16** | **28** |
+| **Total** | **50** | **8** | **14** | **28** |
 
 ### Highest-priority foundation work
 

@@ -14,6 +14,14 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 ## [Unreleased]
 
 ### Added
+
+- `id_field` on channel member (`ChannelMember.idField`): injects `record.id` into the
+  stripped data map under the given field name before `applyMapping` runs. Enables
+  connectors that omit their PK from `record.data` to expose it as a plain canonical
+  field and participate in cross-connector FK patterns without UUID translation.
+  Spec: `specs/field-mapping.md §4.1`.
+
+### Added
 - Engine: `bool_or` per-field resolution strategy (specs/field-mapping.md §2.5). Once any source
   sets a field to truthy, the canonical value latches to `true` and cannot be reverted to `false`
   by a later source contributing `false`. Useful for deletion flags and soft-delete signals that

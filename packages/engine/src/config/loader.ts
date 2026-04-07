@@ -100,8 +100,10 @@ export interface ChannelMember {
   outbound?: FieldMappingList;
   /** Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.2 — declared association predicates.
    * Absent → no associations forwarded from/to this connector. */
-  assocMappings?: AssocPredicateMapping[];
-  // Spec: specs/field-mapping.md §3.2/§3.4 — nested array expansion fields
+  assocMappings?: AssocPredicateMapping[];  /** When set, inject `record.id` into the stripped data map under this field name
+   *  before `applyMapping` runs. Use only when the connector does not include its own
+   *  PK in `record.data`. Spec: specs/field-mapping.md §4.1 */
+  idField?: string;  // Spec: specs/field-mapping.md §3.2/§3.4 — nested array expansion fields
   arrayPath?: string;          // leaf-level dotted path (leaf of expansionChain)
   parentMappingName?: string;  // name of the parent mapping entry (resolved from `parent` key)
   parentFields?: Record<string, ParentFieldRef>;  // leaf-level parent fields
@@ -372,6 +374,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
       inbound,
       outbound,
       assocMappings: entry.associations,
+      idField: entry.id_field,
       // Array expansion fields
       arrayPath: entry.array_path,
       parentMappingName: entry.parent,

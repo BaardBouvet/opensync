@@ -86,6 +86,8 @@ export const MappingEntrySchema = z.object({
   // Element filters (plans/engine/PLAN_ELEMENT_FILTER.md)
   filter: z.string().optional(),         // JS expression string — forward pass element filter
   reverse_filter: z.string().optional(), // JS expression string — reverse pass element filter
+  // PK-as-field injection (specs/field-mapping.md §4.1)
+  id_field: z.string().optional(),       // when set, inject record.id into stripped data under this name before mapping
   // Scalar array expansion (specs/field-mapping.md §3.3)
   scalar: z.boolean().optional(),        // when true, elements are bare scalars; mutually exclusive with element_key
   // Array ordering (specs/field-mapping.md §6)

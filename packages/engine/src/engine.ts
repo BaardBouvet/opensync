@@ -313,8 +313,10 @@ export class SyncEngine {
         for await (const batch of sourceRead(source.ctx, since)) {
           for (const record of batch.records) {
             const raw = record.data as Record<string, unknown>;
+            // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
+            const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
             const stripped = Object.fromEntries(
-              Object.entries(raw).filter(([k]) => !k.startsWith("_")),
+              Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")),
             );
 
             if (sourceMember.expansionChain) {
@@ -1572,7 +1574,9 @@ export class SyncEngine {
 
       for (const record of records) {
         const raw = record.data as Record<string, unknown>;
-        const stripped = Object.fromEntries(Object.entries(raw).filter(([k]) => !k.startsWith("_")));
+        // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
+        const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
+        const stripped = Object.fromEntries(Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")));
 
         // Echo detection at parent level — compare full stripped record (no inbound mapping)
         const parentShadowRow = dbGetShadowRow(this.db, sourceMember.connectorId, parentShadowEntity, record.id);
@@ -1690,7 +1694,9 @@ export class SyncEngine {
 
     for (const record of records) {
       const raw = record.data as Record<string, unknown>;
-      const stripped = Object.fromEntries(Object.entries(raw).filter(([k]) => !k.startsWith("_")));
+      // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
+      const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
+      const stripped = Object.fromEntries(Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")));
 
       // Spec: specs/field-mapping.md §5.1 — record-level filter on flat (non-array) members.
       // Applied to the raw stripped record before inbound mapping.
