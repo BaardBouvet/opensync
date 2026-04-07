@@ -54,7 +54,8 @@ const scenario: ScenarioDefinition = {
     // webshop member FIRST — ensures array_parent_map is populated before erp ingest.
     {
       id: "order-lines",
-      identityFields: ["orderRef", "lineNo"],
+      // Compound group: both orderRef AND lineNo must match to link records.
+      identityGroups: [{ fields: ["orderRef", "lineNo"] }],
       members: [
         {
           connectorId: "webshop",
@@ -75,9 +76,9 @@ const scenario: ScenarioDefinition = {
           ],
           outbound: [
             { source: "sku",         target: "sku" },
-            { source: "qty",         target: "quantity" },
-            { source: "unitPrice",   target: "linePrice" },
-            { source: "orderRef",    target: "purchaseRef" },
+            { source: "quantity",    target: "qty" },
+            { source: "linePrice",   target: "unitPrice" },
+            { source: "purchaseRef", target: "orderRef" },
           ],
         },
         {

@@ -188,7 +188,7 @@ export async function startEngine(
   const engine = new SyncEngine(config, db);
 
   // 4. Onboard any uninitialised channels
-  // Array-expansion channels are skipped here — they are bootstrapped on first poll.
+  // Array-expansion channels are skipped here — they are bootstrapped below (step 4c).
   // Spec: specs/playground.md § 11.11
   const onboardResults = new Map<string, Awaited<ReturnType<SyncEngine["onboard"]>>>();
   for (const ch of config.channels) {
@@ -210,6 +210,19 @@ export async function startEngine(
     const report = await engine.discover(ch.id, snapshotAt);
     const onboardResult = await engine.onboard(ch.id, report);
     onboardResults.set(ch.id, onboardResult);
+  }
+
+  // 4c. Bootstrap array-expansion channels by running a warmup ingest pass.
+  // Because onboard is skipped for these channels, we run a plain ingest for each
+  // member (webshop first — member order guarantees array_parent_map is populated
+  // before the ERP flat member runs). This happens synchronously at boot so the
+  // initial render already has cluster data regardless of realtime mode.
+  // Spec: specs/playground.md § 11.11
+  for (const ch of config.channels) {
+    if (!isArrayChannel(ch)) continue;
+    for (const member of ch.members) {
+      await engine.ingest(ch.id, member.connectorId);
+    }
   }
 
   // 4b. Emit onboarding READ + INSERT events.

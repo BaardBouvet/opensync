@@ -53,11 +53,8 @@ export const FIXED_SEED: EntitySeedMap = {
       { id: "ord1", data: { orderRef: "ORD-1001", total: 299.90, status: "shipped", date: "2026-03-15" } },
       { id: "ord2", data: { orderRef: "ORD-1002", total: 149.95, status: "pending", date: "2026-04-01" } },
     ],
-    orderLines: [
-      { id: "ol1", data: { orderRef: "ORD-1001", lineNo: "L01", sku: "SKU-001", qty: 5,  unitPrice: 29.99 } },
-      { id: "ol2", data: { orderRef: "ORD-1001", lineNo: "L02", sku: "SKU-002", qty: 2,  unitPrice: 49.99 } },
-      { id: "ol3", data: { orderRef: "ORD-1002", lineNo: "L01", sku: "SKU-001", qty: 3,  unitPrice: 29.99 } },
-    ],
+    // orderLines starts empty — populated by the engine from webshop expansion on warmup.
+    orderLines: [],
     items: [
       { id: "item1", data: { sku: "SKU-001", itemName: "Widget A", price: 29.99 } },
       { id: "item2", data: { sku: "SKU-002", itemName: "Widget B", price: 49.99 } },
