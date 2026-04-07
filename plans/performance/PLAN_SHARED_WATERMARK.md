@@ -243,119 +243,101 @@ Ingest step 2 WITH this plan (CRM entity declares sinceFormat: "iso-timestamp"):
 
 ## Extension: per-target fan-out watermarks
 
-> **Status:** design notes — not part of the implementation phases above. Captured here
-> because it is the write-side complement of the read-side shadow derivation above.
+> **Status:** design notes — not part of the implementation phases above.
 
 ### Two watermark questions
 
 | Question | Current answer | Proposed addition |
 |----------|---------------|-------------------|
 | "How far have we read from source A?" | `watermarks(connector_id, entity_name)` — connector-owned opaque cursor | no change |
-| "How far has mapping A→B fully processed?" | **nothing** — restart re-diffs everything from `watermarks` cursor | `fanout_watermarks(source_connector_id, entity_name, target_connector_id)` |
+| "How far along the source change stream has mapping A→B been committed?" | **nothing** | see analysis below |
 
-The read cursor says "ask the API from here". The fan-out watermark says "records whose
-engine-side processing timestamp is ≤ T have already been committed to target B; skip them
-on restart".
+### What does "fan-out watermark" mean, precisely?
 
-### Problem the second watermark solves
+A watermark is a **positional cursor**: "everything before position T in the stream has been
+committed to target B; skip it." It operates on the *ordering* of records in the change
+stream, not on the values of individual records.
 
-Today, if the engine reads 40 K records from CRM, fans 30 K out to ERP (committing each to
-`shadow_state`), then crashes, the next ingest re-reads from CRM's cursor and diffs all
-records that were already processed against shadow → all produce no-ops and are suppressed by
-echo detection / noop suppression. Safe, but wasteful: 30 K records re-read from the API,
-re-deserialized, re-diffed, and individually suppressed.
+`written_state` is NOT a watermark by this definition. It is **per-record state**: it records
+what values were last written to a target connector for a specific canonical record.
+Two things it does:
 
-When source A feeds two targets B and C:
-- B processed 30 K records before crash
-- C processed 10 K records before crash
+1. **Data comparison** — for an incoming change to record X, compare `localData` against
+   `written_state.data` for `(B, entity, X.canonicalId)`. If they match, the target already
+   has these exact values; skip dispatch. If they differ, dispatch.
 
-Today there is no way to skip the already-processed portion for B independently of C.
-Everything re-runs from the shared read cursor.
+2. **First-time insert signal** — no row → B has never received this record; always insert.
 
-A `fanout_watermarks` row per `(source, entity, target)` lets the engine skip the fan-out
-leg for records already committed to that specific target.
+Critically: `written_state` correctness for **future changes** does not depend on row
+presence. When record X changes from V1 to V2, `localData = V2` and `written_state.data = V1`
+don't match → dispatch proceeds correctly. Row presence only matters for the first write.
 
-### Proposed schema
+### Why this is not the same as a positional watermark
 
-```sql
-CREATE TABLE fanout_watermarks (
-  source_connector_id  TEXT NOT NULL,
-  entity_name          TEXT NOT NULL,
-  target_connector_id  TEXT NOT NULL,
-  since                TEXT NOT NULL,    -- ISO 8601; engine-owned, not connector-owned
-  PRIMARY KEY (source_connector_id, entity_name, target_connector_id)
-);
-```
+A positional fan-out watermark would let the engine say: "records 1–30,000 in this batch
+are all committed to B; skip them entirely without even looking them up." This is a range
+skip — O(1) cost for the committed prefix of any restart batch.
 
-Key is `(source, entity, target)`. The `since` value is the engine's own ISO timestamp —
-specifically the `shadow_state.updated_at` of the last source record that was fully committed
-to this target. Unlike `watermarks`, this is always ISO 8601 (the engine sets it from
-`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`) and is independent of the connector's cursor format.
+`written_state` can't do this. It requires a per-record lookup: for each record that comes
+back on restart, check if `localData` matches `written_state.data`. That is O(delta) lookups
+each O(1), not a single range skip.
 
-### Engine integration point
+Whether the O(delta) per-record cost matters depends entirely on how records re-enter the
+pipeline after a crash:
 
-In the fan-out loop (ingest step 4f), before dispatching to target B:
+- **With per-ReadBatch commit (Step A from GAP_INCREMENTAL_ENGINE.md)**: the source
+  watermark advances to `batch.since` after each committed ReadBatch. On restart, the
+  source connector returns only records from the uncommitted tail (at most one batch). The
+  committed prefix never re-enters — `written_state` for those records is never consulted.
 
-```
-1. Load fanout_watermarks[(source, entity, B)]  → T_fanout
-2. Load source shadow row for this record       → shadow.updated_at
+- **Without per-ReadBatch commit (current model)**: the source watermark advances only at
+  end of run. A crash forces re-reading the entire uncommitted run from the last stored
+  watermark. For each of those records, `written_state` data comparison eliminates
+  redundant dispatches — but the API round-trip to the source still happened, and the
+  per-record lookup cost is O(all records in the run).
 
-if shadow.updated_at <= T_fanout:
-  skip dispatch to B entirely (already committed in an earlier run)
-else:
-  proceed with existing noop-suppression → dispatch → shadow write
-  (after atomic commit, advance fanout_watermarks row to shadow.updated_at)
-```
+So `written_state` data comparison is **correct** in both models, but **efficient** only
+when combined with per-ReadBatch commit (which shrinks the restart window to one batch).
 
-The advance must be atomic with the target shadow write — same transaction — otherwise a
-crash between the write and the watermark advance causes the next run to re-process (safe
-due to noop suppression, same as today).
+### What value would a true positional fan-out watermark hold?
 
-### Subtlety: the low-water-mark problem
+For completeness — the candidates available to the engine:
 
-Records within a batch are not guaranteed to arrive in strict `shadow.updated_at` order. The
-engine writes them in processing order and each gets `strftime('now')` — within a single
-batch they may get near-identical timestamps. The fan-out watermark for a batch can only
-safely advance to `MAX(shadow.updated_at)` of **all** records that were successfully
-committed to that target in that batch. Any record whose `shadow.updated_at` falls inside a
-gap (failed mid-batch) must cause the watermark to stop advancing.
+**Option 1 — Connector-owned `batch.since` cursor**  
+Opaque. The engine can store it but cannot use it as a per-record comparator. Knowing
+"A→B committed up to cursor T" is useless without a way to ask "is record R before T?" —
+which the SDK contract doesn't provide.
 
-Simplest safe implementation: **advance per completed batch, not per record**. At the end
-of a successful ingest batch committed to target B, set:
+**Option 2 — Engine-set ISO timestamp (`shadow_state.updated_at`)**  
+`strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` is SQLite-level and millisecond-precision. Within
+one transaction, multiple rows may share the same timestamp. You cannot reliably use
+`updated_at < T` as a range boundary — records at exactly `T` are ambiguously inside or
+outside the range.
 
-```
-fanout_watermarks[(source, entity, B)] = batch_commit_time
-                                       = MAX(shadow.updated_at committed in this batch)
-```
+**Option 3 — Monotonic integer sequence**  
+Would work cleanly: "all records with sequence ≤ N are committed to B". But the engine has
+no such counter today (`batch_id` is an unordered UUID). Adding one requires a schema change.
 
-On restart, all records with `shadow.updated_at > batch_commit_time` are candidates for
-re-dispatch; noop suppression handles any that were actually written. This is conservative
-(may re-process some records already sent in the crashed batch) but correct and simple.
+### Recommendation
 
-### Interaction with the shadow-derived read cursor (this plan, Phase 2)
+`fanout_watermarks` is not worth implementing now. The combination of:
+1. **Per-ReadBatch commit** (Step A) — shrinks the restart window to one batch's worth of records
+2. **`written_state` data comparison** — suppresses redundant dispatches for the few
+   records that DO come back after a partial-batch crash
 
-If `fanout_watermarks` exists for all targets of a source, the minimum of all fan-out
-watermarks is a safe upper-bound hint for the read cursor:
+...covers all correctness and efficiency cases without a new table or the O(1) range-skip
+that a positional watermark would provide.
 
-```
-synthetic_since = MIN(fanout_watermarks[(A, entity, B)], fanout_watermarks[(A, entity, C)]) − slack
-```
+If a monotonic batch sequence is introduced in the future, a `fanout_watermarks` table keyed
+on sequence becomes viable and would eliminate the per-record `written_state` lookup on
+restart entirely. Defer until then.
 
-This is strictly tighter than the `MAX(shadow.updated_at)` used in Phase 2, because it
-reflects not just "what was read" but "what was fully dispatched". Phase 2 can incorporate
-this as a third fallback tier:
+The watermark resolution tiers for Phase 2 above remain two-tier (no fan-out watermarks
+needed as a fallback):
 
 ```
 Watermark resolution for (A, entity):
   1. watermarks[A, entity]                    → connector-owned cursor (always preferred)
-  2. MIN(fanout_watermarks[(A, entity, *)])   → fully-dispatched frontier (iso-timestamp only)
-  3. MAX(shadow_state.updated_at[A, entity])  → read-only shadow frontier (iso-timestamp only)
-  4. undefined                                → full sync
+  2. MAX(shadow_state.updated_at[A, entity])  → shadow frontier fallback (iso-timestamp only)
+  3. undefined                                → full sync
 ```
-
-### When to implement
-
-After Phase 3 of this plan is complete and validated. The fan-out watermark does not change
-correctness — noop suppression remains the safety net. It is a throughput optimisation for
-connectors with expensive reads or large steady-state deltas. Track as a separate plan once
-Phase 3 shakes out the schema conventions.

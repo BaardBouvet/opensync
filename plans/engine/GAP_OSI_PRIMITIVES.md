@@ -212,7 +212,7 @@ Fallback values when no source provides data. `default` is a static value; `defa
 ### Direction control (`bidirectional` / `forward_only` / `reverse_only`)
 Per-field direction. `forward_only` fields (e.g. constant injections) only flow source → target. `reverse_only` fields only flow in the reverse ETL direction.
 
-**Foundation: ❌** All mapping fields are implicitly bidirectional today. No per-field direction flag. Required for constant injection, one-way computed fields, and asymmetric schema mappings.
+**Foundation: ✅** Fully implemented. `FieldDirectionSchema` in `config/schema.ts`, `FieldMapping.direction` in `config/loader.ts`, and `applyMapping()` in `core/mapping.ts` all honour the three modes. Spec: `specs/field-mapping.md §1.2` (status: implemented). Tests: `mapping.test.ts` FE5 + FE6.
 
 ---
 

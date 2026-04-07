@@ -23,7 +23,6 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_LOOKUP_MERGE_ETAG.md](engine/PLAN_LOOKUP_MERGE_ETAG.md) | Engine-side lookup-merge and ETag threading | backlog | — |
 | [engine/PLAN_TS_LINTING.md](engine/PLAN_TS_LINTING.md) | Code quality toolchain (linting, formatting, type hygiene) | backlog | — |
 | [engine/GAP_ENGINE_DECISIONS.md](engine/GAP_ENGINE_DECISIONS.md) | Gap analysis: key engine design decisions and their rationale | reference | — |
-| [engine/GAP_ENGINE_SCALING.md](engine/GAP_ENGINE_SCALING.md) | Gap analysis: engine scaling behaviour — which operations are O(delta) vs O(total data) | reference | — |
 | [engine/PLAN_CONFIG_VALIDATION.md](engine/PLAN_CONFIG_VALIDATION.md) | Config cross-reference validation (channels, connectors, auth) | backlog | — |
 | [engine/PLAN_DB_MIGRATIONS.md](engine/PLAN_DB_MIGRATIONS.md) | Post-release database migration infrastructure plan | deferred — post-release | — |
 | [engine/PLAN_ENGINE_SYNC_EVENTS.md](engine/PLAN_ENGINE_SYNC_EVENTS.md) | First-class SyncEvent emission from engine: extend RecordSyncResult with sourceData/sourceShadow/before/after; OnboardResult.inserts; removes ActivityLogEntry workaround from playground | complete | — |
@@ -41,12 +40,18 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md](engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md) | Declare canonical field and association schema on channel definitions; validation that mapping targets match declared canonicals | draft | M |
 | [engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md](engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md) | Per-field union-find identity matching: replace composite-key discover/addConnector/resolveCanonical with connected-components algorithm so A=B via email + B=C via taxId → A=B=C | complete | M |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
-| [engine/PLAN_FIELD_EXPRESSIONS.md](engine/PLAN_FIELD_EXPRESSIONS.md) | Field expressions: `expression` / `reverseExpression` function fields on `FieldMapping` for combine, normalize, and decompose transforms in the embedded API | backlog | S |
-| [engine/PLAN_NESTED_ARRAY_PIPELINE.md](engine/PLAN_NESTED_ARRAY_PIPELINE.md) | Forward-pass array expansion: `array_path` mapping key expands embedded JSON arrays into individual child entity records for per-element diffing, resolution, and fan-out | draft | M |
+| [engine/PLAN_FIELD_EXPRESSIONS.md](engine/PLAN_FIELD_EXPRESSIONS.md) | Field expressions: `expression` / `reverseExpression` function fields on `FieldMapping` for combine, normalize, and decompose transforms in the embedded API | complete | S |
+| [engine/PLAN_NORMALIZE_NOOP.md](engine/PLAN_NORMALIZE_NOOP.md) | Per-field `normalize` function applied at diff time to both incoming and shadow values; prevents precision-loss connectors from triggering infinite update loops | backlog | S |
+| [engine/PLAN_REVERSE_REQUIRED.md](engine/PLAN_REVERSE_REQUIRED.md) | Per-field `reverseRequired` boolean: suppress entire dispatched row when a required field is null; prevents premature writes until critical fields are populated | backlog | XS |
+| [engine/PLAN_DIRECTION_CONTROL.md](engine/PLAN_DIRECTION_CONTROL.md) | Direction control (`bidirectional` / `forward_only` / `reverse_only`): already implemented; plan closes out the stale ❌ marker in GAP_OSI_PRIMITIVES.md | complete | — |
+| [engine/PLAN_DEFAULT_VALUES.md](engine/PLAN_DEFAULT_VALUES.md) | Per-field `default` and `defaultExpression` fallbacks applied on the forward pass when the source field is absent or null | backlog | XS |
+| [engine/PLAN_FIELD_GROUPS.md](engine/PLAN_FIELD_GROUPS.md) | Per-field `group` label for atomic resolution: all fields sharing a group resolve from the same winning source; prevents incoherent field mixes | backlog | M |
+| [engine/PLAN_NESTED_ARRAY_PIPELINE.md](engine/PLAN_NESTED_ARRAY_PIPELINE.md) | Forward-pass array expansion: `array_path` mapping key expands embedded JSON arrays into individual child entity records for per-element diffing, resolution, and fan-out | complete | M |
+| [engine/PLAN_MULTILEVEL_ARRAY_EXPANSION.md](engine/PLAN_MULTILEVEL_ARRAY_EXPANSION.md) | Multi-level nested array expansion (deep nesting §3.4): `expansionChain` loader field, transitive parent-chain walk, `expandArrayChain` cross-join, multi-hop `array_parent_map` writes | complete | M |
+| [engine/PLAN_ARRAY_COLLAPSE.md](engine/PLAN_ARRAY_COLLAPSE.md) | Reverse array expansion (array collapse): flat record → embedded array element write-back; `array_parent_map` table, `collectOnly` expansion, `_dispatchToArrayTarget`, per-parent batching | complete | M |
+| [engine/PLAN_ELEMENT_FILTER.md](engine/PLAN_ELEMENT_FILTER.md) | Element-level filter expressions on array expansion members; enables split-routing of one `array_path` into disjoint channels; required for safe per-type array splits with collapse | complete | M |
 | [engine/PLAN_WRITTEN_STATE.md](engine/PLAN_WRITTEN_STATE.md) | `written_state` table: records last-written field values per target connector per entity; enables target-centric noop suppression, nested-array element tombstoning, and derived timestamps | complete | M |
-| [engine/PLAN_CROSS_CHANNEL_EXPANSION.md](engine/PLAN_CROSS_CHANNEL_EXPANSION.md) | Cross-channel array expansion: `source_entity` + `parent_channel` mapping keys allow a child entity to live in a different channel than its parent; engine reads the parent connector entity and fans out into the child channel | draft | M |
-| [engine/PLAN_SHARED_WATERMARK.md](engine/PLAN_SHARED_WATERMARK.md) | Derive `since` from `shadow_state.updated_at` when no watermark entry exists; avoids full re-syncs after watermark loss or collectOnly with no cursor; opt-in via `sinceFormat: "iso-timestamp"` on EntityDefinition | draft | S |
-
+| [engine/PLAN_CROSS_CHANNEL_EXPANSION.md](engine/PLAN_CROSS_CHANNEL_EXPANSION.md) | Cross-channel array expansion: `source_entity` + `parent_channel` mapping keys allow a child entity to live in a different channel than its parent; engine reads the parent connector entity and fans out into the child channel | complete | M || [engine/PLAN_PENDING_WRITES.md](engine/PLAN_PENDING_WRITES.md) | `pending_writes` table + retry loop: recover silently-dropped fan-out writes when a target connector errors; mirrors `deferred_associations` pattern | draft | S |
 ## connectors/ — Connector research and cleanup plans
 
 | File | What it covers | Status | Effort |
@@ -85,11 +90,21 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [playground/PLAN_PLAYGROUND_TESTING.md](playground/PLAN_PLAYGROUND_TESTING.md) | Playwright E2E test rig for the browser playground demo | backlog | — |
 | [playground/PLAN_PLAYGROUND_MVU.md](playground/PLAN_PLAYGROUND_MVU.md) | Migrate playground from imperative DOM mutation to MVU architecture | backlog | — |
 | [playground/PLAN_PLAYGROUND_SMB_SEED.md](playground/PLAN_PLAYGROUND_SMB_SEED.md) | Expand playground seed to four systems (crm/erp/hr/webshop), six entity concepts, richer fields, intentionally unmapped fields, and a new smb-demo scenario | backlog | S |
+| [playground/PLAN_ARRAY_DEMO_SCENARIO.md](playground/PLAN_ARRAY_DEMO_SCENARIO.md) | Playground array-demo scenario: extend ERP seed with embedded-lines orders, add webshop system, add order-lines array-expansion channel, fix lifecycle to skip onboard for array-expansion channels | draft | S |
 | [playground/PLAN_NOTIFICATION_POLL.md](playground/PLAN_NOTIFICATION_POLL.md) | Debounced notification poll: separate mutation flash from propagation flash to make async sync visible | complete | — |
 | [playground/PLAN_AGENT_PANEL.md](playground/PLAN_AGENT_PANEL.md) | Agent chat sidebar in the playground: natural-language mapping generation, schema Q&A, Apply-to-editor button — VS Code chat–style right panel | draft | L |
 | [playground/PLAN_URL_HISTORY.md](playground/PLAN_URL_HISTORY.md) | URL hash anchors + browser history: encode scenario + active tab in `#scenario=...&tab=...`; pushState on scenario change, replaceState on tab change, popstate restores view | backlog | S |
 | [playground/PLAN_VERSION_BADGE.md](playground/PLAN_VERSION_BADGE.md) | Version badge in topbar + update notification when a newer GitHub Release is available, linking to release notes | backlog | S |
 | [playground/PLAN_VISUAL_CONFIG_EDITOR.md](playground/PLAN_VISUAL_CONFIG_EDITOR.md) | Visual config editor: form-based tab alongside YAML editor; compares four approaches (form, editable lineage, node-graph, schema hints) | draft | L |
+
+## performance/ — Performance and throughput optimisations
+
+| File | What it covers | Status | Effort |
+|------|---------------|--------|--------|
+| [performance/GAP_ENGINE_SCALING.md](performance/GAP_ENGINE_SCALING.md) | Gap analysis: engine scaling behaviour — which operations are O(delta) vs O(total data) | reference | — |
+| [performance/GAP_INCREMENTAL_ENGINE.md](performance/GAP_INCREMENTAL_ENGINE.md) | Gap analysis: incremental pipeline model — maps each stage to its state table, identifies where batch-at-a-time breaks true incrementality (GAP-I1–I4), and proposes per-ReadBatch commit, scoped deferred retry, and fan-out watermarks | reference | — |
+| [performance/PLAN_SHARED_WATERMARK.md](performance/PLAN_SHARED_WATERMARK.md) | Shadow-derived read cursor fallback (`sinceFormat: "iso-timestamp"`) + analysis of why a `fanout_watermarks` table is not needed (`written_state` + per-ReadBatch commit suffices) | draft | S |
+| [performance/PLAN_IDENTITY_SCALE.md](performance/PLAN_IDENTITY_SCALE.md) | Incremental transitive identity: replace in-memory union-find in `discover()`/`addConnector()` with SQL label propagation + expression indexes; `_resolveCanonical` ingest path unchanged | draft | L |
 
 ## meta/ — Cross-cutting project plans
 
