@@ -29,6 +29,13 @@ known-good state.
 The engine is designed to support full semantic mapping — splitting, merging, and
 transforming fields between systems that describe the same concept differently.
 
+**Declarative mappings give lineage for free.** Field mappings are data structures, not
+opaque code. Because every rename, expression, and conflict rule is inspectable without
+running the engine, a complete field-lineage graph — from raw connector field to canonical
+name to every system that receives it — can be derived statically. This is the reason the
+playground can render a live lineage diagram from config alone, and why any downstream
+tool can audit data flows without instrumenting the engine.
+
 **Actions and light workflows belong here.** Sync events are a natural trigger for
 downstream actions: notify a Slack channel, create a task, fire an approval workflow.
 The Actions feature makes OpenSync a lightweight event-driven workflow engine — not a

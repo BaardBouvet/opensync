@@ -39,19 +39,24 @@ No changes to `specs/field-mapping.md`, `specs/sync-engine.md`, SDK, or engine p
 
 ## § 4 Seed Additions
 
-### § 4.1 ERP — new entities
+### § 4.1 ERP — new entities (flat, old-school)
 
-The ERP seed in `lib/systems.ts` gains two entities.
+The ERP seed in `lib/systems.ts` gains two entities — both flat, no embedded arrays.
 
-**`orders`** — each order carries an embedded `lines` array.
+**`orders`** — one record per order, no embedded lines.
 
-| id | orderRef | total | status | date | lines |
-|----|----------|-------|--------|------|-------|
-| ord1 | ORD-1001 | 299.90 | shipped | 2026-03-15 | [{lineNo:"L01",sku:"SKU-001",qty:5,unitPrice:29.99}, {lineNo:"L02",sku:"SKU-002",qty:2,unitPrice:49.99}] |
-| ord2 | ORD-1002 | 149.95 | pending | 2026-04-01 | [{lineNo:"L01",sku:"SKU-001",qty:3,unitPrice:29.99}] |
+| id | orderRef | total | status | date |
+|----|----------|-------|--------|------|
+| ord1 | ORD-1001 | 299.90 | shipped | 2026-03-15 |
+| ord2 | ORD-1002 | 149.95 | pending | 2026-04-01 |
 
-`lines` is a raw JSON array on the record — a connector field, not interpreted by the channel
-mapping for the `orders` channel (it is excluded from that channel's `fields` list).
+**`orderLines`** — flat line items, one record per line.
+
+| id | orderRef | lineNo | sku | qty | unitPrice |
+|----|----------|--------|-----|-----|-----------|
+| ol1 | ORD-1001 | L01 | SKU-001 | 5 | 29.99 |
+| ol2 | ORD-1001 | L02 | SKU-002 | 2 | 49.99 |
+| ol3 | ORD-1002 | L01 | SKU-001 | 3 | 29.99 |
 
 **`items`** — product catalogue (used by the `products` channel in a future scenario).
 
@@ -60,37 +65,31 @@ mapping for the `orders` channel (it is excluded from that channel's `fields` li
 | item1 | SKU-001 | Widget A | 29.99 |
 | item2 | SKU-002 | Widget B | 49.99 |
 
-### § 4.2 Webshop — new system
+### § 4.2 Webshop — new system (nested, modern)
 
 Add `webshop` to `FIXED_SYSTEMS` and `FIXED_SEED`.
 
-**`purchases`** — flat orders seeded to match ERP orders (same refs, different field names).
+**`purchases`** — orders with an embedded `lines` array, seeded to match ERP data.
 
-| id | purchaseRef | accountDomain | amount | state | couponCode |
-|----|-------------|--------------|--------|-------|------------|
-| pu1 | ORD-1001 | acme.com | 299.90 | shipped | null |
-| pu2 | ORD-1002 | globex.com | 149.95 | pending | SAVE10 |
+| id | purchaseRef | accountDomain | amount | state | couponCode | lines |
+|----|-------------|--------------|--------|-------|------------|-------|
+| pu1 | ORD-1001 | acme.com | 299.90 | shipped | null | [{lineNo:"L01",sku:"SKU-001",quantity:5,linePrice:29.99},{lineNo:"L02",sku:"SKU-002",quantity:2,linePrice:49.99}] |
+| pu2 | ORD-1002 | globex.com | 149.95 | pending | SAVE10 | [{lineNo:"L01",sku:"SKU-001",quantity:3,linePrice:29.99}] |
 
-**`lineItems`** — flat line items seeded to match ERP embedded lines (same ref + lineNo, different field names).
+`lines` is a raw JSON array on the record — a connector field, not interpreted by the channel
+mapping for the `orders` channel (it is excluded from that channel's `fields` list).  The
+`order-lines` channel picks it up via `arrayPath: "lines"` on the webshop member.
 
-| id | purchaseRef | lineNumber | sku | quantity | linePrice |
-|----|------------|-----------|-----|---------|----------|
-| li1 | ORD-1001 | L01 | SKU-001 | 5 | 29.99 |
-| li2 | ORD-1001 | L02 | SKU-002 | 2 | 49.99 |
-| li3 | ORD-1002 | L01 | SKU-001 | 3 | 29.99 |
-
-Pre-seeding both sides is what makes the **bidirectional** demo compelling: changes on either
-side propagate to the other.
-
-**This requires PLAN_ARRAY_COLLAPSE.md to be implemented first.** Until then, the scenario
-can be added in a forward-only form (empty webshop lineItems) as a placeholder.
+Pre-seeding both sides is what makes the **bidirectional** demo compelling: the ERP flat
+`orderLines` mirror the webshop embedded lines, and changes on either side propagate to the
+other.  PLAN_ARRAY_COLLAPSE.md is complete, so both directions are available immediately.
 
 ---
 
 ## § 5 Scenario Design
 
 **File:** `playground/src/scenarios/array-demo.ts`  
-**Label:** `"array-demo (erp embedded lines → webshop flat lineItems)"`
+**Label:** `"array-demo (webshop nested lines → erp flat orderLines)"`
 
 ### Channel 1: `orders`
 
@@ -101,30 +100,35 @@ Normal bidirectional sync — no array expansion.
 | erp | orders | `ref` | orderRef→ref, total→total, status→status, date→date |
 | webshop | purchases | `ref` | purchaseRef→ref, amount→total, state→status, createdAt→date |
 
-The ERP `lines` field passes through the channel's shadow storage but is excluded from the
-`fields` whitelist, so it is never dispatched to webshop.purchases.  (It lives on the ERP
-order record and is picked up separately by the `order-lines` channel.)
+The webshop `lines` field passes through the channel's shadow storage but is excluded from the
+`fields` whitelist, so it is never dispatched to erp.orders.  (It lives on the webshop
+purchase record and is picked up separately by the `order-lines` channel.)
 
 ### Channel 2: `order-lines`
 
-Array expansion — no collect/discover/onboard; bootstrapped on first poll.
+Array expansion (webshop as array source, ERP as flat target) — no collect/discover/onboard;
+bootstrapped on first poll.
 
 | Member | Role | Entity name | sourceEntity | arrayPath | elementKey |
 |--------|------|-------------|-------------|-----------|------------|
-| erp | array source | order_lines | orders | lines | lineNo |
-| webshop | flat target | lineItems | — | — | — |
+| webshop | array source | order_lines | purchases | lines | lineNo |
+| erp | flat target | orderLines | — | — | — |
 
-ERP member parentFields: `{ orderRef: "orderRef" }` — brings the parent order ref into each
-element's scope so `orderRef` is available as a canonical field on each child record.
+Webshop member parentFields: `{ purchaseRef: "purchaseRef" }` — brings the parent purchase
+ref (= `orderRef` canonical) into each element's scope.
 
-Canonical fields on `order-lines`: `orderRef`, `sku`, `qty`, `unitPrice`.
+Canonical fields on `order-lines`: `orderRef`, `lineNo`, `sku`, `qty`, `unitPrice`.
 
 Field mappings:
 
 | Member | Inbound | Outbound |
 |--------|---------|----------|
-| erp (array source) | lineNo→lineNo, sku→sku, qty→qty, unitPrice→unitPrice, orderRef→orderRef | (n/a — source only) |
-| webshop.lineItems | (read ignored — see §6) | sku→sku, qty→quantity, unitPrice→linePrice, orderRef→purchaseRef |
+| webshop (array source) | lineNo→lineNo, sku→sku, quantity→qty, linePrice→unitPrice, purchaseRef→orderRef | sku→sku, qty→quantity, unitPrice→linePrice, orderRef→purchaseRef |
+| erp.orderLines (flat target) | lineNo→lineNo, sku→sku, qty→qty, unitPrice→unitPrice, orderRef→orderRef | sku→sku, qty→qty, unitPrice→unitPrice, orderRef→orderRef |
+
+The webshop member's **outbound** mapping is exercised by the collapse (reverse) path: when an
+ERP `orderLines` record changes, the engine looks up the parent `purchases` record via
+`array_parent_map` and writes the updated line back into the `lines` array slot.
 
 ---
 
@@ -138,22 +142,21 @@ for each uninitialized channel:
   collectOnly for each member → discover → onboard
 ```
 
-The `collectOnly` path does not contain array expansion logic.  When it runs for the ERP
+The `collectOnly` path does not contain array expansion logic.  When it runs for the webshop
 `order-lines` member it:
 
-1. Uses `readEntityName = sourceEntity ?? entity` = `"orders"` → reads order records correctly
+1. Uses `readEntityName = sourceEntity ?? entity` = `"purchases"` → reads purchase records correctly
 2. For each record applies inbound mapping and stores shadow under entity `order_lines` with
-   the parent external ID (`"ord1"`, `"ord2"`)
-3. Produces **two shadow rows shaped like full order objects** — not three line-shaped rows
+   the parent external ID (`"pu1"`, `"pu2"`)
+3. Produces **two shadow rows shaped like full purchase objects** — not three line-shaped rows
 
-`discover()` then reports both ERP rows as new, and `onboard()` writes two order-shaped records
-to `webshop.lineItems`: wrong count, wrong shape.
+`discover()` then reports both webshop rows as new, and `onboard()` writes two purchase-shaped
+records to `erp.orderLines`: wrong count, wrong shape.
 
 Note: teaching `collectOnly` to call `expandArrayRecord` plus `deriveChildCanonicalId` would
-technically produce consistent IDs (because `_getOrCreateCanonical` is idempotent, so both
-paths would derive the same child UUID from the same parent UUID).  That work is deferred
-because in this scenario webshop starts completely empty — there are no pre-existing target
-records that need to be discovered and matched.  The first regular poll covers everything.
+technically produce consistent IDs.  That work is deferred because in this scenario ERP starts
+fully seeded  — both sides are pre-seeded, so onboard would attempt redundant inserts.  The
+first regular poll's forward expansion + discover pass covers everything correctly.
 
 ### Fix
 
@@ -167,30 +170,60 @@ const isArrayChannel = (ch: ChannelConfig) => ch.members.some((m) => m.arrayPath
 In the onboard loop: skip channels where `isArrayChannel` is true.  They stay
 `"uninitialized"` in the channel status view — that is acceptable and accurate for the demo.
 
-The first regular poll calls `ingest("order-lines", "erp")`, which hits the array expansion
-path in `_processRecords` (already bypasses the fan-out guard), creates derived canonical IDs,
-and dispatches inserts to `webshop.lineItems`. ✓
+The first regular poll calls `ingest("order-lines", "webshop")`, which hits the array
+expansion path in `_processRecords` (already bypasses the fan-out guard), creates derived
+canonical IDs for each `purchases.lines` element, and dispatches inserts/updates to
+`erp.orderLines`. ✓
 
-`ingest("order-lines", "webshop")` is called by the poll loop too.  It reads
-`webshop.lineItems` (in-memory connector returns them).  In `_processRecords` (standard path),
-it tries to dispatch to the ERP `order_lines` entity — which doesn't exist in ERP's
-`getEntities()` → `_dispatchToTarget` returns `{ type: "skip" }`.  No spurious writes. ✓
+`ingest("order-lines", "erp")` is called by the poll loop too.  It reads ERP flat
+`orderLines` records (in-memory connector returns them).  In `_processRecords` (standard
+path), `regularTargets` is empty for the webshop member because the webshop member has
+`arrayPath` (it goes into `collapseTargets` instead).  Until `array_parent_map` is populated
+by at least one forward pass, no collapse patches are accumulated.  No spurious writes. ✓
 
 Also update `buildSeedClusters` to return `[]` for array-expansion channels (no pre-onboard
 state to show).
 
 ---
 
+## § 6.5 Engine Prerequisite Analysis
+
+All required engine capabilities are already implemented.  No engine changes are needed for
+this scenario.
+
+| Capability | Required by | Status |
+|------------|-------------|--------|
+| `expandArrayRecord` / `expandArrayChain` | Forward pass: webshop `purchases.lines` → ERP `orderLines` | ✓ complete (PLAN_NESTED_ARRAY_PIPELINE.md) |
+| `deriveChildCanonicalId` + `array_parent_map` | Deterministic child IDs; reverse lookup parent for collapse | ✓ complete |
+| Collapse path (`collapseTargets` in `_processRecords`) | Reverse pass: ERP `orderLines` → webshop `purchases.lines` slot | ✓ complete (PLAN_ARRAY_COLLAPSE.md) |
+| Array source can be any connector | The engine's expansion and collapse paths are symmetric; `arrayPath` on any member works regardless of which system is "source" | ✓ verified — `sourceMember.arrayPath` check is connector-agnostic |
+| `collapseTargets` selection | `channel.members.filter(m => m.connectorId !== sourceMember.connectorId && m.arrayPath != null)` — picks up the webshop member when ERP is the ingest source | ✓ verified |
+| ERP flat member in `regularTargets` — not `collapseTargets` | ERP `orderLines` member has no `arrayPath`; it enters `regularTargets` for forward fanout from webshop | ✓ verified |
+| Boot skip (array-expansion channels bypass onboard) | `engine-lifecycle.ts` fix described in §6 | planned — `isArrayChannel` guard to be added in §8 step 2 |
+
+One nuance: the **collapse pass needs `array_parent_map` data** — populated by the first
+forward expansion ingest.  In the seed, both sides are pre-seeded but `array_parent_map` is
+empty at boot.  The boot sequence (§6 fix) leaves `order-lines` uninitialized; the first
+regular poll runs the forward expansion (`ingest("order-lines", "webshop")`) which populates
+`array_parent_map` and establishes identity links.  On the same or next tick, the collapse
+path from `ingest("order-lines", "erp")` can find the parent links.  Ordering within a single
+poll tick (webshop before erp) is determined by `ch.members` order in the scenario definition;
+the webshop member must come first to ensure `array_parent_map` is populated before the ERP
+ingest of the same tick tries to use it.  (If ERP runs first within the same tick it simply
+finds no collapse patches and skips — no error; the following tick is correct.)
+
+---
+
 ## § 7 Object-Card Visualisation of Nested Array Fields
 
 The playground's object card (the per-record card in the identity cluster view) currently
-displays only top-level scalar fields. When a record carries embedded arrays (e.g. ERP
-`orders` with a `lines` field) the card shows a bare `[Array]` or `[object Object]` token
+displays only top-level scalar fields. When a record carries embedded arrays (e.g. webshop
+`purchases` with a `lines` field) the card shows a bare `[Array]` or `[object Object]` token
 rather than the actual structured content.
 
-For the array-demo scenario this is misleading: an ERP order is meaningful only when its
-embedded lines are visible. The card must render nested array fields in a collapsed/expandable
-form.
+For the array-demo scenario this is misleading: a webshop purchase is meaningful only when
+its embedded lines are visible. The card must render nested array fields in a
+collapsed/expandable form.
 
 ### § 7.1 Requirements
 
@@ -215,8 +248,8 @@ form.
 ## § 8 Implementation Steps
 
 1. **`playground/src/lib/systems.ts`**
-   - Add `webshop` to `FIXED_SYSTEMS` and `FIXED_SEED`
-   - Add `erp.orders` (with embedded lines) and `erp.items` to `FIXED_SEED`
+   - Add `webshop` to `FIXED_SYSTEMS` and `FIXED_SEED` (with `purchases` carrying embedded `lines` arrays)
+   - Add `erp.orders` (flat, no embedded lines), `erp.orderLines`, and `erp.items` to `FIXED_SEED`
 
 2. **`playground/src/engine-lifecycle.ts`**
    - In `buildConfig`: ensure `webshop` is included in the `ConnectorInstance` list
