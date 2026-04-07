@@ -634,3 +634,52 @@ export function dbGetWrittenState(
   if (!row) return undefined;
   return JSON.parse(row.data) as Record<string, unknown>;
 }
+
+// ─── Array parent map ─────────────────────────────────────────────────────────
+
+export interface ArrayParentMapRow {
+  parentCanonId: string;
+  arrayPath: string;
+  elementKey: string;
+}
+
+/**
+ * Record one hop in the child→parent derivation chain.
+ * Called during forward expansion and collectOnly for every hop in the chain.
+ * Spec: specs/field-mapping.md §3.2/§3.4
+ */
+export function dbUpsertArrayParentMap(
+  db: Db,
+  childCanonId: string,
+  parentCanonId: string,
+  arrayPath: string,
+  elementKey: string,
+): void {
+  db.prepare(
+    `INSERT INTO array_parent_map (child_canon_id, parent_canon_id, array_path, element_key)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(child_canon_id) DO UPDATE SET
+       parent_canon_id = excluded.parent_canon_id,
+       array_path      = excluded.array_path,
+       element_key     = excluded.element_key`,
+  ).run(childCanonId, parentCanonId, arrayPath, elementKey);
+}
+
+/**
+ * Look up one hop in the child→parent derivation chain.
+ * Returns undefined if childCanonId was not produced by array expansion.
+ * Spec: specs/field-mapping.md §3.2/§3.4
+ */
+export function dbGetArrayParentMap(
+  db: Db,
+  childCanonId: string,
+): ArrayParentMapRow | undefined {
+  const row = db
+    .prepare<{ parent_canon_id: string; array_path: string; element_key: string }>(
+      `SELECT parent_canon_id, array_path, element_key
+       FROM array_parent_map WHERE child_canon_id = ?`,
+    )
+    .get(childCanonId);
+  if (!row) return undefined;
+  return { parentCanonId: row.parent_canon_id, arrayPath: row.array_path, elementKey: row.element_key };
+}

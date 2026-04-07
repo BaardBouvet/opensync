@@ -331,6 +331,33 @@ CREATE TABLE circuit_breaker_events (
 
 ---
 
+## `array_parent_map`
+
+Tracks the parent–child relationship for every hop in a multi-level nested array expansion
+(see `specs/field-mapping.md §3.4`). One row per hop per expanded record.
+
+Used by the reverse-collapse path to walk from a flat child record back to its root parent
+connector record, enabling write-back into the correct array slot.
+
+```sql
+CREATE TABLE IF NOT EXISTS array_parent_map (
+  child_canon_id   TEXT NOT NULL PRIMARY KEY,
+  parent_canon_id  TEXT NOT NULL,
+  array_path       TEXT NOT NULL,
+  element_key      TEXT NOT NULL
+);
+```
+
+- `child_canon_id`: canonical ID of the child node at this hop.
+- `parent_canon_id`: canonical ID of its direct parent at this hop.
+- `array_path`: the `array_path` config value used at this level (e.g. `"lines"`).
+- `element_key`: the element key value (e.g. `"L01"`) used to locate the element during patching.
+
+For a two-level chain (orders → lines → components), each component record produces two rows:
+one for the component→line hop and one for the line→order hop.
+
+---
+
 ## `written_state`
 
 Records the post-outbound-mapping field values last written to each target connector per entity.

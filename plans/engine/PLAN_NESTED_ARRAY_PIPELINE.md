@@ -1,6 +1,6 @@
 # Nested Array Pipeline
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** engine, field-mapping  

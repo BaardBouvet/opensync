@@ -99,7 +99,7 @@ fields:
   - source: lastName
     target: lastName
   - target: fullName
-    direction: forward_only
+    direction: bidirectional
     expression: (record) => `${record.firstName} ${record.lastName}`
     reverseExpression: (record) => ({
       firstName: record.fullName.split(' ')[0],
@@ -107,13 +107,15 @@ fields:
     })
 ```
 
-`expression` is a TypeScript arrow function applied during the forward pass. `reverseExpression`
-is applied when writing back. Both have access to the full canonical record, not just one field.
+`expression` is a TypeScript arrow function applied during the **inbound** pass (source → canonical). `reverseExpression` is applied during the **outbound** pass (canonical → source). Both have access to the full record, not just one field.
 
-A `reverseExpression` that returns an object can set multiple source fields at once (one-to-many
-decomposition).
+A `reverseExpression` that returns a plain object decomposes into multiple source fields (one-to-many). Any other return type is assigned to `source ?? target`.
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Field expressions"). See `plans/engine/PLAN_FIELD_EXPRESSIONS.md`.**
+The `direction` guard applies before expressions: `forward_only` entries are skipped on inbound (expression never runs); `reverse_only` entries are skipped on outbound (reverseExpression never runs).
+
+When `expression` is present, the `source` field is not used on the inbound pass — the expression synthesises the value from any fields in the record.
+
+**Status: implemented (OSI-mapping §5 "Field expressions").**
 
 ---
 
@@ -399,45 +401,159 @@ On the reverse pass, child entity fields are written back alongside parent field
 
 ---
 
-### 3.2 Nested array expansion (`array` / `array_path`)
+### 3.2 Nested array expansion (`array_path`)
 
 A source record contains a JSON array column. Each array element becomes its own child entity row.
+Both same-channel (parent source descriptor and child expansion in the same channel) and
+cross-channel (parent in one channel, child in another) are supported.
+
+**Configuration keys (mapping-entry level):**
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `name` | `string` | Optional stable identifier. Required on any mapping that is referenced as `parent` by a child. Must be unique across all mapping files. |
+| `parent` | `string` | Name of the parent mapping entry (`name` value). Child inherits the parent's connector and read source entity. `array_path` must also be set. |
+| `array_path` | `string` | Dotted path to the JSON array column on the source record (e.g. `lines`, `order.lines`). Required when `parent` is set. |
+| `parent_fields` | `Record<string, string \| { path?: string; field: string }>` | Parent source fields to bring into scope for element field mapping. Key = alias used in child `source:` entries; value = parent field name (string shorthand) or `{ path, field }` object for deep nesting. |
+| `element_key` | `string` | Field name within each array element providing a stable element identity. Falls back to element index (`0`, `1`, …) when absent or when the element does not carry the field. |
+
+**Same-channel example** — parent source descriptor and child expansion both in `order-lines`:
 
 ```yaml
-  - connector: erp
-    channel: order-lines
-    entity: order_lines
-    parent: orders
-    array_path: lines          # JSONB array column on the source record
-    parent_fields: [order_id]  # parent columns brought into scope per element
-    fields:
-      - source: product_id
-        target: productId
-      - source: quantity
-        target: qty
-      - source: unit_price
-        target: unitPrice
+# parent — source descriptor only; not a fan-out target in this channel
+- name: erp_orders
+  connector: erp
+  channel: order-lines
+  entity: orders
+
+# child — expands the parent's records into per-line entities
+- channel: order-lines        # same channel as parent
+  parent: erp_orders          # inherits connector=erp; reads erp entity=orders
+  array_path: lines
+  parent_fields:
+    order_id: order_id        # alias: parent field brought into child scope
+  element_key: line_no
+  fields:
+    - source: line_no
+      target: lineNumber
+    - source: product_id
+      target: productId
+    - source: order_id        # available via parent_fields
+      target: orderRef
+
+# flat target — receives one record per expanded line
+- connector: crm
+  channel: order-lines
+  entity: order_lines
+  fields:
+    - source: lineNumber
+      target: lineNum
+    - source: productId
+      target: item
+    - source: orderRef
+      target: parentOrderId
 ```
 
-The forward pass:
-1. Reads `record.lines` as a JSON array.
-2. For each element, emits a new `NormalizedRecord` with the element's fields merged with
-   the `parent_fields` values from the containing row.
-3. Element identity: `<parent_external_id>#lines[<element_index>]` (or by a per-element identity
-   field if declared).
+**Cross-channel example** — parent is a full member of the `orders` channel; child is in `order-lines`:
 
-The reverse pass:
-1. Collects all child `order_lines` entities whose parent association points to the same `orders`
-   record.
-2. Sorts by declared `order` config (see §6).
-3. Re-assembles the array and writes it back as the `lines` column in the parent `UpdateRecord`.
+```yaml
+# mappings/orders.yaml — parent is a regular member of 'orders'
+- name: erp_orders
+  connector: erp
+  channel: orders
+  entity: orders
+  fields:
+    - source: order_id
+      target: orderId
 
-Element deletion is detected by comparing the assembled set against the previously written state:
-elements present in `written_state` but absent from the current resolved set are emitted as removed.
-This depends on `written_state` (see §7.1).
+# mappings/order-lines.yaml — child references parent in a different channel
+- connector: erp
+  channel: order-lines          # different channel from parent
+  entity: order_lines           # logical entity name in this channel
+  parent: erp_orders            # references parent in 'orders' channel
+  array_path: lines
+  parent_fields:
+    order_id: order_id
+  element_key: line_no
+  fields:
+    - source: line_no
+      target: lineNumber
+    - source: product_id
+      target: productId
+    - source: order_id
+      target: orderRef
+```
 
-**Status: requires design work. Architectural foundation does not preclude this.
-(OSI-mapping §3 "Nested arrays").**
+**Forward pass (per `ingest(channelId, connectorId)` call on a child member):**
+
+1. Resolve the source entity to read: inherited from parent mapping (`parent.entity`).
+2. Read parent records via `connector.read(sourceEntity, watermark)`.
+3. For each parent record:
+   a. Echo-check against stored parent `shadow_state` (keyed on source entity name). If unchanged, skip all child expansion.
+   b. If changed: update parent `shadow_state`; proceed to child expansion.
+   c. For each element at index `i`:
+      - `elementKeyValue` = `element[element_key]` if set; otherwise `String(i)`.
+      - `childExternalId` = `${parentExternalId}#${array_path}[${elementKeyValue}]`.
+      - Merge `parent_fields` values into element (element fields win on collision).
+      - Apply child member's inbound field mapping.
+      - Derive `childCanonicalId` deterministically from parent canonical ID and element key (no DB write for source side). Formula: SHA-256 of `opensync:array:${parentCanonicalId}:${array_path}[${elementKeyValue}]`, formatted as a UUID.
+   d. Fan-out each child record to non-source channel members. Written_state noop suppression applies per element — only changed elements are dispatched.
+4. Watermark stored for `(connectorId, entity)` where `entity` = child member's logical entity name (not the inherited source entity).
+
+**Source shadow semantics:**
+
+- **Parent records**: `shadow_state` **is** written (entity = inherited source entity, e.g. `orders`). Echo detection operates at the parent level.
+- **Child records**: `shadow_state` is **not** written for the source side. Per-element change detection relies on the written_state mechanism (§7.1) — unchanged elements are suppressed by written_state, not by source shadow comparison.
+
+**Same-channel source descriptors:**
+
+A mapping entry with `name:` that is referenced as `parent` by another entry **in the same channel** is a source descriptor. It is retained in the global named-mapping index but is **not** added to the channel's member list and is never itself a fan-out target in that channel. The child member (with `parent:`) is the real channel member, inheriting the connector and source entity.
+
+In the **cross-channel** case, the parent entry is a full member of its own channel and participates in that channel's fan-out independently.
+
+**Validation rules (config load time):**
+
+- `parent` must name a mapping that has a matching `name:` field — reject if not found.
+- `array_path` is required when `parent` is set — reject if absent.
+- The child inherits the parent's `connector`. Cross-connector parent references are rejected.
+- Cross-channel: the inherited source entity must be declared in the connector's `getEntities()`.
+- Same-channel source descriptor entries must not declare `array_path` themselves.
+
+**Watermark independence (cross-channel):**
+
+`ingest('orders', 'erp')` and `ingest('order-lines', 'erp')` both call `erp.read('orders', ...)` but advance independent watermarks: `(erp, orders)` and `(erp, order_lines)`. This means the ERP orders entity is read twice per cycle when both channels are active. A shared-read cache within a cycle is a planned optimisation.
+
+**Reverse pass:** Re-assembling expanded elements back into an embedded array for write-back to the source is implemented via the collapse mechanism (§3.4).
+
+**Element filters (`filter` / `reverse_filter`):**
+
+Two optional config keys may be added to any array expansion member (source descriptor entries do not use them):
+
+| Key | Pass | Effect |
+|-----|------|--------|
+| `filter` | Forward (inbound) | Only elements for which the expression returns truthy are expanded, canonicalised, and dispatched. Elements that fail the filter are ignored entirely for that pass. |
+| `reverse_filter` | Reverse (outbound) | Only elements for which the expression returns truthy receive collapse patches. Elements that fail are left unchanged in the source array. |
+
+Both values are JS expression strings compiled once at engine startup via `new Function`. A compilation failure is detected immediately at load time. Bindings available inside the expression: `element` (the current array element object, after `parent_fields` merge), `parent` (the parent source record's raw data), `index` (zero-based element position).
+
+```yaml
+- connector: erp
+  channel: order-lines
+  parent: erp_orders
+  array_path: lines
+  filter: "element.type === 'product'"
+  reverse_filter: "element.status !== 'locked'"
+  element_key: line_no
+  fields:
+    - source: line_no
+      target: lineNumber
+```
+
+For multi-level chains the filter applies at the **leaf level only** — intermediate expansion levels are unaffected.
+
+Security note: `new Function` executes arbitrary JS. Use a dedicated per-connector worker (or disable this feature at the engine level) in untrusted multi-tenant deployments. See `plans/engine/PLAN_ELEMENT_FILTER.md §4`.
+
+**Status: implemented. (OSI-mapping §3 "Nested arrays").**
 
 ---
 
@@ -451,23 +567,106 @@ This depends on `written_state` (see §7.1).
 When `scalar: true`, each element of the JSON array is a bare value (string, number). The element's
 value doubles as its identity. Deduplicated via `collect` resolution across sources.
 
-**Status: depends on §3.2 being designed first (OSI-mapping §3 "Scalar arrays").**
+**Status: planned follow-on — depends on §3.2 implementation (OSI-mapping §3 "Scalar arrays").**
 
 ---
 
 ### 3.4 Deep nesting
 
 ```yaml
-  - entity: sub_lines
-    parent: order_lines   # grandchild of orders
+  - name: erp_orders
+    connector: erp
+    channel: orders
+    entity: orders
+
+  - name: erp_lines
+    connector: erp
+    channel: line-components
+    parent: erp_orders
+    array_path: lines
+    element_key: lineNo
+
+  - name: erp_components          # grandchild of orders
+    connector: erp
+    channel: line-components
+    parent: erp_lines
     array_path: components
+    element_key: compNo
+
+  - connector: warehouse
+    channel: line-components
+    entity: components
     fields: [...]
 ```
 
-Multi-level parent chains. Supports arbitrary depth. Each level is a separate mapping block
-referencing the previous level as `parent`.
+Multi-level parent chains (`parent:` chains of depth ≥ 2). The leaf member (the entry without
+`name:` that is added to the channel's member list) inherits the root-most ancestor connector and
+source entity. Intermediate named entries are source descriptors in their own channels.
 
-**Status: depends on §3.2 (OSI-mapping §3 "Deep nesting").**
+**Expansion chain (`expansionChain`):**
+
+At config load time, `resolveExpansionChain` walks the `parent` chain of the leaf member upward
+and builds an ordered list of `ExpansionChainLevel` values, outermost first:
+
+```
+[{ arrayPath: "lines", elementKey: "lineNo" },
+ { arrayPath: "components", elementKey: "compNo" }]
+```
+
+The leaf member's `sourceEntity` is set to the root ancestor's `entity` name (e.g. `"orders"`).
+
+`expandArrayChain(record, chain)` performs a recursive cross-join: each level of the chain
+expands all records from the previous level, producing a flat set of leaf records. A two-level
+chain over 1 order with 2 lines each having 2 components produces 4 leaf records.<br>
+Leaf external IDs use a composite formula:
+`${parentId}#${arrayPath1}[${key1}]#${arrayPath2}[${key2}]`.
+
+**Canonical IDs for intermediate and leaf nodes:**
+
+Each hop derives its canonical ID deterministically:
+- Level 1 (line): `deriveChildCanonicalId(parentCanonicalId, "lines", lineNo)`
+- Level 2 (component): `deriveChildCanonicalId(lineCanonicalId, "components", compNo)`
+
+**`array_parent_map` table:**
+
+Every hop writes one row to `array_parent_map`:
+
+| column | value |
+|--------|-------|
+| `child_canon_id` | canonical ID of the child node |
+| `parent_canon_id` | canonical ID of its direct parent |
+| `array_path` | the array path used at this hop |
+| `element_key` | the element key value at this hop |
+
+For a two-level chain, each leaf records two rows (leaf→line, line→root).
+
+**Reverse collapse (write-back):**
+
+When a flat target connector writes a change back to the system, the engine must reassemble that
+change into the correct slot of the original embedded-array structure and call `update` on the
+root source connector.
+
+1. **Identify collapse targets**: channel members with `sourceEntity` set (i.e. array-source
+   members) are collapse targets for the other members in the channel.
+2. **Walk `array_parent_map`**: starting from the flat record's canonical ID,
+   `_walkCollapseChain` follows `parent_canon_id` pointers upward until it reaches a canonical ID
+   whose `identity_map` entry for the source connector is present. That is the root parent.
+3. **Batch per root**: all flat-record changes targeting the same root parent are collected into
+   a `CollapsePatch` list.
+4. **`_applyCollapseBatch`**: for each root, (a) load the current parent record via
+   `connector.lookup` (falls back to shadow state), (b) deep-clone the data, (c) apply each
+   patch with `patchNestedElement` — which navigates the chain's `arrayPath` list, finds the
+   matching element by key value, and merges only the patch fields (preserving unmapped fields),
+   (d) call `connector.update` with the patched record, (e) update shadow state.
+5. **Partial patch semantics**: only fields present in the outbound mapping are overwritten.
+   Other element fields are preserved exactly as they exist in the current parent record.
+
+**Validation rules:**
+
+- All entries in a `parent` chain must belong to the same connector — cross-connector chains are rejected at config load time.
+- Cycles in `parent` chains are detected at config load time and cause a fatal error.
+
+**Status: implemented. (OSI-mapping §3 "Deep nesting").**
 
 ---
 

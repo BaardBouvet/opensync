@@ -149,4 +149,17 @@ export function createSchema(db: Db): void {
       PRIMARY KEY (connector_id, entity_name, canonical_id)
     )
   `);
+
+  // Spec: specs/field-mapping.md §3.2/§3.4 — maps each derived child canonical ID to its
+  // parent canonical ID, array path, and element key value.  Written by the forward expansion
+  // pass; read by the reverse collapse pass to locate the correct parent record and slot.
+  // One row per hop: for grandchildren two rows are written (child→parent, grandchild→child).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS array_parent_map (
+      child_canon_id   TEXT NOT NULL PRIMARY KEY,
+      parent_canon_id  TEXT NOT NULL,
+      array_path       TEXT NOT NULL,
+      element_key      TEXT NOT NULL
+    )
+  `);
 }

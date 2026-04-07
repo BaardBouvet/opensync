@@ -261,7 +261,71 @@ connector. See `specs/associations.md § 7.5` for full rules.
 
 ---
 
-## CLI Discovery
+### Array expansion keys
+
+For nested-array expansion (specs/field-mapping.md §3.2), the following optional keys are
+available on a mapping entry:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `name` | `string` | Stable identifier for this mapping entry. Required when another entry references it via `parent:`. Must be unique across all mapping files. |
+| `parent` | `string` | Name of the parent mapping entry. The child inherits the parent's `connector` and reads from the parent's `entity`. `array_path` must also be set. |
+| `array_path` | `string` | Dotted path to the JSON array column on the source record (`lines`, `order.lines`). Required when `parent` is set. |
+| `parent_fields` | `object` | Parent source fields to bring into scope for element field mapping. Key = local alias used in the child's `source:` entries; value = parent field name (string) or `{ path?, field }` for deep nesting. |
+| `element_key` | `string` | Field within each array element providing a stable identity. Falls back to element index when absent. |
+
+**Same-channel example** (parent and child in same channel):
+
+```yaml
+# parent — source descriptor; not a fan-out target in this channel
+- name: erp_orders
+  connector: erp
+  channel: order-lines
+  entity: orders
+
+# child — expands parent records into per-line records
+- channel: order-lines
+  parent: erp_orders          # inherits connector=erp, reads entity=orders
+  array_path: lines
+  parent_fields:
+    order_id: order_id
+  element_key: line_no
+  fields:
+    - source: line_no
+      target: lineNumber
+    - source: product_id
+      target: productId
+    - source: order_id
+      target: orderRef
+
+# flat target connector
+- connector: crm
+  channel: order-lines
+  entity: order_lines
+  fields: [...]
+```
+
+**Cross-channel example** (parent in one channel, child references it across channels):
+
+```yaml
+# parent is a regular member of the 'orders' channel
+- name: erp_orders
+  connector: erp
+  channel: orders
+  entity: orders
+  fields: [...]
+
+# child in 'order-lines' channel references the parent by name
+- connector: erp
+  channel: order-lines
+  entity: order_lines
+  parent: erp_orders
+  array_path: lines
+  element_key: line_no
+  fields: [...]
+```
+
+---
 
 ```
 # Use CWD as the project root (standard case)

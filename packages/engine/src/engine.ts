@@ -42,12 +42,22 @@ import {
   dbRemoveDeferred,
   dbUpsertWrittenState,
   dbGetWrittenState,
+  dbUpsertArrayParentMap,
+  dbGetArrayParentMap,
 } from "./db/queries.js";
 import { applyMapping } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
 import { CircuitBreaker } from "./safety/circuit-breaker.js";
 import { createSchema } from "./db/migrations.js";
 import { makeWiredInstance } from "./auth/context.js";
+// Spec: specs/field-mapping.md §3.2/§3.4 — array expansion and collapse
+import {
+  expandArrayRecord,
+  expandArrayChain,
+  extractHopKeys,
+  patchNestedElement,
+  deriveChildCanonicalId,
+} from "./core/array-expander.js";
 
 // ─── Public result types ──────────────────────────────────────────────────────
 
@@ -278,7 +288,10 @@ export class SyncEngine {
     const source = this.wired.get(connectorId);
     if (!source) throw new Error(`Unknown connector: ${connectorId}`);
 
-    const sourceEntity = source.entities.find((e) => e.name === sourceMember.entity);
+    // Spec: specs/field-mapping.md §3.2 — for array child members, read from the inherited
+    // source entity (parent's entity). The watermark key always uses the logical entity name.
+    const readEntityName = sourceMember.sourceEntity ?? sourceMember.entity;
+    const sourceEntity = source.entities.find((e) => e.name === readEntityName);
     if (!sourceEntity || !sourceEntity.read) return { channelId, connectorId, records: [] };
     const sourceRead = sourceEntity.read;
 
@@ -300,11 +313,52 @@ export class SyncEngine {
             const stripped = Object.fromEntries(
               Object.entries(raw).filter(([k]) => !k.startsWith("_")),
             );
-            const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
-            const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
-            const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
-            const fd = buildFieldData(existing, canonical, connectorId, ts, undefined);
-            dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
+
+            if (sourceMember.expansionChain) {
+              // Spec: specs/field-mapping.md §3.2/§3.4 — array-expansion collectOnly:
+              // expand parent records into child shadows so discover() can match them.
+              const chain = sourceMember.expansionChain;
+              const parentShadowEntity = sourceMember.sourceEntity ?? sourceMember.entity;
+              const provisionalParentId = this._getOrCreateCanonical(connectorId, record.id);
+
+              // Write parent shadow for echo detection in subsequent normal ingest calls
+              const existingParentShadow = dbGetShadow(this.db, connectorId, parentShadowEntity, record.id);
+              const parentFd = buildFieldData(existingParentShadow, stripped, connectorId, ts, undefined);
+              dbSetShadow(this.db, connectorId, parentShadowEntity, record.id, provisionalParentId, parentFd);
+
+              // Expand and store child shadows
+              const childRecords = expandArrayChain(record, chain, sourceMember.elementFilter);
+              for (const childRecord of childRecords) {
+                const childRaw = childRecord.data as Record<string, unknown>;
+                const childStripped = Object.fromEntries(
+                  Object.entries(childRaw).filter(([k]) => !k.startsWith("_")),
+                );
+                const childCanonical = applyMapping(childStripped, sourceMember.inbound, "inbound");
+                const hopKeys = extractHopKeys(childRecord.id, chain);
+
+                // Derive canonical IDs for every hop and write array_parent_map
+                let walkCanonId = provisionalParentId;
+                for (let i = 0; i < chain.length; i++) {
+                  const keyVal = hopKeys[i] ?? String(i);
+                  const nextCanonId = deriveChildCanonicalId(walkCanonId, chain[i]!.arrayPath, keyVal);
+                  dbUpsertArrayParentMap(this.db, nextCanonId, walkCanonId, chain[i]!.arrayPath, keyVal);
+                  walkCanonId = nextCanonId;
+                }
+                const childCanonId = walkCanonId;
+
+                // Store child shadow under sourceMember.entity (the logical entity for this channel)
+                const existingChildShadow = dbGetShadow(this.db, connectorId, sourceMember.entity, childRecord.id);
+                const childFd = buildFieldData(existingChildShadow, childCanonical, connectorId, ts, undefined);
+                dbSetShadow(this.db, connectorId, sourceMember.entity, childRecord.id, childCanonId, childFd);
+              }
+            } else {
+              // Standard (non-expansion) collectOnly
+              const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
+              const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
+              const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
+              const fd = buildFieldData(existing, canonical, connectorId, ts, undefined);
+              dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
+            }
           }
           if (batch.since) connectorWatermark = batch.since;
         }
@@ -1183,36 +1237,6 @@ export class SyncEngine {
   }
 
   // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4
-  // Find the first channel that contains both connectors, return their ChannelMember objects.
-  private _findMemberPair(fromId: string, toId: string): { fromMember: ChannelMember; toMember: ChannelMember } | undefined {
-    for (const ch of this.channels.values()) {
-      const fromMember = ch.members.find((m) => m.connectorId === fromId);
-      const toMember = ch.members.find((m) => m.connectorId === toId);
-      if (fromMember && toMember) return { fromMember, toMember };
-    }
-    return undefined;
-  }
-
-  // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3
-  // Keep only associations whose predicate is declared in member.assocMappings.
-  // Absent assocMappings → no associations forwarded (strict by design).
-  private _filterInboundAssociations(
-    associations: Association[] | undefined,
-    member: ChannelMember,
-  ): Association[] {
-    if (!associations?.length) return [];
-    if (!member.assocMappings) return [];
-    return associations.filter((a) => member.assocMappings!.some((m) => m.source === a.predicate));
-  }
-
-  // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md — translate entity name from source
-  // connector namespace to target connector namespace when remapping associations.
-  // Finds the channel that has fromConnectorId with entity `entityName`, then returns the
-  // entity name used by toConnectorId in that same channel. Returns entityName unchanged
-  // when no translation is found (safe fallback).
-  //
-  // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.4 — helpers for predicate mapping.
-
   /** Find the channel (optionally scoped by channelId) containing both connectors and return their ChannelMember objects. */
   private _findMemberPair(fromId: string, toId: string, channelId?: string): { fromMember: ChannelMember; toMember: ChannelMember } | undefined {
     const search: Iterable<ChannelConfig> = channelId
@@ -1495,8 +1519,153 @@ export class SyncEngine {
       (m) => m.connectorId !== sourceMember.connectorId && crossLinked.has(m.connectorId),
     );
 
+    // Spec: specs/field-mapping.md §3.2/§3.4 — collapse path: members with arrayPath are
+    // NOT in the regular fan-out guard (child canonical IDs aren't in identity_map for
+    // the source side).  Collect them separately for post-loop batch dispatch.
+    const regularTargets = targets.filter((m) => !m.arrayPath);
+    const collapseTargets = channel.members.filter(
+      (m) => m.connectorId !== sourceMember.connectorId && m.arrayPath != null,
+    );
+
     const results: RecordSyncResult[] = [];
     let hadErrors = false;
+
+    // Spec: specs/field-mapping.md §3.2 — array child member expansion path.
+    // When sourceMember has an arrayPath the records arriving here are PARENT records
+    // (e.g. orders) that must be expanded into individual child entities (e.g. order lines)
+    // before fan-out.  Echo detection operates at the parent level; source shadow is written
+    // for the parent entity; child canonical IDs are derived deterministically.
+    if (sourceMember.arrayPath) {
+      const parentShadowEntity = sourceMember.sourceEntity ?? sourceMember.entity;
+
+      // For array child members we bypass the fan-out guard: canonical IDs are derived
+      // (not provisional), and dbGetExternalId prevents duplicate inserts.
+      const childTargets = channel.members.filter((m) => m.connectorId !== sourceMember.connectorId);
+
+      type Outcome = {
+        result: RecordSyncResult;
+        localData: Record<string, unknown>;
+        shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" };
+        txEntry: Parameters<typeof dbLogTransaction>[1];
+      };
+
+      for (const record of records) {
+        const raw = record.data as Record<string, unknown>;
+        const stripped = Object.fromEntries(Object.entries(raw).filter(([k]) => !k.startsWith("_")));
+
+        // Echo detection at parent level — compare full stripped record (no inbound mapping)
+        const parentShadowRow = dbGetShadowRow(this.db, sourceMember.connectorId, parentShadowEntity, record.id);
+        const parentShadow = parentShadowRow?.fieldData;
+        const isResurrection = parentShadowRow?.deletedAt != null;
+
+        if (!isResurrection && parentShadow !== undefined && !skipEchoFor?.has(record.id)) {
+          const same = this._shadowMatchesIncoming(parentShadow, stripped, undefined);
+          if (same) {
+            results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: "", targetId: record.id });
+            continue;
+          }
+        }
+
+        // Parent canonical ID (get-or-create; no identity-field matching for parent in child context)
+        const parentCanonId = this._getOrCreateCanonical(sourceMember.connectorId, record.id);
+
+        // Write parent shadow (entity = parentShadowEntity = the inherited read source entity)
+        const parentFd = buildFieldData(parentShadow, stripped, sourceMember.connectorId, ingestTs, undefined);
+        dbSetShadow(this.db, sourceMember.connectorId, parentShadowEntity, record.id, parentCanonId, parentFd);
+
+        results.push({
+          entity: sourceMember.entity,
+          action: "read",
+          sourceId: record.id,
+          targetConnectorId: "",
+          targetId: record.id,
+          sourceData: stripped,
+          sourceShadow: parentShadow ? fieldDataToRecord(parentShadow) : undefined,
+        });
+
+        // Expand child records from the parent record
+        // Spec: specs/field-mapping.md §3.4 — use chain for multi-level; chain.length===1 = §3.2
+        const chain = sourceMember.expansionChain ?? [{ arrayPath: sourceMember.arrayPath!, elementKey: sourceMember.elementKey, parentFields: sourceMember.parentFields }];
+        const childRecords = expandArrayChain(record, chain, sourceMember.elementFilter);
+
+        for (const childRecord of childRecords) {
+          const childRaw = childRecord.data as Record<string, unknown>;
+          const childStripped = Object.fromEntries(Object.entries(childRaw).filter(([k]) => !k.startsWith("_")));
+          const childCanonical = applyMapping(childStripped, sourceMember.inbound, "inbound");
+
+          // Spec: specs/field-mapping.md §3.4 — derive canonical IDs for every hop and record them.
+          // This enables the reverse collapse pass to walk up the chain hop-by-hop.
+          const hopKeys = extractHopKeys(childRecord.id, chain);
+          let walkCanonId = parentCanonId;
+          for (let i = 0; i < chain.length; i++) {
+            const keyVal = hopKeys[i] ?? String(i);
+            const nextCanonId = deriveChildCanonicalId(walkCanonId, chain[i]!.arrayPath, keyVal);
+            dbUpsertArrayParentMap(this.db, nextCanonId, walkCanonId, chain[i]!.arrayPath, keyVal);
+            walkCanonId = nextCanonId;
+          }
+          const childCanonId = walkCanonId;
+
+          const childOutcomes: Outcome[] = [];
+
+          for (const targetMember of childTargets) {
+            const tw = this.wired.get(targetMember.connectorId);
+            if (!tw) continue;
+
+            const existingTargetId = dbGetExternalId(this.db, childCanonId, targetMember.connectorId);
+            const targetShadow = existingTargetId
+              ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId)
+              : undefined;
+
+            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig);
+            if (!Object.keys(resolved).length && existingTargetId !== undefined) {
+              results.push({ entity: sourceMember.entity, action: "skip", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
+              continue;
+            }
+
+            // No association remapping for array child records in MVP
+            const dispatchResult = await this._dispatchToTarget(
+              targetMember, tw, resolved, undefined,
+              existingTargetId, targetShadow, childCanonId, ingestTs, batchId, sourceMember, childRecord.id,
+            );
+
+            if (dispatchResult.type === "error") {
+              results.push({ entity: sourceMember.entity, action: "error", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId ?? "", error: dispatchResult.error });
+              hadErrors = true;
+              continue;
+            }
+            if (dispatchResult.type === "skip") continue;
+
+            const beforeData = targetShadow ? fieldDataToRecord(targetShadow) : undefined;
+            childOutcomes.push({
+              result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, after: dispatchResult.after },
+              localData: dispatchResult.localData,
+              shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId: childCanonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
+              txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: childCanonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
+            });
+          }
+
+          // Atomically commit all target writes for this child element
+          this.db.transaction(() => {
+            for (const o of childOutcomes) {
+              if (o.shadowData.action === "insert") dbLinkIdentity(this.db, o.shadowData.canonId, o.shadowData.connectorId, o.shadowData.externalId);
+              dbSetShadow(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.externalId, o.shadowData.canonId, o.shadowData.fd);
+              dbLogTransaction(this.db, o.txEntry);
+              dbUpsertWrittenState(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.canonId, o.localData);
+            }
+          })();
+
+          for (const o of childOutcomes) results.push(o.result);
+        }
+      }
+
+      breaker.recordResult(hadErrors);
+      return results;
+    }
+
+    // ── Standard (non-expansion) path ─────────────────────────────────────────
+    // Accumulator for collapse batches: collapseTargetMember → parentCanonId → patches
+    type CollapsePatch = { childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string };
+    const pendingCollapsePatches = new Map<ChannelMember, Map<string, CollapsePatch[]>>();
 
     for (const record of records) {
       const raw = record.data as Record<string, unknown>;
@@ -1550,7 +1719,7 @@ export class SyncEngine {
       let droppedAssociation = false; // Spec: PLAN_EAGER_ASSOCIATION_MODE.md §3.4
       const deferredTargets = new Set<string>(); // targets where a deferred row was just written
 
-      for (const targetMember of targets) {
+      for (const targetMember of regularTargets) {
         const tw = this.wired.get(targetMember.connectorId);
         if (!tw) continue;
 
@@ -1652,6 +1821,39 @@ export class SyncEngine {
       })();
 
       for (const o of outcomes) results.push(o.result);
+
+      // Spec: specs/field-mapping.md §3.2/§3.4 — accumulate collapse patches.
+      // The canonical ID for this source record may map to a child that was produced
+      // by the forward expansion pass.  Accumulate per parent, flush after the main loop.
+      for (const ctMember of collapseTargets) {
+        const walkResult = this._walkCollapseChain(canonId, ctMember.connectorId);
+        if (!walkResult.found) continue;
+        const perTarget = pendingCollapsePatches.get(ctMember) ?? new Map<string, CollapsePatch[]>();
+        const collapsePatches = perTarget.get(walkResult.rootCanonId) ?? [];
+        collapsePatches.push({
+          childCanonId: canonId,
+          resolved: canonical,
+          hops: walkResult.hops,
+          sourceId: record.id,
+        });
+        perTarget.set(walkResult.rootCanonId, collapsePatches);
+        pendingCollapsePatches.set(ctMember, perTarget);
+      }
+    }
+
+    // ── Post-loop: flush array-collapse batches ────────────────────────────
+    // Spec: specs/field-mapping.md §3.2/§3.4 — dispatch one parent write per parent,
+    // bundling all element patches for that parent into a single read-modify-write.
+    for (const [ctMember, perParent] of pendingCollapsePatches) {
+      const tw = this.wired.get(ctMember.connectorId);
+      if (!tw) continue;
+      for (const [rootCanonId, patches] of perParent) {
+        const { results: batchResults, hasError } = await this._applyCollapseBatch(
+          ctMember, tw, rootCanonId, patches, batchId, ingestTs,
+        );
+        results.push(...batchResults);
+        if (hasError) hadErrors = true;
+      }
     }
 
     breaker.recordResult(hadErrors);
@@ -1700,4 +1902,174 @@ export class SyncEngine {
     else { if (existingAssoc !== undefined) return false; }
     return true;
   }
+
+  // ─── Array collapse helpers ───────────────────────────────────────────────
+
+  /**
+   * Spec: specs/field-mapping.md §3.2/§3.4 — walk the array_parent_map chain upward
+   * from a flat child canonical ID until reaching a parent that is linked in identity_map
+   * for the target connector.  Returns the root external ID and the ordered hop list.
+   */
+  private _walkCollapseChain(
+    startCanonId: string,
+    targetConnectorId: string,
+  ): { found: true; rootExternalId: string; rootCanonId: string; hops: { arrayPath: string; elementKey: string }[] } | { found: false } {
+    const hops: { arrayPath: string; elementKey: string }[] = [];
+    let cursor = startCanonId;
+    const MAX_DEPTH = 16;
+    for (let depth = 0; depth < MAX_DEPTH; depth++) {
+      const row = dbGetArrayParentMap(this.db, cursor);
+      if (!row) return { found: false };
+      hops.unshift({ arrayPath: row.arrayPath, elementKey: row.elementKey });
+      const rootExtId = dbGetExternalId(this.db, row.parentCanonId, targetConnectorId);
+      if (rootExtId !== undefined) {
+        return { found: true, rootExternalId: rootExtId, rootCanonId: row.parentCanonId, hops };
+      }
+      cursor = row.parentCanonId;
+    }
+    return { found: false };
+  }
+
+  /**
+   * Spec: specs/field-mapping.md §3.2/§3.4 — apply a batch of element patches to one
+   * parent record on the array-collapse target connector.  All patches for the same
+   * parent are applied in one read–modify–write pass to minimise connector round-trips.
+   */
+  private async _applyCollapseBatch(
+    collapseTarget: ChannelMember,
+    targetWired: WiredConnectorInstance,
+    rootCanonId: string,
+    patches: Array<{ childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string }>,
+    batchId: string,
+    ingestTs: number,
+  ): Promise<{ results: RecordSyncResult[]; hasError: boolean }> {
+    const results: RecordSyncResult[] = [];
+
+    // Locate the root entity definition on the target connector
+    const rootEntityName = collapseTarget.sourceEntity ?? collapseTarget.entity;
+    const rootEntityDef = targetWired.entities.find((e) => e.name === rootEntityName);
+    if (!rootEntityDef?.update) {
+      for (const p of patches) {
+        results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: "" });
+      }
+      return { results, hasError: false };
+    }
+
+    const rootExternalId = dbGetExternalId(this.db, rootCanonId, collapseTarget.connectorId);
+    if (!rootExternalId) {
+      for (const p of patches) {
+        results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: "" });
+      }
+      return { results, hasError: false };
+    }
+
+    // Load current parent record (live lookup → shadow fallback)
+    let parentData: Record<string, unknown> | undefined;
+    if (rootEntityDef.lookup) {
+      try {
+        const records = await rootEntityDef.lookup([rootExternalId], targetWired.ctx);
+        const live = records.find((r) => r.id === rootExternalId);
+        if (live) parentData = live.data as Record<string, unknown>;
+      } catch { /* fall through to shadow */ }
+    }
+    if (!parentData) {
+      const parentShadow = dbGetShadow(this.db, collapseTarget.connectorId, rootEntityName, rootExternalId);
+      if (parentShadow) parentData = fieldDataToRecord(parentShadow);
+    }
+    if (!parentData) {
+      for (const p of patches) {
+        results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: "" });
+      }
+      return { results, hasError: false };
+    }
+
+    // Deep-clone parent data so we don't mutate anything cached
+    const patchedData: Record<string, unknown> = JSON.parse(JSON.stringify(parentData));
+    const chain = collapseTarget.expansionChain ?? [{ arrayPath: collapseTarget.arrayPath!, elementKey: collapseTarget.elementKey }];
+
+    const applied: typeof patches = [];
+    for (const patch of patches) {
+      const localData = applyMapping(patch.resolved, collapseTarget.outbound, "outbound");
+      // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.3 — reverse_filter: check the current
+      // element in parentData before patching.  Mismatch → skip with warning.
+      if (collapseTarget.elementReverseFilter) {
+        const lastHop = patch.hops[patch.hops.length - 1];
+        if (lastHop) {
+          const leafFieldName = chain.find((l) => l.arrayPath === lastHop.arrayPath)?.elementKey;
+          const arr = (() => {
+            let node: unknown = patchedData;
+            for (const hop of patch.hops.slice(0, -1)) {
+              const fieldName = chain.find((l) => l.arrayPath === hop.arrayPath)?.elementKey;
+              if (!Array.isArray((node as Record<string, unknown>)[hop.arrayPath])) return undefined;
+              const a = (node as Record<string, unknown>)[hop.arrayPath] as unknown[];
+              const idx = a.findIndex((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[fieldName ?? ""]) === hop.elementKey);
+              if (idx === -1) return undefined;
+              node = a[idx];
+            }
+            return Array.isArray((node as Record<string, unknown>)[lastHop.arrayPath])
+              ? (node as Record<string, unknown>)[lastHop.arrayPath] as unknown[]
+              : undefined;
+          })();
+          const element = arr?.find((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[leafFieldName ?? ""]) === lastHop.elementKey);
+          if (element !== undefined && !collapseTarget.elementReverseFilter(element, patchedData, 0)) {
+            console.warn(`[opensync] collapse: reverse_filter rejected patch for element "${lastHop.elementKey}" at "${lastHop.arrayPath}" — skipping`);
+            results.push({ entity: collapseTarget.entity, action: "skip", sourceId: patch.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+            continue;
+          }
+        }
+      }
+      const ok = patchNestedElement(patchedData, patch.hops, chain, localData);
+      if (ok) applied.push(patch);
+    }
+
+    if (applied.length === 0) {
+      for (const p of patches) {
+        results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+      }
+      return { results, hasError: false };
+    }
+
+    // Write the patched parent back to the target connector
+    let writeError: string | undefined;
+    try {
+      for await (const result of rootEntityDef.update!(
+        (async function* (): AsyncIterable<UpdateRecord> { yield { id: rootExternalId, data: patchedData }; })(),
+        targetWired.ctx,
+      )) {
+        if (result.error) writeError = result.error;
+      }
+    } catch (e) {
+      writeError = String(e);
+    }
+
+    if (writeError) {
+      for (const p of patches) {
+        results.push({ entity: collapseTarget.entity, action: "error", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId, error: writeError });
+      }
+      return { results, hasError: true };
+    }
+
+    // Update parent shadow + transaction log (atomic)
+    const existingParentShadow = dbGetShadow(this.db, collapseTarget.connectorId, rootEntityName, rootExternalId);
+    const newParentFd = buildFieldData(existingParentShadow, patchedData, collapseTarget.connectorId, ingestTs, undefined);
+    this.db.transaction(() => {
+      dbSetShadow(this.db, collapseTarget.connectorId, rootEntityName, rootExternalId, rootCanonId, newParentFd);
+      dbLogTransaction(this.db, {
+        batchId,
+        connectorId: collapseTarget.connectorId,
+        entityName: rootEntityName,
+        externalId: rootExternalId,
+        canonicalId: rootCanonId,
+        action: "update",
+        dataBefore: existingParentShadow,
+        dataAfter: newParentFd,
+      });
+    })();
+
+    for (const p of applied) {
+      results.push({ entity: collapseTarget.entity, action: "update", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+    }
+    return { results, hasError: false };
+  }
 }
+

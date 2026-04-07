@@ -14,6 +14,54 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 ## [Unreleased]
 
 ### Added
+- Engine: field expressions on `FieldMapping` (`expression`, `reverseExpression`). When
+  `expression` is set on a mapping entry, the inbound pass calls it with the full source record
+  instead of looking up a single `source` key, enabling computed / combined canonical fields.
+  When `reverseExpression` is set, the outbound pass calls it with the canonical record; an object
+  return value is decomposed into multiple source fields, a scalar is assigned to `source ?? target`.
+  Expressions fire after the `direction` guard, so `forward_only` entries skip on inbound even if
+  `expression` is present; `reverse_only` entries skip on outbound.
+  Spec: `specs/field-mapping.md §1.3`. Tests: `packages/engine/src/core/mapping.test.ts` (FE1–FE9).
+- Engine: element filters on array expansion members (`filter`, `reverse_filter`). `filter` is a
+  JS expression string compiled at load time (`new Function`) that gates the forward pass — only
+  elements where the expression returns truthy are expanded and dispatched. `reverse_filter`
+  similarly gates the reverse collapse pass. Bindings: `element`, `parent`, `index`.
+  Compilation errors are reported at engine startup. For multi-level chains the filter applies at
+  the leaf level only. Spec: `specs/field-mapping.md §3.2`. Tests: `packages/engine/src/multilevel-array.test.ts` (EF1–EF3).
+- Engine: multi-level nested array expansion (`expansionChain`). Parent chains of depth ≥ 2 are
+  now supported. The leaf channel member inherits the root ancestor's connector and source entity;
+  `resolveExpansionChain` builds an ordered `ExpansionChainLevel[]` outermost-first. At ingest
+  time, `expandArrayChain` performs a recursive cross-join across all levels, producing a flat set
+  of leaf records with composite IDs (`parentId#lines[L01]#components[C01]`).
+  Spec: `specs/field-mapping.md §3.4`.
+- Engine: `array_parent_map` SQLite table. Records one row per expansion hop per child record
+  (`child_canon_id → parent_canon_id + array_path + element_key`). Populated for every hop
+  during both normal ingest and `collectOnly` passes. Spec: `specs/database.md`.
+- Engine: reverse array collapse. When a flat connector writes a change back, the engine walks
+  `array_parent_map` to find the root parent, batches all patches for the same parent root,
+  deep-clones the parent's current data, applies `patchNestedElement` for each patch (only
+  mapped fields overwritten; unmapped element fields preserved), and calls `connector.update`
+  once per root. Multi-level chains (grandchild → child → root) are fully supported.
+  Spec: `specs/field-mapping.md §3.2, §3.4`.
+- Engine: `extractHopKeys`, `expandArrayChain`, `patchNestedElement` helpers in
+  `packages/engine/src/core/array-expander.ts`.
+- Engine: `dbUpsertArrayParentMap()` and `dbGetArrayParentMap()` query helpers.
+- Config loader: cycle detection in `parent` chains — throws at load time if a cycle is found.
+
+- Engine: nested array expansion (`array_path` + `parent` mapping keys). A source record whose
+  field contains a JSON array can now be expanded into per-element child entity records before
+  fan-out. Works for same-channel (parent source descriptor and child in the same channel) and
+  cross-channel (parent in one channel, child referencing it by `name` across channels) patterns.
+  Each element gets a deterministic canonical UUID derived from the parent canonical ID +
+  array path + element key value. No source-side shadow state is written for expanded child
+  records; unchanged elements are suppressed by the existing `written_state` mechanism.
+  Spec: `specs/field-mapping.md §3.2`.
+- Config: `name`, `parent`, `array_path`, `parent_fields`, `element_key` keys on mapping entries.
+  `entity` is now optional for child mappings (same-channel parent must declare its own `connector`
+  and `entity`; the child inherits the connector and uses the parent entity as the read source).
+  Spec: `specs/config.md`.
+- Engine: `expandArrayRecord()` and `deriveChildCanonicalId()` helpers in
+  `packages/engine/src/core/array-expander.ts`.
 - Engine: `written_state` table — records the post-outbound-mapping field values last written
   to each target connector per entity. Keyed on `(connector_id, entity_name, canonical_id)`.
   After every successful insert or update, the engine upserts a `written_state` row inside the

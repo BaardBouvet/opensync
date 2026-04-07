@@ -47,10 +47,16 @@ interface ChannelConfig {
 
 interface ChannelMember {
   connectorId:    string;
-  entity:         string;              // entity name as declared in the connector
+  entity:         string;              // logical entity name for this channel member (used for watermarks + shadow state keys)
+  sourceEntity?:  string;             // connector entity to call read() on; absent = use entity (default); present on array child members
   inbound?:       FieldMappingList;    // source → canonical renames
   outbound?:      FieldMappingList;    // canonical → target renames
   assocMappings?: AssocPredicateMapping[]; // declared association predicates; absent = no associations forwarded
+  // Array expansion (specs/field-mapping.md §3.2)
+  arrayPath?:          string;        // dotted path to the array column on the parent record
+  parentMappingName?:  string;        // name of the parent mapping entry
+  parentFields?:       Record<string, string | { path?: string; field: string }>; // parent fields in scope for element mapping
+  elementKey?:         string;        // element field used as stable identity key; absent = use index
 }
 
 interface FieldMapping {
@@ -87,7 +93,15 @@ ingest(channelId, connectorId, opts)
      ├─ If opts.collectOnly: write shadow + provisional canonical; no fan-out → STOP
      └─ Otherwise continue to step 4
   4. For each record:
-     a. Strip _-prefixed meta fields; apply inbound field mapping
+     a. Strip _-prefixed meta fields.
+        If the source member has `arrayPath` (array child member — specs/field-mapping.md §3.2):
+          - Write parent `shadow_state` (entity = source entity) and run echo detection at
+            the parent level. If parent is unchanged, skip all child expansion for this record.
+          - Expand parent record into N child ReadRecords via the array expander.
+          - For each child record: derive canonical ID deterministically from parent canonical ID +
+            element key (no source-side `linkExternalId` call). Process the child through steps
+            b–g below. No source-side shadow_state is written for child records.
+        Otherwise: apply inbound field mapping and continue to step b as a single record.
      b. Resolve canonical ID (via identity_map; identityFields matching if configured)
      c. Diff incoming canonical against source shadow_state
      d. If no changes: skip (echo prevention)
@@ -105,6 +119,9 @@ ingest(channelId, connectorId, opts)
      g. Atomic commit: write source shadow_state + all target shadow_states +
         identity links + written_state rows + transaction_log entries
   5. Advance watermark for (connectorId, entity) — same transaction as final shadow write
+     For array child members: watermark keyed on the child's logical entity name (not the
+     inherited source entity). If the source member has `sourceEntity`, the connector is called
+     with the inherited source entity but the watermark is stored under `member.entity`.
   6. Log sync_run summary row
 ```
 
