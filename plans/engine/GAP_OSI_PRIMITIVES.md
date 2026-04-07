@@ -316,21 +316,21 @@ Detect concurrent edits — when two sources both changed a field since the last
 ### Custom sort (nested array reconstruction)
 When writing a nested array back to a source, control the ORDER BY inside the array aggregation. Declared as a list of target field names with direction (asc/desc).
 
-**Foundation: ❌** Nested arrays are not yet designed. Ordering is a sub-feature of that gap.
+**Foundation: 🔶** Nested array expansion and collapse are implemented. `order_by` config key and post-collapse sort are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
 
 ---
 
 ### CRDT ordering (`order: true`)
 Generate a deterministic per-element ordinal from source array position. Enables stable ordering across merges from multiple sources without an explicit ordering column.
 
-**Foundation: ❌** Depends on nested arrays.
+**Foundation: 🔶** Nested arrays are implemented. `order: true` config key, `_ordinal` injection on the forward pass, and sort-by-ordinal on collapse are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
 
 ---
 
 ### CRDT linked-list (`order_prev` / `order_next`)
 Adjacency pointer metadata for graph-like ordering: each element knows its previous and next sibling. Useful when the source stores linked-list-style ordering.
 
-**Foundation: ❌** Depends on nested arrays and CRDT ordering.
+**Foundation: 🔶** Nested arrays are implemented. `order_linked_list: true` config key, `_prev`/`_next` injection on the forward pass, and linked-list reconstruction on collapse are designed in `plans/engine/PLAN_ARRAY_ORDERING.md` but not yet implemented.
 
 ---
 
@@ -414,7 +414,7 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 | Field-level controls | 8 | 1 | 3 | 4 |
 | Deletion & tombstones | 4 | 0 | 1 | 3 |
 | Change detection & noop | 4 | 1 | 1 | 2 |
-| Ordering | 3 | 0 | 0 | 3 |
+| Ordering | 3 | 0 | 3 | 0 |
 | Routing & partitioning | 3 | 0 | 0 | 3 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |

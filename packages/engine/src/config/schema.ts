@@ -52,6 +52,12 @@ export const FieldMappingEntrySchema = z.object({
   source: z.string().optional(),
   target: z.string(),
   direction: FieldDirectionSchema.optional(),
+  /** Spec: specs/field-mapping.md §1.6 */
+  reverseRequired: z.boolean().optional(),
+  /** Spec: specs/field-mapping.md §1.5 */
+  default: z.unknown().optional(),
+  /** Spec: specs/field-mapping.md §1.8 */
+  group: z.string().optional(),
 });
 
 export const AssocPredicateMappingSchema = z.object({

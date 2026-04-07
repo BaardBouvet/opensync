@@ -1,6 +1,6 @@
 # Derived Fields (`default` / `defaultExpression`)
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** XS  
 **Domain:** Engine — field mapping  

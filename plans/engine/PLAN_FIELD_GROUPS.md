@@ -1,6 +1,6 @@
 # Field Groups (Atomic Resolution)
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** Engine — field mapping  

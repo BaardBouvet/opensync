@@ -232,3 +232,133 @@ describe("FE9: expression receives full incoming record", () => {
     expect(applyMapping({ code: "ABC", year: 2026 }, mappings, "inbound")).toEqual({ label: "ABC-2026" });
   });
 });
+
+// ─── DF: default / defaultExpression ─────────────────────────────────────────
+// Spec: specs/field-mapping.md §1.5  Plan: plans/engine/PLAN_DEFAULT_VALUES.md
+//
+// DF1  Field absent from source → static default used
+// DF2  Field present but null → static default used
+// DF3  Field present with "" (empty string) → default NOT applied
+// DF4  Field present with 0 (falsy) → default NOT applied
+// DF5  defaultExpression referencing earlier field in same mapping
+// DF6  Both absent → field dropped (undefined)
+// DF7  Reverse pass — default / defaultExpression have no effect
+
+describe("DF1: absent field → static default", () => {
+  it("fills missing field with default value", () => {
+    const mappings: FieldMappingList = [{ source: "status", target: "status", default: "active" }];
+    expect(applyMapping({}, mappings, "inbound")).toEqual({ status: "active" });
+  });
+});
+
+describe("DF2: null field → static default", () => {
+  it("fills null field with default value", () => {
+    const mappings: FieldMappingList = [{ source: "status", target: "status", default: "active" }];
+    expect(applyMapping({ status: null }, mappings, "inbound")).toEqual({ status: "active" });
+  });
+});
+
+describe("DF3: empty string is NOT absent — default not applied", () => {
+  it("preserves empty string", () => {
+    const mappings: FieldMappingList = [{ source: "status", target: "status", default: "active" }];
+    expect(applyMapping({ status: "" }, mappings, "inbound")).toEqual({ status: "" });
+  });
+});
+
+describe("DF4: falsy 0 is NOT absent — default not applied", () => {
+  it("preserves zero", () => {
+    const mappings: FieldMappingList = [{ source: "score", target: "score", default: 99 }];
+    expect(applyMapping({ score: 0 }, mappings, "inbound")).toEqual({ score: 0 });
+  });
+});
+
+describe("DF5: defaultExpression references earlier field", () => {
+  it("computes fallback from already-resolved canonical field", () => {
+    const mappings: FieldMappingList = [
+      { source: "email", target: "email" },
+      { source: "username", target: "username", defaultExpression: (r) => String(r["email"]).split("@")[0] },
+    ];
+    // username absent → derived from email (already in result)
+    expect(applyMapping({ email: "alice@x.com" }, mappings, "inbound"))
+      .toEqual({ email: "alice@x.com", username: "alice" });
+  });
+});
+
+describe("DF6: no default, field absent → field dropped", () => {
+  it("omits absent field when no default is set", () => {
+    const mappings: FieldMappingList = [{ source: "notes", target: "notes" }];
+    expect(applyMapping({}, mappings, "inbound")).toEqual({});
+  });
+});
+
+describe("DF7: default has no effect on outbound pass", () => {
+  it("outbound: default not applied (reverse only renames)", () => {
+    const mappings: FieldMappingList = [{ source: "status", target: "status", default: "active" }];
+    // canonical has status set; outbound should pass it through as-is
+    expect(applyMapping({ status: "pending" }, mappings, "outbound")).toEqual({ status: "pending" });
+    // canonical missing status — outbound does not inject default
+    expect(applyMapping({}, mappings, "outbound")).toEqual({});
+  });
+});
+
+// ─── RR: reverseRequired ──────────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §1.6  Plan: plans/engine/PLAN_REVERSE_REQUIRED.md
+//
+// RR1  Required field present and non-null → isDispatchBlocked returns false
+// RR2  Required field is null → isDispatchBlocked returns true
+// RR3  Required field absent (undefined) → isDispatchBlocked returns true
+// RR4  Multiple required fields, all present → not blocked
+// RR5  Multiple required fields, one null → blocked
+// RR6  No reverseRequired fields → never blocked
+
+import { isDispatchBlocked } from "./mapping.js";
+
+describe("RR1: required field present → not blocked", () => {
+  it("returns false when required field has a value", () => {
+    const mappings: FieldMappingList = [{ source: "ext_id", target: "id", reverseRequired: true }];
+    expect(isDispatchBlocked({ ext_id: "abc123" }, mappings)).toBe(false);
+  });
+});
+
+describe("RR2: required field is null → blocked", () => {
+  it("returns true when required field is null", () => {
+    const mappings: FieldMappingList = [{ source: "ext_id", target: "id", reverseRequired: true }];
+    expect(isDispatchBlocked({ ext_id: null }, mappings)).toBe(true);
+  });
+});
+
+describe("RR3: required field absent → blocked", () => {
+  it("returns true when required field is missing from record", () => {
+    const mappings: FieldMappingList = [{ source: "ext_id", target: "id", reverseRequired: true }];
+    expect(isDispatchBlocked({}, mappings)).toBe(true);
+  });
+});
+
+describe("RR4: multiple required fields, all present → not blocked", () => {
+  it("returns false when all required fields have values", () => {
+    const mappings: FieldMappingList = [
+      { source: "a", target: "fieldA", reverseRequired: true },
+      { source: "b", target: "fieldB", reverseRequired: true },
+    ];
+    expect(isDispatchBlocked({ a: 1, b: 2 }, mappings)).toBe(false);
+  });
+});
+
+describe("RR5: multiple required fields, one null → blocked", () => {
+  it("returns true when at least one required field is null", () => {
+    const mappings: FieldMappingList = [
+      { source: "a", target: "fieldA", reverseRequired: true },
+      { source: "b", target: "fieldB", reverseRequired: true },
+    ];
+    expect(isDispatchBlocked({ a: 1, b: null }, mappings)).toBe(true);
+  });
+});
+
+describe("RR6: no reverseRequired fields → never blocked", () => {
+  it("returns false for regular mappings with no reverseRequired", () => {
+    const mappings: FieldMappingList = [{ source: "name", target: "fullName" }];
+    expect(isDispatchBlocked({ name: null }, mappings)).toBe(false);
+    expect(isDispatchBlocked({}, mappings)).toBe(false);
+  });
+});
+

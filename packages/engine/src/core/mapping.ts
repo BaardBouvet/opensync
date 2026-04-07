@@ -7,7 +7,8 @@ import type { FieldMappingList } from "../config/loader.js";
  *  If no mappings are declared, all fields pass through verbatim (whitelist not applied).
  *  If mappings are declared, only listed fields appear in the result (whitelist semantics).
  *  Spec: specs/config.md § Field whitelist semantics
- *  Spec: specs/field-mapping.md §1.3 — expression / reverseExpression */
+ *  Spec: specs/field-mapping.md §1.3 — expression / reverseExpression
+ *  Spec: specs/field-mapping.md §1.5 — default / defaultExpression */
 export function applyMapping(
   data: Record<string, unknown>,
   mappings: FieldMappingList | undefined,
@@ -21,13 +22,23 @@ export function applyMapping(
     if (pass === "inbound") {
       if (dir === "forward_only") continue;
       // Spec: specs/field-mapping.md §1.3 — expression takes precedence over source rename
+      let value: unknown;
       if (m.expression) {
-        result[m.target] = m.expression(data);
+        value = m.expression(data);
       } else {
         const sourceKey = m.source ?? m.target;
-        if (Object.prototype.hasOwnProperty.call(data, sourceKey)) {
-          result[m.target] = data[sourceKey];
+        value = Object.prototype.hasOwnProperty.call(data, sourceKey) ? data[sourceKey] : undefined;
+      }
+      // Spec: specs/field-mapping.md §1.5 — apply default when value is null/undefined
+      if (value === null || value === undefined) {
+        if (m.defaultExpression) {
+          value = m.defaultExpression(result);   // result holds fields already written this pass
+        } else if (m.default !== undefined) {
+          value = m.default;
         }
+      }
+      if (value !== undefined) {
+        result[m.target] = value;
       }
     } else {
       if (dir === "reverse_only") continue;
@@ -48,4 +59,21 @@ export function applyMapping(
     }
   }
   return result;
+}
+
+/** Returns true when any field with reverseRequired:true resolves to null/undefined in the
+ *  outbound-mapped record, signalling that the dispatch to this target should be suppressed.
+ *  Spec: specs/field-mapping.md §1.6 */
+export function isDispatchBlocked(
+  outboundRecord: Record<string, unknown>,
+  mappings: FieldMappingList | undefined,
+): boolean {
+  if (!mappings) return false;
+  for (const m of mappings) {
+    if (!m.reverseRequired) continue;
+    const key = m.source ?? m.target;
+    const val = outboundRecord[key];
+    if (val === null || val === undefined) return true;
+  }
+  return false;
 }

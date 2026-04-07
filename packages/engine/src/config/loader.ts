@@ -32,6 +32,29 @@ export interface FieldMapping {
    *  Return a plain object to decompose into multiple source fields;
    *  return any other value to assign to `source ?? target`. */
   reverseExpression?: (record: Record<string, unknown>) => unknown;
+  /** Applied to both the incoming value and the stored shadow value before the noop diff
+   *  check. If normalize(incoming) === normalize(shadow), the field is a noop even when raw
+   *  strings differ. Also prevents lower-fidelity sources from winning resolution when their
+   *  normalized value matches the canonical.
+   *  Spec: specs/field-mapping.md §1.4 */
+  normalize?: (v: unknown) => unknown;
+  /** When true, the entire dispatched row is suppressed if this field's value is null
+   *  or absent in the outbound-mapped record. No written_state row is written.
+   *  Spec: specs/field-mapping.md §1.6 */
+  reverseRequired?: boolean;
+  /** Static fallback applied during the forward (inbound) pass when the source field is
+   *  absent or null. Applied before resolution. Mutually exclusive with defaultExpression.
+   *  Spec: specs/field-mapping.md §1.5 */
+  default?: unknown;
+  /** Dynamic fallback applied during the forward (inbound) pass when the source field is
+   *  absent or null. Receives the partially-built canonical record (fields processed so far).
+   *  Mutually exclusive with default.
+   *  Spec: specs/field-mapping.md §1.5 */
+  defaultExpression?: (record: Record<string, unknown>) => unknown;
+  /** Atomic resolution group label. All fields sharing the same label resolve from the same
+   *  winning source, preventing incoherent field mixes (e.g. address parts from different sources).
+   *  Spec: specs/field-mapping.md §1.8 */
+  group?: string;
 }
 
 export type FieldMappingList = FieldMapping[];
@@ -395,6 +418,9 @@ function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
     source: f.source,
     target: f.target,
     direction: f.direction,
+    reverseRequired: f.reverseRequired,
+    default: f.default,
+    group: f.group,
   }));
 }
 
@@ -404,6 +430,8 @@ function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
     source: f.source,
     target: f.target,
     direction: f.direction,
+    reverseRequired: f.reverseRequired,
+    group: f.group,
   }));
 }
 

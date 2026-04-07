@@ -148,7 +148,7 @@ For resolution strategies other than passthrough: a lower-precision source whose
 output matches the golden record is not eligible to win resolution, preventing it from degrading
 a higher-fidelity value contributed by another source.
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Normalize").**
+**Status: implemented. Tests: `packages/engine/src/core/diff.test.ts` (N1–N4), `packages/engine/src/core/conflict.test.ts` (N5–N6).**
 
 ---
 
@@ -168,7 +168,7 @@ fields:
 applied during the forward pass before resolution. `defaultExpression` receives the partially-built
 canonical record and can reference other fields.
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Derived fields").**
+**Status: implemented. Tests: `packages/engine/src/core/mapping.test.ts` (DF1–DF7).**
 
 ---
 
@@ -244,7 +244,7 @@ When the group uses `last_modified` resolution, the group's timestamp is the `MA
 timestamps within the group from the winning source. When using `coalesce`, the winning source
 provides all non-null group fields together.
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Groups").**
+**Status: implemented. Tests: `packages/engine/src/core/conflict.test.ts` (FG1–FG8).**
 
 ---
 
@@ -988,7 +988,7 @@ fields:
     reverse_required: true   # if canonical entity has no external ref, skip write to this connector
 ```
 
-**Status: designed, not yet implemented (OSI-mapping §6 "reverse_required").**
+**Status: implemented. `isDispatchBlocked()` in `core/mapping.ts`; guard in `engine.ts` fan-out loop. Tests: `packages/engine/src/core/mapping.test.ts` (RR1–RR6).**
 
 ---
 

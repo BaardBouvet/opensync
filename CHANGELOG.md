@@ -14,6 +14,31 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 ## [Unreleased]
 
 ### Added
+- Engine: `normalize` per-field function on `FieldMapping` (specs/field-mapping.md §1.4).
+  Applied to both sides before the noop diff check — if `normalize(incoming) ===
+  normalize(shadow)`, the field is treated as unchanged and no write is triggered, preventing
+  precision-loss connectors (phone formatting, float rounding, date truncation) from causing
+  infinite update loops. Also blocks lower-fidelity sources from overwriting higher-fidelity
+  canonical values during conflict resolution. `buildNormalizers()` helper in `core/diff.ts`
+  extracts a `Map<field, fn>` from a `FieldMappingList`. Tests: `diff.test.ts` N1–N4,
+  `conflict.test.ts` N5–N6.
+- Engine: `reverseRequired` per-field boolean on `FieldMapping` (specs/field-mapping.md §1.6).
+  When true, the entire dispatched row to a target connector is suppressed if that field is null
+  or absent after outbound mapping. No `written_state` row is written. `isDispatchBlocked()`
+  helper in `core/mapping.ts`; guard applied before every connector insert/update call.
+  Tests: `mapping.test.ts` RR1–RR6.
+- Engine: `default` and `defaultExpression` per-field fallbacks on `FieldMapping`
+  (specs/field-mapping.md §1.5). Applied during the forward (inbound) pass when the source
+  field is absent or null. `default` is a static value; `defaultExpression` is a function
+  receiving the partially-built canonical record (can reference fields processed earlier in the
+  same mapping list). Both are no-ops on the outbound pass. `default` is also available in
+  YAML config files. Tests: `mapping.test.ts` DF1–DF7.
+- Engine: `group` per-field label on `FieldMapping` for atomic conflict resolution
+  (specs/field-mapping.md §1.8). All fields sharing the same label resolve from the same
+  winning source, preventing incoherent mixes (e.g. ERP wins `street`, CRM wins `city`).
+  Group winner is elected by LWW (max timestamp across all group fields from the shadow); if
+  `connectorPriorities` are configured, priority takes precedence with timestamp as tiebreaker.
+  Implemented as a group pre-pass in `resolveConflicts()`. Tests: `conflict.test.ts` FG1–FG8.
 - Engine: field expressions on `FieldMapping` (`expression`, `reverseExpression`). When
   `expression` is set on a mapping entry, the inbound pass calls it with the full source record
   instead of looking up a single `source` key, enabling computed / combined canonical fields.

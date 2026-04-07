@@ -45,8 +45,9 @@ import {
   dbUpsertArrayParentMap,
   dbGetArrayParentMap,
 } from "./db/queries.js";
-import { applyMapping } from "./core/mapping.js";
+import { applyMapping, isDispatchBlocked } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
+import { buildNormalizers } from "./core/diff.js";
 import { CircuitBreaker } from "./safety/circuit-breaker.js";
 import { createSchema } from "./db/migrations.js";
 import { makeWiredInstance } from "./auth/context.js";
@@ -1386,6 +1387,10 @@ export class SyncEngine {
 
     const localData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
 
+    // Spec: specs/field-mapping.md §1.6 — reverse_required guard.
+    // Suppress dispatch when a required field is null/absent in the outbound-mapped record.
+    if (isDispatchBlocked(localData, targetMember.outbound)) return { type: "skip" };
+
     // Build an association sentinel (same serialisation pattern as shadow_state).
     // Included in the noop check and stored in written_state so association-only
     // changes (e.g. deferred-retry updates) are never incorrectly suppressed.
@@ -1616,7 +1621,7 @@ export class SyncEngine {
               ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId)
               : undefined;
 
-            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig);
+            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound);
             if (!Object.keys(resolved).length && existingTargetId !== undefined) {
               results.push({ entity: sourceMember.entity, action: "skip", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
               continue;
@@ -1691,7 +1696,7 @@ export class SyncEngine {
       // was already written on the first (deferred) pass, so the shadow matches even though
       // no target ever received the data.
       if (!isResurrection && existingShadow !== undefined && !skipEchoFor?.has(record.id)) {
-        const same = this._shadowMatchesIncoming(existingShadow, canonical, assocSentinel);
+        const same = this._shadowMatchesIncoming(existingShadow, canonical, assocSentinel, buildNormalizers(sourceMember.inbound));
         if (same) {
           results.push({ entity: sourceMember.entity, action: "skip", sourceId: record.id, targetConnectorId: "", targetId: record.id });
           continue;
@@ -1749,7 +1754,7 @@ export class SyncEngine {
         const existingTargetId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
         const targetShadow = existingTargetId ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId) : undefined;
 
-        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig);
+        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound);
         // Zero-key guard: suppress dispatch only when updating an *existing* target record
         // with no field changes.  When existingTargetId is undefined this is a brand-new
         // INSERT — dispatch must run even for empty canonical data so the record is created
@@ -1888,10 +1893,14 @@ export class SyncEngine {
     shadow: FieldData,
     incoming: Record<string, unknown>,
     assocSentinel: string | undefined,
+    normalizers?: Map<string, (v: unknown) => unknown>,
   ): boolean {
     for (const [k, v] of Object.entries(incoming)) {
       const e = shadow[k]; if (!e) return false;
-      if (JSON.stringify(e.val) !== JSON.stringify(v)) return false;
+      const normalize = normalizers?.get(k);
+      const lhs = normalize ? normalize(v) : v;
+      const rhs = normalize ? normalize(e.val) : e.val;
+      if (JSON.stringify(lhs) !== JSON.stringify(rhs)) return false;
     }
     for (const k of Object.keys(shadow)) {
       if (k === "__assoc__") continue;
