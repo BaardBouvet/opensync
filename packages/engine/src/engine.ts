@@ -1151,12 +1151,23 @@ export class SyncEngine {
     // Collect-then-merge: find ALL canonicals matched by any identity group, merge them all.
     const groups = channel ? this._resolveGroups(channel) : (identityFields ?? []).map((f) => ({ fields: [f] }));
     if (groups.length) {
+      // Spec: specs/field-mapping.md §3.2 — when searching shadow_state for an existing
+      // canonical, probe all entity names used by OTHER channel members in addition to the
+      // source member's own entity name.  Without this, connectors with different entity
+      // names (e.g. "order_lines" vs "orderLines") cannot find each other's shadow rows.
+      const otherEntityNames = channel
+        ? [...new Set(channel.members.filter((m) => m.connectorId !== connectorId).map((m) => m.entity))]
+        : [];
+      const entityNamesToSearch = [...new Set([entityName, ...otherEntityNames])];
+
       const matchedCids: string[] = [];
       for (const group of groups) {
         const values = group.fields.map((f) => canonical[f]);
         if (values.some((v) => v === undefined || v === null || String(v).trim() === "")) continue;
-        const cid = dbFindCanonicalByGroup(this.db, entityName, connectorId, group.fields, values);
-        if (cid && !matchedCids.includes(cid)) matchedCids.push(cid);
+        for (const eName of entityNamesToSearch) {
+          const cid = dbFindCanonicalByGroup(this.db, eName, connectorId, group.fields, values);
+          if (cid && !matchedCids.includes(cid)) { matchedCids.push(cid); break; }
+        }
       }
 
       if (matchedCids.length > 0) {
@@ -1677,6 +1688,13 @@ export class SyncEngine {
               dbLogTransaction(this.db, o.txEntry);
               dbUpsertWrittenState(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.canonId, o.localData);
             }
+            // Spec: specs/field-mapping.md §3.2 — record the source connector's child
+            // external ID in identity_map + shadow_state so getChannelIdentityMap()
+            // returns a non-null slot for array-source members.  INSERT OR IGNORE is
+            // idempotent on subsequent poll passes.
+            dbLinkIdentity(this.db, childCanonId, sourceMember.connectorId, childRecord.id);
+            const childSourceFd = buildFieldData(undefined, childCanonical, sourceMember.connectorId, ingestTs, undefined);
+            dbSetShadow(this.db, sourceMember.connectorId, sourceMember.entity, childRecord.id, childCanonId, childSourceFd);
           })();
 
           for (const o of childOutcomes) results.push(o.result);

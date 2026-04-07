@@ -91,6 +91,8 @@ channels:
 
 When `identityFields` is set on a channel, the engine queries `shadow_state` for any existing row in another connector whose stored canonical values for those fields match the incoming record, before allocating a new canonical UUID. If a match is found, the incoming record is linked to the existing entity rather than creating a duplicate.
 
+The search spans all entity names used by the channel's other members, not only the source member's entity name. This ensures that records are correctly linked when channel members use different entity names (e.g. webshop `order_lines` vs. ERP `orderLines` in an array-expansion channel).
+
 `identityFields` is also the primary mechanism for linking records during initial onboarding (when running `opensync match` and `opensync link`). After onboarding, the engine relies on identity map lookups by external ID and only falls back to field matching if a record arrives that has never been seen before.
 
 **Trade-offs:**

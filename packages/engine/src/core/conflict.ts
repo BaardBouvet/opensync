@@ -52,7 +52,9 @@ export function resolveConflicts(
       if (config.connectorPriorities) {
         // coalesce-style: priority takes precedence; timestamps break ties
         const inPri = config.connectorPriorities[incomingSrc] ?? Number.MAX_SAFE_INTEGER;
-        const exPri = (existingGroupSrc && config.connectorPriorities[existingGroupSrc]) ?? Number.MAX_SAFE_INTEGER;
+        const exPri = existingGroupSrc
+          ? (config.connectorPriorities[existingGroupSrc] ?? Number.MAX_SAFE_INTEGER)
+          : Number.MAX_SAFE_INTEGER;
         groupWinner.set(label, inPri < exPri || (inPri === exPri && incomingTs >= existingGroupTs));
       } else {
         // last_modified / lww (default)

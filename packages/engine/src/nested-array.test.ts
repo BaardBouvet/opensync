@@ -6,7 +6,7 @@
  * Plans: PLAN_NESTED_ARRAY_PIPELINE.md, PLAN_CROSS_CHANNEL_EXPANSION.md
  *
  * NA1  Same-channel expansion: ERP orders → expanded lines dispatched to flat CRM target
- * NA2  Parent orders shadow row written; no child source shadow
+ * NA2  Parent orders shadow written; child source shadow also written (for cluster view)
  * NA3  Parent echo detection: unchanged order skips all child expansion
  * NA4  Element-level noop: only changed elements re-dispatched (via written_state)
  * NA5  Deterministic canonical IDs: same input → same child canonical UUID
@@ -15,6 +15,8 @@
  * NA8  Cross-channel watermarks advance independently
  * NA9  Config validation: parent reference to unknown name → throws
  * NA10 Config validation: array_path omitted when parent set → throws
+ * NA11 getChannelIdentityMap returns source-connector slot for array children
+ * NA12 _resolveCanonical finds canonical across different entity names in same channel
  */
 import { describe, it, expect, beforeEach } from "bun:test";
 import type {
@@ -233,7 +235,7 @@ describe("Nested array expansion — integration", () => {
     expect(skus).toEqual(["SKU-X", "SKU-Y"]);
   });
 
-  it("NA2 — parent orders shadow written; no child source shadow rows", async () => {
+  it("NA2 — parent orders shadow written; child source shadow also written for cluster view", async () => {
     const orders: Order[] = [
       { id: "order-1", customerId: "cust-A", total: 100, lines: [{ lineNo: "L01", sku: "A", qty: 1, price: 10 }] },
     ];
@@ -250,11 +252,13 @@ describe("Nested array expansion — integration", () => {
     ).get();
     expect(parentRow?.n).toBe(1);
 
-    // No child source shadow (entity = order_lines, connector = erp)
+    // Child source shadow IS written (entity = order_lines, connector = erp).
+    // This enables getChannelIdentityMap to return a non-null slot for the
+    // array-source member so the playground cluster view renders webshop cards.
     const childRow = db.prepare<{ n: number }>(
       "SELECT COUNT(*) as n FROM shadow_state WHERE connector_id = 'erp' AND entity_name = 'order_lines'",
     ).get();
-    expect(childRow?.n).toBe(0);
+    expect(childRow?.n).toBe(1);
   });
 
   it("NA3 — parent echo detection: unchanged order skips all child expansion", async () => {
@@ -399,6 +403,41 @@ describe("Nested array expansion — integration", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("NA11 — getChannelIdentityMap returns source-connector slot for array children", async () => {
+    // Regression guard: when an array-source member (erp) expands its children,
+    // the source connector's external IDs must be recorded in identity_map so that
+    // getChannelIdentityMap() returns a non-null slot — enabling the playground
+    // cluster view to render source-side record cards.
+    const orders: Order[] = [
+      {
+        id: "order-1",
+        customerId: "cust-A",
+        total: 100,
+        lines: [
+          { lineNo: "L01", sku: "A", qty: 1, price: 10 },
+          { lineNo: "L02", sku: "B", qty: 2, price: 20 },
+        ],
+      },
+    ];
+    const crm = makeLineTarget();
+    const config = makeArrayConfig(makeErpConnector(orders), crm.connector);
+    const engine = new SyncEngine(config, makeDb());
+
+    await engine.ingest("order-lines", "erp");
+
+    const identityMap = engine.getChannelIdentityMap("order-lines");
+    // Both child elements must appear as canonical clusters
+    expect(identityMap.size).toBe(2);
+    for (const [, linkedMap] of identityMap) {
+      // Source connector (erp) must be present alongside the target (crm)
+      expect(linkedMap.has("erp")).toBe(true);
+      expect(linkedMap.has("crm")).toBe(true);
+      // Source external ID must follow the derived child-ID format
+      const erpId = linkedMap.get("erp")!;
+      expect(erpId).toMatch(/^order-1#lines\[L0[12]\]$/);
+    }
+  });
+
   it("NA10 — config validation rejects child with parent but no array_path", async () => {
     const dir = join(tmpdir(), `opensync-test-${Date.now()}`);
     mkdirSync(join(dir, "mappings"), { recursive: true });
@@ -418,5 +457,93 @@ describe("Nested array expansion — integration", () => {
 
     await expect(loadConfig(dir)).rejects.toThrow(/array_path/i);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("NA12 — _resolveCanonical finds canonical across different entity names in same channel", async () => {
+    // Regression guard: when the array-source member uses entity "order_lines" and the flat
+    // member uses "line_items", a flat record from the second connector must be identity-linked
+    // to the canonical created by the first connector's expansion.
+    //
+    // Without the fix: dbFindCanonicalByGroup searches entity_name = 'line_items' only,
+    // missing the ERP shadow row stored as entity_name = 'order_lines' → creates a spurious
+    // unlinked canonical for the CRM record.
+    //
+    // With the fix: _resolveCanonical searches all other channel member entity names
+    // (["line_items", "order_lines"]) and finds the ERP canonical correctly.
+    const orders: Order[] = [
+      {
+        id: "order-1",
+        customerId: "cust-A",
+        total: 100,
+        lines: [{ lineNo: "L01", sku: "SKU-X", qty: 2, price: 25 }],
+      },
+    ];
+
+    // CRM connector: read-only (no insert) so that expansion cannot auto-insert a CRM record.
+    // This forces CRM records to be identity-matched via _resolveCanonical on CRM ingest.
+    const crmRecords: ReadRecord[] = [
+      // Pre-existing CRM record matching ERP child via identity fields
+      { id: "crm-pre", data: { lineNumber: "L01", sku: "SKU-X", quantity: 2, orderId: "cust-A" } },
+    ];
+    const crmConnector: Connector = {
+      metadata: { name: "test-crm-na12", version: "0.0.1", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [
+          {
+            name: "line_items",
+            async *read(_ctx: ConnectorContext, _since?: string): AsyncIterable<ReadBatch> {
+              yield { records: crmRecords, since: "ts-1" };
+            },
+            // No insert() — forces identity resolution rather than auto-insert
+          },
+        ];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "erp", connector: makeErpConnector(orders), config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "crm", connector: crmConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [
+        {
+          id: "order-lines",
+          // Compound identity group: both fields must match simultaneously.
+          identityGroups: [{ fields: ["lineNumber", "sku"] }],
+          members: makeArrayConfig(makeErpConnector(orders), crmConnector).channels[0]!.members,
+        },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const db = makeDb();
+    const engine = new SyncEngine(config, db);
+
+    // Expand from ERP: creates CCAN_L01 linked to erp.  CRM insert is skipped (no insert()).
+    await engine.ingest("order-lines", "erp");
+
+    // ERP child canonical is linked only to erp at this point
+    const identityMap1 = engine.getChannelIdentityMap("order-lines");
+    expect(identityMap1.size).toBe(1);
+    const [ccanL01, linked1] = [...identityMap1][0]!;
+    expect(linked1.has("erp")).toBe(true);
+    expect(linked1.has("crm")).toBe(false); // no CRM record yet (insert was skipped)
+
+    // Ingest CRM: identity match should bridge crm-pre → CCAN_L01.
+    // _resolveCanonical must search both "line_items" AND "order_lines" entity names.
+    await engine.ingest("order-lines", "crm");
+
+    const identityMap2 = engine.getChannelIdentityMap("order-lines");
+    // Still one cluster, now with both connectors linked
+    expect(identityMap2.size).toBe(1);
+    const [, linked2] = [...identityMap2][0]!;
+    expect(linked2.has("erp")).toBe(true);
+    // The CRM pre-existing record should now be linked to the same canonical as ERP
+    expect(linked2.has("crm")).toBe(true);
+    expect(linked2.get("crm")).toBe("crm-pre");
+    // Confirm it's the same canonical that was created by ERP expansion
+    const [ccanAfter] = [...identityMap2][0]!;
+    expect(ccanAfter).toBe(ccanL01);
   });
 });

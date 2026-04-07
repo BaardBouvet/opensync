@@ -522,14 +522,15 @@ cross-channel (parent in one channel, child in another) are supported.
       - `childExternalId` = `${parentExternalId}#${array_path}[${elementKeyValue}]`.
       - Merge `parent_fields` values into element (element fields win on collision).
       - Apply child member's inbound field mapping.
-      - Derive `childCanonicalId` deterministically from parent canonical ID and element key (no DB write for source side). Formula: SHA-256 of `opensync:array:${parentCanonicalId}:${array_path}[${elementKeyValue}]`, formatted as a UUID.
+      - Derive `childCanonicalId` deterministically from parent canonical ID and element key. Formula: SHA-256 of `opensync:array:${parentCanonicalId}:${array_path}[${elementKeyValue}]`, formatted as a UUID.
    d. Fan-out each child record to non-source channel members. Written_state noop suppression applies per element — only changed elements are dispatched.
+   e. Record the source connector's child external ID in `identity_map` (`childCanonicalId → sourceConnectorId → childExternalId`) and write a `shadow_state` row for it (entity = child member's logical entity name). This is idempotent (`INSERT OR IGNORE`) across poll passes and enables `getChannelIdentityMap` to return a non-null slot for the array-source member.
 4. Watermark stored for `(connectorId, entity)` where `entity` = child member's logical entity name (not the inherited source entity).
 
 **Source shadow semantics:**
 
 - **Parent records**: `shadow_state` **is** written (entity = inherited source entity, e.g. `orders`). Echo detection operates at the parent level.
-- **Child records**: `shadow_state` is **not** written for the source side. Per-element change detection relies on the written_state mechanism (§7.1) — unchanged elements are suppressed by written_state, not by source shadow comparison.
+- **Child records**: `shadow_state` **is** written for the source side (entity = child member's logical entity name, e.g. `order_lines`). This shadow row exists solely to enable `getChannelIdentityMap` to join `identity_map` with `shadow_state` and return a non-null slot for the array-source member. Per-element change detection still relies on the written_state mechanism (§7.1) — unchanged elements are suppressed by written_state, not by source shadow comparison.
 
 **Same-channel source descriptors:**
 
