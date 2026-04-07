@@ -89,11 +89,9 @@ bun test packages/sdk/
 - **During development:** add concise bullets under `## [Unreleased]`, grouped under `### Added`, `### Fixed`, or `### Changed`. One bullet per thing; keep it short.
 - **When cutting a release:** distill the `[Unreleased]` bullets into a polished release entry with:
   - A short intro paragraph (1–3 sentences) summarising the theme of the release.
-  - Named component sections — use whichever of the three core components had changes and
-    omit the rest: `### Sync Engine`, `### Browser Playground`, `### Connector SDK`.
-  - Within each component, add sub-sections as needed: `#### Added`, `#### Fixed`,
-    `#### Testing & Quality`. Omit empty sub-sections.
-  - One `- **Bold label** — one-sentence description.` bullet per item.
+  - Use `### Added`, `### Fixed`, `### Testing & Quality` sections (omit empty ones).
+  - Prefix each bullet with the component in bold: `- **Sync Engine — Thing** — one sentence.`
+    Use `Sync Engine`, `Browser Playground`, or `Connector SDK` as the prefix.
   - Remove all the temporary working notes. See `[0.2.0]` as the canonical example of the finished style.
 
 **Bug-fix discipline (TDD):**
