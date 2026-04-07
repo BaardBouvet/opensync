@@ -126,6 +126,11 @@ function buildCard(
   callbacks: SystemsPaneCallbacks,
   onNavigate: (targetEntity: string, targetId: string) => void,
   allSystems: Map<string, InMemoryConnector>,
+  /** When set, this card is an array sub-object — edit/delete are hidden and an
+   *  annotation is shown instead (value: parent path, e.g. "purchases.lines"). */
+  embeddedIn?: string,
+  /** When set, show a clickable badge linking back to the parent record. */
+  parentRef?: { entity: string; id: string },
 ): HTMLElement {
   const card = document.createElement("div");
   card.className = "record-card";
@@ -143,12 +148,26 @@ function buildCard(
   const table = document.createElement("table");
   table.className = "record-fields";
   for (const [key, value] of Object.entries(rec.data)) {
-    const tr = document.createElement("tr");
-    const tdK = document.createElement("td"); tdK.className = "field-key"; tdK.textContent = key;
-    const tdV = document.createElement("td"); tdV.className = "field-val";
-    tdV.textContent = typeof value === "string" ? value : JSON.stringify(value);
-    tr.appendChild(tdK); tr.appendChild(tdV);
-    table.appendChild(tr);
+    if (Array.isArray(value)) {
+      // Array field — static chip showing element count, no expand/collapse.
+      const tr = document.createElement("tr");
+      const tdK = document.createElement("td"); tdK.className = "field-key"; tdK.textContent = key;
+      const tdV = document.createElement("td"); tdV.className = "field-val field-val-array";
+      const chip = document.createElement("span");
+      chip.className = "array-count-chip";
+      chip.title = value.length > 0 ? JSON.stringify(value).slice(0, 120) : "(empty array)";
+      chip.textContent = `[${value.length} item${value.length === 1 ? "" : "s"}]`;
+      tdV.appendChild(chip);
+      tr.appendChild(tdK); tr.appendChild(tdV);
+      table.appendChild(tr);
+    } else {
+      const tr = document.createElement("tr");
+      const tdK = document.createElement("td"); tdK.className = "field-key"; tdK.textContent = key;
+      const tdV = document.createElement("td"); tdV.className = "field-val";
+      tdV.textContent = typeof value === "string" ? value : String(value ?? "");
+      tr.appendChild(tdK); tr.appendChild(tdV);
+      table.appendChild(tr);
+    }
   }
   card.appendChild(table);
 
@@ -178,6 +197,24 @@ function buildCard(
     card.appendChild(badges);
   }
 
+  // Parent record badge — shown on array sub-object cards.
+  if (parentRef) {
+    const parentBadges = document.createElement("div");
+    parentBadges.className = "assoc-badges";
+    const sysSnap = allSystems.get(systemId)?.snapshotFull();
+    const parentRec = sysSnap?.[parentRef.entity]?.find((r) => r.id === parentRef.id);
+    const isMissing = parentRec === undefined;
+    const badge = document.createElement("span");
+    badge.className = `assoc-badge parent-badge${isMissing ? " assoc-missing" : " assoc-badge-link"}`;
+    badge.textContent = `↑ ${parentRef.entity}: ${parentRef.id}`;
+    badge.title = isMissing
+      ? `Parent "${parentRef.id}" not found in ${systemId}/${parentRef.entity}`
+      : `Navigate to parent: ${parentRef.entity} / ${parentRef.id}`;
+    if (!isMissing) badge.addEventListener("click", () => onNavigate(parentRef.entity, parentRef.id));
+    parentBadges.appendChild(badge);
+    card.appendChild(parentBadges);
+  }
+
   // Footer
   const footer = document.createElement("div");
   footer.className = "card-footer";
@@ -190,7 +227,14 @@ function buildCard(
   const actions = document.createElement("div");
   actions.className = "card-actions";
 
-  if (!rec.softDeleted) {
+  if (embeddedIn) {
+    // Array sub-object: read-only in the UI — edit via the parent record.
+    const badge = document.createElement("span");
+    badge.className = "embedded-badge";
+    badge.title = `This record is a sub-object of ${embeddedIn}. Edit the parent record to change it.`;
+    badge.textContent = `⊂ ${embeddedIn}`;
+    actions.appendChild(badge);
+  } else if (!rec.softDeleted) {
     const editBtn = document.createElement("button");
     editBtn.className = "btn-card";
     editBtn.textContent = "Edit";
@@ -259,10 +303,32 @@ export function createSystemsPane(
   let highlightId: string | undefined;
   let lastWatermarks = new Map<string, number>();
   let hasRefreshed = false;
+  let lastChangedChannels = new Set<string>();
 
   let cachedChannels: ChannelConfig[] = [];
   let cachedSystems: Map<string, InMemoryConnector> = new Map();
   let cachedClusters: Map<string, ChannelCluster[]> = new Map();
+
+  /** Returns true if any record in the channel has a new or updated watermark
+   * since the last render.  Checks real connector records only (synthetic array
+   * records track via their parent entity watermark). */
+  function hasChannelActivity(
+    ch: ChannelConfig,
+    systems: Map<string, InMemoryConnector>,
+  ): boolean {
+    for (const m of ch.members) {
+      const conn = systems.get(m.connectorId);
+      if (!conn) continue;
+      const full = conn.snapshotFull();
+      // For array-source members check the parent entity (the real stored entity).
+      const entityToCheck = m.arrayPath ? (m.sourceEntity ?? m.entity) : m.entity;
+      for (const r of (full[entityToCheck] ?? [])) {
+        const prevWm = lastWatermarks.get(`${m.connectorId}/${entityToCheck}/${r.id}`);
+        if (prevWm === undefined || r.watermark > prevWm) return true;
+      }
+    }
+    return false;
+  }
 
   function navigateToRecord(targetEntity: string, targetId: string): void {
     const ch = cachedChannels.find((c) => c.members.some((m) => m.entity === targetEntity));
@@ -431,6 +497,11 @@ export function createSystemsPane(
 
     const members = ch.members;
     const n = members.length;
+    // Display members sorted alphabetically by connectorId so columns appear in a
+    // consistent order regardless of the engine's required ingest ordering.
+    const displayOrder = ch.members
+      .map((m, i) => ({ m, i }))
+      .sort((a, b) => a.m.connectorId.localeCompare(b.m.connectorId));
     const gridCols = `repeat(${n}, 260px)`;
 
     // Pre-build record lookup: "connectorId/entity/externalId" → RecordWithMeta
@@ -439,8 +510,44 @@ export function createSystemsPane(
       const conn = systems.get(m.connectorId);
       if (!conn) continue;
       const full = conn.snapshotFull();
-      for (const r of (full[m.entity] ?? [])) {
-        recCache.set(`${m.connectorId}/${m.entity}/${r.id}`, r);
+
+      if (m.arrayPath) {
+        // Array-source member: synthesize one RecordWithMeta per array element from parent records.
+        // The derived external ID is `${parentId}#${arrayPath}[${elementKeyValue}]`.
+        const parentEntity = m.sourceEntity ?? m.entity;
+        for (const parentRec of (full[parentEntity] ?? [])) {
+          const arr = (parentRec.data as Record<string, unknown>)[m.arrayPath];
+          if (!Array.isArray(arr)) continue;
+          arr.forEach((el, idx) => {
+            const elObj = (el !== null && typeof el === "object" && !Array.isArray(el))
+              ? (el as Record<string, unknown>)
+              : { _value: el };
+            const keyVal = m.elementKey
+              ? String(elObj[m.elementKey] ?? idx)
+              : String(idx);
+            const syntheticId = `${parentRec.id}#${m.arrayPath}[${keyVal}]`;
+
+            // Inject parentFields
+            const data: Record<string, unknown> = { ...elObj };
+            for (const [childKey, ref] of Object.entries(m.parentFields ?? {})) {
+              const parentFieldName = typeof ref === "string" ? ref : (ref as { field: string }).field;
+              data[childKey] = (parentRec.data as Record<string, unknown>)[parentFieldName];
+            }
+
+            recCache.set(`${m.connectorId}/${m.entity}/${syntheticId}`, {
+              id: syntheticId,
+              data,
+              watermark: parentRec.watermark,
+              modifiedAt: parentRec.modifiedAt,
+              softDeleted: parentRec.softDeleted,
+              associations: [],
+            });
+          });
+        }
+      } else {
+        for (const r of (full[m.entity] ?? [])) {
+          recCache.set(`${m.connectorId}/${m.entity}/${r.id}`, r);
+        }
       }
     }
 
@@ -467,7 +574,7 @@ export function createSystemsPane(
     headerRow.style.gridTemplateColumns = gridCols;
     headerRow.style.padding = "0 11px";   // match cluster-body(6px) + cluster-group side-padding(5px)
     headerRow.style.columnGap = "6px";    // match cluster-cards-row gap
-    for (const m of members) {
+    for (const { m } of displayOrder) {
       const count = memberCounts.get(`${m.connectorId}/${m.entity}`) ?? 0;
       const head = document.createElement("div");
       head.className = "cluster-col-head";
@@ -502,7 +609,8 @@ export function createSystemsPane(
       head.appendChild(sysName);
       head.appendChild(entityBadge);
       head.appendChild(countBadge);
-      head.appendChild(newBtn);
+      // Array-source members must be edited via their parent object — no inline create.
+      if (!m.arrayPath) head.appendChild(newBtn);
       headerRow.appendChild(head);
     }
     view.appendChild(headerRow);
@@ -534,8 +642,7 @@ export function createSystemsPane(
       cardsRow.className = "cluster-cards-row";
       cardsRow.style.gridTemplateColumns = gridCols;
 
-      for (let i = 0; i < members.length; i++) {
-        const m = members[i]!;
+      for (const { m, i } of displayOrder) {
         const slot = cluster.slots[i] ?? null;
         const cell = document.createElement("div");
         cell.className = "cluster-cell";
@@ -551,8 +658,19 @@ export function createSystemsPane(
               // updated since the last render.  The !isFirst guard is dropped: on the
               // delayed first render after boot debounce all cards are new and should flash.
               const flash = prevWm === undefined || (!isFirst && rec.watermark > prevWm);
+              // Fix: store synthetic record watermarks so they don't flash on every tick.
+              // updateWatermarks() only covers real connector entities; array sub-object
+              // records are synthesized in recCache and never reach snapshotFull().
+              lastWatermarks.set(wmKey, rec.watermark);
               const isHl = highlightId !== undefined && rec.id === highlightId;
-              cell.appendChild(buildCard(rec, slot.connectorId, slot.entity, flash, isHl, callbacks, navigateToRecord, systems));
+              const embeddedIn = m.arrayPath
+                ? `${m.sourceEntity ?? m.entity}.${m.arrayPath}`
+                : undefined;
+              // Parent link: extract parent ID from child external ID ("pu1#lines[L01]" → "pu1")
+              const parentRef = m.arrayPath
+                ? { entity: m.sourceEntity ?? m.entity, id: rec.id.split("#").slice(0, -1).join("#") }
+                : undefined;
+              cell.appendChild(buildCard(rec, slot.connectorId, slot.entity, flash, isHl, callbacks, navigateToRecord, systems, embeddedIn, parentRef));
             } else {
               const pend = document.createElement("div");
               pend.className = "cluster-cell-pending";
@@ -579,9 +697,17 @@ export function createSystemsPane(
       const btn = document.createElement("button");
       btn.className = `channel-tab${ch.id === activeChannel ? " active" : ""}`;
       btn.textContent = ch.id;
+      // Activity dot — shown on non-active tabs with unviewed changes.
+      if (ch.id !== activeChannel && lastChangedChannels.has(ch.id)) {
+        const dot = document.createElement("span");
+        dot.className = "tab-activity-dot";
+        dot.title = "This channel has new or updated records";
+        btn.appendChild(dot);
+      }
       btn.addEventListener("click", () => {
         if (activeChannel === ch.id) return;
         activeChannel = ch.id;
+        lastChangedChannels.delete(ch.id); // clear dot when user views the channel
         renderTabs(cachedChannels);
         renderContent(cachedChannels, cachedSystems, cachedClusters, false);
         updateWatermarks(cachedSystems);
@@ -662,6 +788,15 @@ export function createSystemsPane(
 
     const isFirst = !hasRefreshed;
     hasRefreshed = true;
+
+    // Compute activity dots for non-active tabs BEFORE updating watermarks so
+    // we compare current state against what was seen in the previous render pass.
+    if (!isFirst) {
+      for (const ch of channels) {
+        if (ch.id === activeChannel) continue;
+        if (hasChannelActivity(ch, systems)) lastChangedChannels.add(ch.id);
+      }
+    }
 
     renderTabs(channels);
     renderContent(channels, systems, clustersByChannel, isFirst);

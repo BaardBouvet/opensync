@@ -86,9 +86,40 @@ export function createDevTools(
   shadowLeft.className = "shadow-left";
   shadowSplit.appendChild(shadowLeft);
 
+  // Drag handle between left (table) and right (detail) panes.
+  const shadowResizer = document.createElement("div");
+  shadowResizer.className = "shadow-resizer";
+  shadowResizer.title = "Drag to resize";
+  shadowSplit.appendChild(shadowResizer);
+
   const shadowRight = document.createElement("div");
   shadowRight.className = "shadow-right";
   shadowSplit.appendChild(shadowRight);
+
+  // Mouse-drag resize logic for the shadow-state split.
+  let resizerDragging = false;
+  let resizerStartX = 0;
+  let resizerStartWidth = 0;
+  shadowResizer.addEventListener("mousedown", (e) => {
+    resizerDragging = true;
+    resizerStartX = e.clientX;
+    resizerStartWidth = shadowRight.getBoundingClientRect().width;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!resizerDragging) return;
+    const delta = resizerStartX - e.clientX; // positive = drag left = widen right
+    const newWidth = Math.max(160, Math.min(600, resizerStartWidth + delta));
+    shadowRight.style.width = `${newWidth}px`;
+  });
+  document.addEventListener("mouseup", () => {
+    if (!resizerDragging) return;
+    resizerDragging = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  });
 
   const watermarksPanel = document.createElement("div");
   watermarksPanel.className = "devtools-panel devtools-panel-db";
