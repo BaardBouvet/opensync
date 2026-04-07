@@ -14,6 +14,15 @@ Move `[Unreleased]` to a dated version heading when a release is cut.
 ## [Unreleased]
 
 ### Added
+- Engine: `written_state` table — records the post-outbound-mapping field values last written
+  to each target connector per entity. Keyed on `(connector_id, entity_name, canonical_id)`.
+  After every successful insert or update, the engine upserts a `written_state` row inside the
+  same atomic transaction as `shadow_state`. Spec: `specs/field-mapping.md §7.1`.
+- Engine: target-centric noop suppression using `written_state`. Before dispatching an update
+  to a target connector, the engine compares the outbound-mapped delta against the previously
+  written values. If all fields match, the dispatch is suppressed. First-time inserts are
+  always dispatched regardless. Spec: `specs/field-mapping.md §7.1`.
+- Engine: `dbUpsertWrittenState()` and `dbGetWrittenState()` query helpers.
 - Engine: transitive closure identity matching. `discover()`, `addConnector()`, and `_resolveCanonical()` now use a union-find (connected-components) algorithm instead of a composite key. Records linked pairwise (A=B via email, B=C via taxId) are now correctly detected as one entity (A=B=C), regardless of chain length. Ambiguous components (two records from the same connector in the same group) are placed in `uniquePerSide` with a console warning.
 - Engine: `identityGroups` channel config key. Compound AND-within-group, OR-across-groups identity semantics. `identityGroups: [{ fields: [firstName, lastName, dob] }]` requires all three fields to match. Internally `identityFields` is expanded to one single-field group per field. `identityGroups` takes precedence when both are present.
 - Engine: `dbFindCanonicalByGroup()` query helper for compound identity group lookups (AND-chained `JSON_EXTRACT` conditions in one SQL query).

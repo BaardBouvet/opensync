@@ -1,6 +1,6 @@
 # Written State Table
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** engine  

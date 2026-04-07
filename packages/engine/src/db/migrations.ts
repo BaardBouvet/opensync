@@ -135,4 +135,18 @@ export function createSchema(db: Db): void {
       UNIQUE (source_connector, entity_name, source_external_id, target_connector)
     )
   `);
+
+  // Spec: specs/field-mapping.md §7.1 — records the post-outbound-mapping field values last
+  // written to each target connector per entity. Used for target-centric noop suppression
+  // and as the foundation for element tombstoning in nested array reassembly.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS written_state (
+      connector_id  TEXT NOT NULL,
+      entity_name   TEXT NOT NULL,
+      canonical_id  TEXT NOT NULL,
+      data          TEXT NOT NULL,
+      written_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      PRIMARY KEY (connector_id, entity_name, canonical_id)
+    )
+  `);
 }

@@ -649,24 +649,39 @@ Store adjacency pointers (`order_prev`, `order_next`) for graph-style linked-lis
 The standard shadow-state diff (see [safety.md](safety.md)) detects whether a source value changed
 since it was last *read*. This does not catch the case where the resolved canonical value is
 identical to what was *last written* to the target — a difference that arises when conflict
-resolution or a transform changes the value before dispatch.
+resolution or a transform changes the value before dispatch. It also cannot detect whether a
+target connector independently mutated a field after the engine last wrote to it.
 
 `written_state` is a per-target-per-entity table maintained after each successful write:
 
 ```sql
-CREATE TABLE written_state (
-  connector_instance_id TEXT NOT NULL,
-  entity_id             TEXT NOT NULL,
-  data                  TEXT,          -- JSON blob of last written values
-  written_at            TEXT,
-  PRIMARY KEY (connector_instance_id, entity_id)
-);
+CREATE TABLE IF NOT EXISTS written_state (
+  connector_id  TEXT NOT NULL,   -- target connector that received the write
+  entity_name   TEXT NOT NULL,   -- entity name as in the channel member
+  canonical_id  TEXT NOT NULL,   -- canonical UUID from identity_map
+  data          TEXT NOT NULL,   -- JSON blob: { fieldName: value, … }
+  written_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (connector_id, entity_name, canonical_id)
+)
 ```
 
-Before dispatching an update to a connector, the engine compares the resolved delta against
-`written_state`. If all fields match, the write is classified as noop and skipped.
+`data` stores the **post-outbound-mapping** field values handed to the connector's `insert()`
+or `update()` call. This makes the stored values directly comparable against future outbound
+deltas after mapping has been applied.
 
-**Status: designed, not yet implemented (OSI-mapping §7 "Target-centric noop").**
+Before dispatching an **update** to a connector, the engine compares the post-outbound-mapped
+delta against `written_state.data`. If all fields in the delta match **and** the association
+sentinel (serialised and stored as the `__assoc__` key inside `data`) matches, the write is
+classified as a target-centric noop and skipped. First-time inserts are always dispatched
+regardless. Association-only changes (e.g. deferred-retry association updates) are also
+correctly dispatched because the stored `__assoc__` sentinel differs.
+
+After each successful write (insert or update), the engine upserts the `written_state` row
+within the same atomic transaction that updates `shadow_state` and `identity_map`. If the write
+fails, no `written_state` row is written or modified.
+
+**Status: implemented. See `packages/engine/src/db/migrations.ts` (schema) and
+`packages/engine/src/engine.ts` (`_dispatchToTarget` — noop check and upsert).**
 
 ---
 
@@ -680,7 +695,8 @@ timestamps by comparing current source values against previously written values:
 
 This enables `last_modified` resolution for sources that lack native change timestamps.
 
-**Status: depends on `written_state` (§7.1) (OSI-mapping §7 "derive_timestamps").**
+**Status: not yet implemented. Depends on §7.1 (`written_state`) being available at the source
+connector level. See `plans/engine/PLAN_WRITTEN_STATE.md §5` for the design.**
 
 ---
 
@@ -858,8 +874,8 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Element hard delete (array) | §6 | ❌ depends on nested arrays + `written_state` |
 | `reverse_required` | §6 | ❌ no per-field exclude-if-null in dispatch |
 | Source-level noop (`_base` / shadow diff) | §7 | ✅ implemented — see [safety.md](safety.md) |
-| Target-centric noop (`written_state`) | §7 | ❌ no `written_state` table |
-| `derive_timestamps` | §7 | ❌ depends on `written_state` |
+| Target-centric noop (`written_state`) | §7 | ✅ implemented — `written_state` table + `_dispatchToTarget` guard |
+| `derive_timestamps` | §7 | ❌ depends on `written_state` at source level (§7.2 design) |
 | Concurrent edit detection | §7 | 🔶 data is in shadow state; detection signal not wired |
 | Custom sort (array ordering) | §8 | ❌ depends on nested arrays |
 | CRDT ordinal ordering | §8 | ❌ depends on nested arrays |
@@ -895,8 +911,8 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 
 The gaps cluster into three interconnected areas; unblocking them unlocks the most other primitives:
 
-1. **Transitive closure identity** — union-find layer over `entity_links`. Unblocks composite keys,
-   external-link tables, FK resolution, multi-source merge, and N-way sync correctness.
+1. **Transitive closure identity** — union-find layer for `identityFields` / `identityGroups`. ✅ Implemented.
+   Unblocks composite keys, external-link tables, FK resolution, multi-source merge, and N-way sync correctness.
 
 2. **Nested array pipeline** — forward expand + reverse aggregate. Unblocks embedded-object nesting,
    scalar arrays, element-level deletion, CRDT ordering, and element routing.
@@ -904,5 +920,5 @@ The gaps cluster into three interconnected areas; unblocking them unlocks the mo
 3. **Filter and routing** — engine-level `filter` / `reverse_filter`. Unblocks discriminator
    routing, route-combined, `reverse_required`, and soft-delete propagation control.
 
-4. **`written_state` table** — last-written snapshot per target. Unblocks target-centric noop,
-   derived timestamps, and entity-absence hard-delete detection.
+4. **`written_state` table** — last-written snapshot per target. ✅ Implemented (§7.1).
+   Foundation for derived timestamps (§7.2) and element tombstoning in nested array reassembly.

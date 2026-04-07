@@ -94,13 +94,16 @@ ingest(channelId, connectorId, opts)
      e. Apply conflict resolution against each target's shadow
      f. Fan-out to cross-linked targets only (skip provisionally-only connectors)
         For each target:
-          i.  Apply outbound field mapping
-          ii. Look up target's external ID via identity_map (insert if absent)
-          iii.Optionally pre-fetch live record for ETag (connector.lookup())
-          iv. Call target.insert() or target.update()
-          v.  On success: write target shadow_state
+          i.   Apply outbound field mapping to produce the target-local delta (`localData`)
+          ii.  Target-centric noop: if `localData` matches `written_state` for this
+               (connector, entity, canonical), skip dispatch (update only — inserts always proceed).
+               Spec: specs/field-mapping.md §7.1
+          iii. Look up target's external ID via identity_map (insert if absent)
+          iv.  Optionally pre-fetch live record for ETag (connector.lookup())
+          v.   Call target.insert() or target.update()
+          vi.  On success: write target shadow_state + upsert written_state with `localData`
      g. Atomic commit: write source shadow_state + all target shadow_states +
-        identity links + transaction_log entries
+        identity links + written_state rows + transaction_log entries
   5. Advance watermark for (connectorId, entity) — same transaction as final shadow write
   6. Log sync_run summary row
 ```
@@ -258,15 +261,20 @@ interface ConflictConfig {
 
 For each accepted change, the engine dispatches to each eligible target:
 
-1. Resolve the target's external ID via `identity_map`. No ID → this is a new record.
-2. For connectors that declare `lookup()`: pre-fetch the live record to get its ETag/version
+1. Apply outbound field mapping to produce the target-local delta (`localData`).
+2. **Target-centric noop check**: if `localData` matches `written_state` for this
+   `(connector_id, entity_name, canonical_id)`, skip the dispatch (updates only).
+   First-time inserts are always dispatched. Spec: `specs/field-mapping.md §7.1`.
+3. Resolve the target's external ID via `identity_map`. No ID → this is a new record.
+4. For connectors that declare `lookup()`: pre-fetch the live record to get its ETag/version
    and (optionally) its full snapshot for full-replace PUT connectors.
-3. Call `targetEntity.insert(record)` or `targetEntity.update(record)`.
-4. On success: write the target's new `shadow_state` row and any new `identity_map` link.
-5. Emit `record.created` or `record.updated` event on the `EventBus`.
-6. Append a `transaction_log` entry (for rollback).
+5. Call `targetEntity.insert(record)` or `targetEntity.update(record)`.
+6. On success: write the target's new `shadow_state` row, any new `identity_map` link,
+   and upsert the `written_state` row with `localData`.
+7. Emit `record.created` or `record.updated` event on the `EventBus`.
+8. Append a `transaction_log` entry (for rollback).
 
-All of steps 4–6 happen inside the per-record atomic commit transaction.
+All of steps 6–8 happen inside the per-record atomic commit transaction.
 
 ### Deferred records
 

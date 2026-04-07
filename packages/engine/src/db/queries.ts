@@ -594,3 +594,43 @@ export function dbRemoveDeferred(
      WHERE source_connector = ? AND entity_name = ? AND source_external_id = ? AND target_connector = ?`,
   ).run(sourceConnector, entityName, sourceExternalId, targetConnector);
 }
+
+// ─── Written state ────────────────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §7.1
+
+/**
+ * Upsert the post-outbound-mapping field values last written to a target connector.
+ * Called inside the atomic transaction after a successful insert or update dispatch.
+ */
+export function dbUpsertWrittenState(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  canonicalId: string,
+  data: Record<string, unknown>,
+): void {
+  db.prepare(
+    `INSERT INTO written_state (connector_id, entity_name, canonical_id, data)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(connector_id, entity_name, canonical_id)
+     DO UPDATE SET data = excluded.data, written_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+  ).run(connectorId, entityName, canonicalId, JSON.stringify(data));
+}
+
+/**
+ * Return the last-written field-value blob for a target connector, or undefined if no row exists.
+ */
+export function dbGetWrittenState(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  canonicalId: string,
+): Record<string, unknown> | undefined {
+  const row = db
+    .prepare<{ data: string }>(
+      `SELECT data FROM written_state WHERE connector_id = ? AND entity_name = ? AND canonical_id = ?`,
+    )
+    .get(connectorId, entityName, canonicalId);
+  if (!row) return undefined;
+  return JSON.parse(row.data) as Record<string, unknown>;
+}

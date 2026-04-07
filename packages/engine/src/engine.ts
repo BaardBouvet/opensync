@@ -40,6 +40,8 @@ import {
   dbInsertDeferred,
   dbGetDeferred,
   dbRemoveDeferred,
+  dbUpsertWrittenState,
+  dbGetWrittenState,
 } from "./db/queries.js";
 import { applyMapping } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
@@ -1351,7 +1353,7 @@ export class SyncEngine {
     sourceMember: ChannelMember,
     sourceId: string,
   ): Promise<
-    | { type: "ok"; action: "insert" | "update"; targetId: string; newFieldData: FieldData; after: Record<string, unknown>; afterAssociations?: Association[] }
+    | { type: "ok"; action: "insert" | "update"; targetId: string; localData: Record<string, unknown>; newFieldData: FieldData; after: Record<string, unknown>; afterAssociations?: Association[] }
     | { type: "error"; error: string }
     | { type: "skip" }
   > {
@@ -1359,6 +1361,27 @@ export class SyncEngine {
     if (!targetEntityDef?.insert || !targetEntityDef?.update) return { type: "skip" };
 
     const localData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
+
+    // Build an association sentinel (same serialisation pattern as shadow_state).
+    // Included in the noop check and stored in written_state so association-only
+    // changes (e.g. deferred-retry updates) are never incorrectly suppressed.
+    const assocSentinel = associations?.length
+      ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+      : undefined;
+
+    // Spec: specs/field-mapping.md §7.1 — target-centric noop suppression.
+    // For update dispatches only: if every field in localData AND the association sentinel
+    // match the last value written to this target, skip the write.
+    if (existingTargetId !== undefined) {
+      const prior = dbGetWrittenState(this.db, targetMember.connectorId, targetMember.entity, canonId);
+      if (prior !== undefined) {
+        const fieldsMatch = Object.entries(localData).every(
+          ([k, v]) => JSON.stringify(prior[k]) === JSON.stringify(v),
+        );
+        const assocMatch = assocSentinel === (prior["__assoc__"] as string | undefined);
+        if (fieldsMatch && assocMatch) return { type: "skip" };
+      }
+    }
 
     // ETag pre-fetch (Spec: specs/sync-engine.md § Dispatch)
     let liveVersion: string | undefined;
@@ -1438,8 +1461,12 @@ export class SyncEngine {
       ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
       : undefined;
     const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, remappedSentinel);
-    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, newFieldData,
-      after: resolvedCanonical, afterAssociations: associations?.length ? associations : undefined };
+    // Store localData with the association sentinel so future noop checks include association changes.
+    const writtenData: Record<string, unknown> = assocSentinel
+      ? { ...localData, __assoc__: assocSentinel }
+      : { ...localData };
+    return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, localData: writtenData,
+      newFieldData, after: resolvedCanonical, afterAssociations: associations?.length ? associations : undefined };
   }
 
   // Spec: specs/sync-engine.md § Pipeline Steps
@@ -1518,7 +1545,7 @@ export class SyncEngine {
 
       const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields, channel);
 
-      type Outcome = { result: RecordSyncResult; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
+      type Outcome = { result: RecordSyncResult; localData: Record<string, unknown>; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
       const outcomes: Outcome[] = [];
       let droppedAssociation = false; // Spec: PLAN_EAGER_ASSOCIATION_MODE.md §3.4
       const deferredTargets = new Set<string>(); // targets where a deferred row was just written
@@ -1593,6 +1620,7 @@ export class SyncEngine {
         const beforeAssoc = targetShadow ? parseSentinelAssociations(targetShadow) : undefined;
         outcomes.push({
           result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, beforeAssociations: beforeAssoc, after: dispatchResult.after, afterAssociations: dispatchResult.afterAssociations },
+          localData: dispatchResult.localData,
           shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
           txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: canonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
         });
@@ -1612,6 +1640,8 @@ export class SyncEngine {
           if (o.shadowData.action === "insert") dbLinkIdentity(this.db, o.shadowData.canonId, o.shadowData.connectorId, o.shadowData.externalId);
           dbSetShadow(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.externalId, o.shadowData.canonId, o.shadowData.fd);
           dbLogTransaction(this.db, o.txEntry);
+          // Spec: specs/field-mapping.md §7.1 — record what was last written to this target.
+          dbUpsertWrittenState(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.canonId, o.localData);
           // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.4
           // Only clear a deferred row if no new one was just written for this (record, target)
           // pair in this pass (eager dispatch writes deferred row and should not clear it).

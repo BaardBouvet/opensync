@@ -43,8 +43,9 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
 | [engine/PLAN_FIELD_EXPRESSIONS.md](engine/PLAN_FIELD_EXPRESSIONS.md) | Field expressions: `expression` / `reverseExpression` function fields on `FieldMapping` for combine, normalize, and decompose transforms in the embedded API | backlog | S |
 | [engine/PLAN_NESTED_ARRAY_PIPELINE.md](engine/PLAN_NESTED_ARRAY_PIPELINE.md) | Forward-pass array expansion: `array_path` mapping key expands embedded JSON arrays into individual child entity records for per-element diffing, resolution, and fan-out | draft | M |
-| [engine/PLAN_WRITTEN_STATE.md](engine/PLAN_WRITTEN_STATE.md) | `written_state` table: records last-written field values per target connector per entity; enables target-centric noop suppression, nested-array element tombstoning, and derived timestamps | draft | M |
+| [engine/PLAN_WRITTEN_STATE.md](engine/PLAN_WRITTEN_STATE.md) | `written_state` table: records last-written field values per target connector per entity; enables target-centric noop suppression, nested-array element tombstoning, and derived timestamps | complete | M |
 | [engine/PLAN_CROSS_CHANNEL_EXPANSION.md](engine/PLAN_CROSS_CHANNEL_EXPANSION.md) | Cross-channel array expansion: `source_entity` + `parent_channel` mapping keys allow a child entity to live in a different channel than its parent; engine reads the parent connector entity and fans out into the child channel | draft | M |
+| [engine/PLAN_SHARED_WATERMARK.md](engine/PLAN_SHARED_WATERMARK.md) | Derive `since` from `shadow_state.updated_at` when no watermark entry exists; avoids full re-syncs after watermark loss or collectOnly with no cursor; opt-in via `sinceFormat: "iso-timestamp"` on EntityDefinition | draft | S |
 
 ## connectors/ — Connector research and cleanup plans
 

@@ -331,6 +331,33 @@ CREATE TABLE circuit_breaker_events (
 
 ---
 
+## `written_state`
+
+Records the post-outbound-mapping field values last written to each target connector per entity.
+Used for target-centric noop suppression (specs/field-mapping.md §7.1) and as the foundation
+for element tombstoning in nested array reassembly.
+
+Keyed on `(connector_id, entity_name, canonical_id)`:
+- `connector_id`: the target connector instance that received the write.
+- `entity_name`: required because the same canonical ID may appear under different entity types.
+- `canonical_id`: the stable global UUID from `identity_map`.
+
+`data` is the JSON blob of field values **as sent to the connector** (post out-bound mapping),
+making it directly comparable against future outbound deltas.
+
+```sql
+CREATE TABLE IF NOT EXISTS written_state (
+  connector_id  TEXT NOT NULL,
+  entity_name   TEXT NOT NULL,
+  canonical_id  TEXT NOT NULL,
+  data          TEXT NOT NULL,
+  written_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  PRIMARY KEY (connector_id, entity_name, canonical_id)
+);
+```
+
+---
+
 ## SQLite Adapter
 
 The engine never imports a SQLite driver directly. All engine code types against the `Db`
