@@ -14,7 +14,8 @@ export type FieldType =
   | "boolean"
   | "null"
   | { type: "object"; properties?: Record<string, FieldType> }
-  | { type: "array"; items?: FieldType };
+  | { type: "array"; items?: FieldType }
+  | { type: "ref"; entity: string };
 
 /**
  * Metadata for a single field on an entity or action payload.
@@ -41,6 +42,33 @@ export interface FieldDescriptor {
 }
 
 // ─── Records ─────────────────────────────────────────────────────────────────
+
+/**
+ * An inline reference to another record, appearing as a field value in `data`.
+ *
+ * On read:  connector sets this in a `data` field wherever the field is a FK reference.
+ *           The engine extracts an Association automatically during ingest.
+ * On write: engine injects the remapped target-connector-local ID here; connector reads it.
+ *
+ * `@entity` is the connector's own entity name (matches Association.targetEntity).
+ * Omit `@entity` when the schema already declares the ref target (`{ type: 'ref' }`);
+ * the engine fills in the entity name for writes using the association inference rule.
+ * Spec: specs/connector-sdk.md § Ref
+ */
+export interface Ref {
+  '@id': string;
+  '@entity'?: string;
+}
+
+/** Type guard — true when value is a Ref object. */
+export function isRef(value: unknown): value is Ref {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    '@id' in value &&
+    typeof (value as Ref)['@id'] === 'string'
+  );
+}
 
 /**
  * An explicit reference from one record to another.
@@ -77,10 +105,6 @@ export interface ReadRecord {
    *  Covers hard deletes, soft-delete-as-removal, and webhook DELETED events.
    *  Omit (or set false) to keep the record in the target even if it's archived/inactive in the source. */
   deleted?: boolean;
-
-  /** Pre-extracted reference fields. The engine uses these to resolve relationships without
-   *  inspecting raw data values. */
-  associations?: Association[];
 
   /** Opaque version token from the source system (e.g. ETag, sequence number).
    *  Returned by lookup(). The engine carries it through the dispatch pass and
@@ -132,12 +156,9 @@ export interface ReadBatch {
 
 /** Payload for creating a new record in the target system. */
 export interface InsertRecord {
-  /** Field values to write. Immutable fields declared in the entity schema are never
-   *  included here — they are only meaningful on creation, not insert (which IS creation). */
+  /** Field values to write. FK reference fields carry remapped `Ref` values injected by the
+   *  engine — use `readRefs(data)` to strip them to plain strings for REST API payloads. */
   data: Record<string, unknown | unknown[]>;
-
-  /** Associations to establish after the record is created. */
-  associations?: Association[];
 }
 
 /** Payload for updating an existing record in the target system. */
@@ -147,11 +168,9 @@ export interface UpdateRecord {
   id: string;
 
   /** Field values to write. Immutable fields (schema.immutable: true) are stripped by
-   *  the engine before this reaches the connector. */
+   *  the engine before this reaches the connector. FK reference fields carry remapped `Ref`
+   *  values injected by the engine — use `readRefs(data)` to strip them for REST API payloads. */
   data: Record<string, unknown | unknown[]>;
-
-  /** Updated association set, if any changed. */
-  associations?: Association[];
 
   /** Version token from ReadRecord.version (e.g. ETag). Set by the engine when it has
    *  a live lookup result for this record in the current dispatch pass. Connectors
@@ -356,6 +375,14 @@ export interface EntityDefinition {
    *  Keys are field names from data. Used by agents (description), engine (required/immutable
    *  enforcement), and tooling (type compatibility warnings at channel setup). */
   schema?: Record<string, FieldDescriptor>;
+
+  /** Optional JSON-LD `@context` for RDF connectors using URI predicates and IRI identifiers.
+   *  When present the engine compiles the context into forward (short → URI) and reverse
+   *  (URI → short) maps at entity registration time, allowing short names in config mappings
+   *  and data field keys.
+   *  Optional. Connectors with opaque local IDs (HubSpot integers, ERP codes) do not need it.
+   *  Spec: specs/connector-sdk.md § Context */
+  context?: { '@context': Record<string, string | Record<string, unknown>> };
 
   /** Association metadata: declares which predicates this entity emits from read() and
    *  accepts in insert()/update(). Key is the predicate string as it appears in

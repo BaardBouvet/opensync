@@ -234,12 +234,13 @@ describe("AS-4: write-side filter drops predicates absent from associationSchema
           yield {
             records: [{
               id: "alice-1",
-              data: { email: "alice@example.com", name: "Alice Updated" },
-              // Self-referential associations so both IDs resolve via identity map
-              associations: [
-                { predicate: "managerId", targetEntity: "contact", targetId: "alice-1" },
-                { predicate: "tagId",     targetEntity: "contact", targetId: "alice-1" },
-              ],
+              // Self-referential Ref values so both IDs resolve via identity map
+              data: {
+                email: "alice@example.com",
+                name: "Alice Updated",
+                managerId: { '@id': 'alice-1', '@entity': 'contact' },
+                tagId:     { '@id': 'alice-1', '@entity': 'contact' },
+              },
             }],
             since: "t2",
           };
@@ -298,12 +299,11 @@ describe("AS-4: write-side filter drops predicates absent from associationSchema
       expect(predicates).toContain("managerId");
     }
 
-    // update() received associations should not include tagId
-    const captured = receivedUpdates4.find((r) => r.associations && r.associations.length > 0);
-    if (captured?.associations) {
-      const predicates = captured.associations.map((a) => a.predicate);
-      expect(predicates).not.toContain("tagId");
-      expect(predicates).toContain("managerId");
+    // update() data should have managerId as a Ref but NOT tagId (schema filter dropped tagId)
+    const captured = receivedUpdates4.find((r) => r.data["managerId"] !== undefined || r.data["tagId"] !== undefined);
+    if (captured) {
+      expect(captured.data["managerId"]).toBeDefined();
+      expect(captured.data["tagId"]).toBeUndefined();
     }
   });
 });
@@ -346,11 +346,12 @@ describe("AS-5: entity without associationSchema receives all associations (pass
           yield {
             records: [{
               id: "bob-1",
-              data: { email: "bob@example.com", name: "Bob Updated" },
-              associations: [
-                { predicate: "managerId", targetEntity: "contact", targetId: "bob-1" },
-                { predicate: "tagId",     targetEntity: "contact", targetId: "bob-1" },
-              ],
+              data: {
+                email: "bob@example.com",
+                name: "Bob Updated",
+                managerId: { '@id': 'bob-1', '@entity': 'contact' },
+                tagId:     { '@id': 'bob-1', '@entity': 'contact' },
+              },
             }],
             since: "t2",
           };
@@ -398,12 +399,13 @@ describe("AS-5: entity without associationSchema receives all associations (pass
     const updated5 = result5.records.filter((r) => r.action === "update" && r.targetConnectorId === "tgt");
     expect(updated5.length).toBeGreaterThan(0);
 
-    // Without associationSchema on the target, both predicates should be present
-    const captured5 = receivedUpdates5.find((r) => r.associations && r.associations.length > 0);
-    if (captured5?.associations) {
-      const predicates = captured5.associations.map((a) => a.predicate);
-      expect(predicates).toContain("managerId");
-      expect(predicates).toContain("tagId");
+    // Without associationSchema on the target, both Ref values should be injected into data
+    const captured5 = receivedUpdates5.find((r) =>
+      (r.data["managerId"] !== undefined) || (r.data["tagId"] !== undefined)
+    );
+    if (captured5) {
+      expect(captured5.data["managerId"]).toBeDefined();
+      expect(captured5.data["tagId"]).toBeDefined();
     }
   });
 });
@@ -524,12 +526,13 @@ describe("AS-7: target-local associations not expressible by source are preserve
               yield {
                 records: [{
                   id: "crm-alice",
-                  data: { email: "alice@example.com", name: "Alice" },
-                  // CRM contact has BOTH typed company associations
-                  associations: [
-                    { predicate: "primaryCompanyId",   targetEntity: "contacts", targetId: "" },
-                    { predicate: "secondaryCompanyId", targetEntity: "contacts", targetId: "" },
-                  ],
+                  // CRM contact has BOTH typed company associations as Ref values
+                  data: {
+                    email: "alice@example.com",
+                    name: "Alice",
+                    primaryCompanyId:   { '@id': '', '@entity': 'contacts' },
+                    secondaryCompanyId: { '@id': '', '@entity': 'contacts' },
+                  },
                 }],
                 since: "t1",
               };
@@ -561,10 +564,7 @@ describe("AS-7: target-local associations not expressible by source are preserve
               yield {
                 records: [{
                   id: "erp-alice",
-                  data: { email: "alice@example.com", name: "Alice" },
-                  associations: [
-                    { predicate: "orgId", targetEntity: "employees", targetId: "" },
-                  ],
+                  data: { email: "alice@example.com", name: "Alice", orgId: { '@id': '', '@entity': 'employees' } },
                 }],
                 since: "t1",
               };
@@ -573,10 +573,7 @@ describe("AS-7: target-local associations not expressible by source are preserve
               yield {
                 records: [{
                   id: "erp-alice",
-                  data: { email: "alice@example.com", name: "Alice Updated" },
-                  associations: [
-                    { predicate: "orgId", targetEntity: "employees", targetId: "" },
-                  ],
+                  data: { email: "alice@example.com", name: "Alice Updated", orgId: { '@id': '', '@entity': 'employees' } },
                 }],
                 since: "t2",
               };
@@ -619,10 +616,9 @@ describe("AS-7: target-local associations not expressible by source are preserve
     expect(crmUpdates.length).toBe(1);
     const update7 = crmUpdates[0]!;
 
-    // The update must contain BOTH association predicates, not just primaryCompanyId
-    const predicates7 = (update7.associations ?? []).map((a) => a.predicate);
-    expect(predicates7).toContain("primaryCompanyId");
-    expect(predicates7).toContain("secondaryCompanyId"); // regression: this was silently dropped
+    // The update data must contain BOTH association predicates as Ref values, not just primaryCompanyId
+    expect(update7.data["primaryCompanyId"]).toBeDefined();
+    expect(update7.data["secondaryCompanyId"]).toBeDefined(); // regression: this was silently dropped
   });
 });
 

@@ -41,8 +41,9 @@ import type {
   UpdateRecord,
   UpdateResult,
   DeleteResult,
+  Ref,
 } from "@opensync/sdk";
-import { AuthError, ConnectorError, ValidationError } from "@opensync/sdk";
+import { AuthError, ConnectorError, ValidationError, isRef } from "@opensync/sdk";
 
 // ─── RDF namespace constants ──────────────────────────────────────────────────
 
@@ -219,26 +220,20 @@ function makeRdfEntity(opts: {
 
     const id = idBinding.value;
     const data: Record<string, unknown> = {};
-    const associations: NonNullable<ReadRecord["associations"]> = [];
 
     for (const [field, def] of propEntries) {
       const b = row[field];
       if (!b) continue;
-      data[field] = b.value;
-      // When the value is an IRI and the property is declared as a reference,
-      // emit an Association whose predicate is the full property URI.
+      // For IRI bindings on ref properties, emit a Ref value so the engine
+      // extracts the association automatically. Spec: specs/connector-sdk.md § Ref
       if (def.refEntity && b.type === "uri") {
-        associations.push({
-          predicate: def.predicate,
-          targetEntity: def.refEntity,
-          targetId: b.value,
-        });
+        data[field] = { '@id': b.value, '@entity': def.refEntity } satisfies Ref;
+      } else {
+        data[field] = b.value;
       }
     }
 
-    const rec: ReadRecord = { id, data };
-    if (associations.length > 0) rec.associations = associations;
-    return rec;
+    return { id, data };
   }
 
   // ── Write helpers ────────────────────────────────────────────────────────────
@@ -251,7 +246,10 @@ function makeRdfEntity(opts: {
       `<${iri}> ${modPred} "${escapeLiteral(now)}"^^<${XSD}dateTime> .`,
     ];
     for (const [field, def] of propEntries) {
-      const term = toRdfTerm(data[field]);
+      // For Ref-valued fields (FK references), unwrap the IRI before serialising.
+      const rawValue = data[field];
+      const value = isRef(rawValue) ? (rawValue as Ref)['@id'] : rawValue;
+      const term = toRdfTerm(value);
       if (term !== null) lines.push(`<${iri}> <${def.predicate}> ${term} .`);
     }
     return lines;
@@ -499,11 +497,10 @@ const personEntity = makeRdfEntity({
     },
     worksFor: {
       predicate: `${SCHEMA}worksFor`,
-      // IRI of the organization — the engine maps this to an Association whose
-      // predicate field is "https://schema.org/worksFor" (a full URI).
+      // IRI of the organization emitted as a Ref value; the engine extracts the association.
       description:
         "IRI of the organization entity this person works for (e.g. https://example.org/org/abc1). " +
-        "Stored as an RDF IRI; the engine tracks the person → organization association automatically.",
+        "Stored as an RDF IRI; emitted as a Ref value — engine tracks the association automatically.",
       type: "string",
       refEntity: "organization",
     },

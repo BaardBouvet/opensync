@@ -10,7 +10,9 @@ import type {
   ReadRecord,
   InsertRecord,
   UpdateRecord,
+  Ref,
 } from "@opensync/sdk";
+import { isRef } from "@opensync/sdk";
 import type { Db } from "./db/index.js";
 import type { ChannelConfig, ChannelMember, ConflictConfig, ResolvedConfig, IdentityGroup } from "./config/loader.js";
 import type { WiredConnectorInstance } from "./auth/context.js";
@@ -390,16 +392,13 @@ export class SyncEngine {
                 continue;
               }
               const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
-              // Store the association sentinel so the onboard phase can preserve it
-              // (the shadow is rewritten by onboard but falls back to this if lookup is absent).
-              const assocSentinel = record.associations === undefined
-                ? undefined
-                : (() => {
-                    const filtered = this._filterInboundAssociations(record.associations, sourceMember);
-                    return filtered.length
-                      ? JSON.stringify([...filtered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
-                      : undefined;
-                  })();
+              // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+              const entityDefCollect = this.wired.get(connectorId)?.entities.find((e) => e.name === sourceMember.entity);
+              const inboundAssocCollect = this._extractRefsFromData(record.data as Record<string, unknown>, entityDefCollect);
+              const filteredCollect = this._filterInboundAssociations(inboundAssocCollect, sourceMember);
+              const assocSentinel = filteredCollect.length
+                ? JSON.stringify([...filteredCollect].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+                : undefined;
               const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
               const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
               const fd = buildFieldData(existing, canonical, connectorId, ts, assocSentinel);
@@ -684,7 +683,9 @@ export class SyncEngine {
         const sideEntityDef = sideWired?.entities.find((e) => e.name === sideMember?.entity);
         if (sideEntityDef?.lookup) {
           const recs = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
-          matchSideAssoc.set(key, recs.find((r) => r.id === side.externalId)?.associations);
+          const foundRec = recs.find((r) => r.id === side.externalId);
+          // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+          matchSideAssoc.set(key, foundRec ? this._extractRefsFromData(foundRec.data as Record<string, unknown>, sideEntityDef) : undefined);
         }
       }
     }
@@ -757,7 +758,15 @@ export class SyncEngine {
         if (sideEntityDef?.lookup) {
           const looked = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
           const rec = looked.find((r) => r.id === side.externalId);
-          srcAssoc = rec?.associations;
+          // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+          srcAssoc = rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sideEntityDef) : undefined;
+          srcConnForAssoc = side.connectorId;
+          matchAssocCache.set(cacheKey, srcAssoc);
+          break;
+        } else {
+          // Fallback: recover associations from the source shadow's __assoc__ sentinel.
+          const shadow = sideMember ? dbGetShadow(this.db, side.connectorId, sideMember.entity, side.externalId) : undefined;
+          srcAssoc = shadow ? parseSentinelAssociations(shadow) : undefined;
           srcConnForAssoc = side.connectorId;
           matchAssocCache.set(cacheKey, srcAssoc);
           break;
@@ -783,12 +792,15 @@ export class SyncEngine {
           ? remappedAssoc
           : undefined;
 
-        const outboundData = applyMapping(match.canonicalData, targetMember.outbound, "outbound");
+        const rawOutbound1 = applyMapping(match.canonicalData, targetMember.outbound, "outbound");
+        // Strip Ref values that bled into the canonical — managed through the associations pipeline.
+        const outboundData = Object.fromEntries(Object.entries(rawOutbound1).filter(([, v]) => !isRef(v)));
         let newId: string | undefined;
         let insertError: string | undefined;
 
+        const insertData1 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData, associations: assocToInsert }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData1 }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -844,11 +856,19 @@ export class SyncEngine {
     const sourceAssocCache = new Map<string, Association[] | undefined>();
     for (const unique of report.uniquePerSide) {
       const sourceWired = this.wired.get(unique.connectorId);
-      const sourceEntityDef = sourceWired?.entities.find((e) => e.name === memberByConnector.get(unique.connectorId)!.entity);
-      if (sourceEntityDef?.lookup && !sourceAssocCache.has(unique.externalId)) {
-        const records = await sourceEntityDef.lookup([unique.externalId], sourceWired!.ctx);
-        const rec = records.find((r) => r.id === unique.externalId);
-        sourceAssocCache.set(unique.externalId, rec?.associations);
+      const sourceMemberForAssoc = memberByConnector.get(unique.connectorId)!;
+      const sourceEntityDef = sourceWired?.entities.find((e) => e.name === sourceMemberForAssoc.entity);
+      if (!sourceAssocCache.has(unique.externalId)) {
+        if (sourceEntityDef?.lookup) {
+          const records = await sourceEntityDef.lookup([unique.externalId], sourceWired!.ctx);
+          const rec = records.find((r) => r.id === unique.externalId);
+          // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+          sourceAssocCache.set(unique.externalId, rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sourceEntityDef) : undefined);
+        } else {
+          // Fallback: recover associations from the source shadow's __assoc__ sentinel.
+          const shadow = dbGetShadow(this.db, unique.connectorId, sourceMemberForAssoc.entity, unique.externalId);
+          sourceAssocCache.set(unique.externalId, shadow ? parseSentinelAssociations(shadow) : undefined);
+        }
       }
     }
 
@@ -864,7 +884,9 @@ export class SyncEngine {
         const targetEntityDef = targetWired.entities.find((e) => e.name === targetMember.entity);
         if (!targetEntityDef?.insert) continue;
 
-        const outboundData = applyMapping(unique.rawData, targetMember.outbound, "outbound");
+        const rawOutbound2 = applyMapping(unique.rawData, targetMember.outbound, "outbound");
+        // Strip Ref values that bled into the canonical — managed through the associations pipeline.
+        const outboundData = Object.fromEntries(Object.entries(rawOutbound2).filter(([, v]) => !isRef(v)));
         let newId: string | undefined;
         let insertError: string | undefined;
 
@@ -881,8 +903,9 @@ export class SyncEngine {
           ? remappedAssoc
           : undefined;
 
+        const insertData2 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: outboundData, associations: assocToInsert }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData2 }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -1322,6 +1345,55 @@ export class SyncEngine {
     return associations.filter((a) => member.assocMappings!.some((m) => m.source === a.predicate));
   }
 
+  /**
+   * Spec: specs/connector-sdk.md § Ref — association inference rule §7.
+   * Scan data for Ref-shaped values and derive an Association for each.
+   *
+   * Rule (applied in order):
+   *   1. `@entity` set on the Ref → use it directly.
+   *   2. Field declared as `{ type: 'ref', entity: E }` in entityDef.schema → entity = E.
+   *   3. Field key present in entityDef.associationSchema → entity = descriptor.targetEntity.
+   *   4. Neither — Ref treated as opaque object, no Association derived.
+   */
+  private _extractRefsFromData(
+    data: Record<string, unknown>,
+    entityDef: import("@opensync/sdk").EntityDefinition | undefined,
+  ): Association[] {
+    const result: Association[] = [];
+    for (const [field, value] of Object.entries(data)) {
+      if (!isRef(value)) continue;
+      let targetEntity = (value as Ref)['@entity'];
+      if (!targetEntity) {
+        const fieldType = entityDef?.schema?.[field]?.type;
+        if (fieldType && typeof fieldType === 'object' && 'type' in fieldType && (fieldType as { type: string }).type === 'ref') {
+          targetEntity = (fieldType as { type: 'ref'; entity: string }).entity;
+        } else if (entityDef?.associationSchema?.[field]) {
+          targetEntity = entityDef.associationSchema[field]!.targetEntity;
+        }
+      }
+      if (!targetEntity) continue; // opaque — rule 4
+      result.push({ predicate: field, targetEntity, targetId: (value as Ref)['@id'] });
+    }
+    return result;
+  }
+
+  /**
+   * Spec: specs/connector-sdk.md § Write Contract — inject remapped Ref values into data.
+   * Returns a shallow copy of data with each association's predicate field set to a Ref.
+   */
+  private _injectRefsIntoData(
+    data: Record<string, unknown>,
+    associations: Association[] | undefined,
+  ): Record<string, unknown> {
+    if (!associations?.length) return data;
+    const result = { ...data };
+    for (const assoc of associations) {
+      const ref: Ref = { '@id': assoc.targetId, '@entity': assoc.targetEntity };
+      result[assoc.predicate] = ref;
+    }
+    return result;
+  }
+
   /** Merge outbound associations for an UPDATE dispatch.
    *
    * The source connector can only express a subset of the target's association predicates
@@ -1506,7 +1578,10 @@ export class SyncEngine {
       }
     }
 
-    const localData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
+    const rawLocalData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
+    // Strip any Ref values that bled into the canonical from source data — they are managed
+    // exclusively through the associations pipeline and must not reach the connector as raw values.
+    const localData = Object.fromEntries(Object.entries(rawLocalData).filter(([, v]) => !isRef(v)));
 
     // Spec: specs/field-mapping.md §5.2 — reverse record filter on flat members.
     // Applied before the written_state noop check so filtered-out canonicals don't get a
@@ -1560,7 +1635,7 @@ export class SyncEngine {
         let newId: string | undefined;
         let err: string | undefined;
         for await (const result of targetEntityDef.insert!(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: localData, associations: filteredAssociations }; })(),
+          (async function* (self: SyncEngine): AsyncIterable<InsertRecord> { yield { data: self._injectRefsIntoData(localData, filteredAssociations) }; })(this),
           targetWired.ctx,
         )) { if (result.error) err = result.error; else newId = result.id; }
         if (err) return { type: "error", error: err };
@@ -1569,9 +1644,9 @@ export class SyncEngine {
         let err: string | undefined;
         let notFound = false;
         for await (const result of targetEntityDef.update!(
-          (async function* (): AsyncIterable<UpdateRecord> {
-            yield { id: existingTargetId!, data: localData, associations: filteredAssociations, version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
-          })(),
+          (async function* (self: SyncEngine): AsyncIterable<UpdateRecord> {
+            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
+          })(this),
           targetWired.ctx,
         )) {
           if (result.error) {
@@ -1830,15 +1905,14 @@ export class SyncEngine {
 
       const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
 
-      const assocSentinel = record.associations === undefined
-        ? undefined
-        // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — shadow stores only declared local predicates
-        : (() => {
-            const filtered = this._filterInboundAssociations(record.associations, sourceMember);
-            return filtered.length
-              ? JSON.stringify([...filtered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
-              : undefined;
-          })();
+      // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+      // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — shadow stores only declared local predicates
+      const srcEntityDef = this.wired.get(sourceMember.connectorId)?.entities.find((e) => e.name === sourceMember.entity);
+      const inboundAssoc = this._extractRefsFromData(record.data as Record<string, unknown>, srcEntityDef);
+      const filteredForSentinel = this._filterInboundAssociations(inboundAssoc, sourceMember);
+      const assocSentinel = filteredForSentinel.length
+        ? JSON.stringify([...filteredForSentinel].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+        : undefined;
 
       const shadowRow = dbGetShadowRow(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
       const existingShadow = shadowRow?.fieldData;
@@ -1866,7 +1940,7 @@ export class SyncEngine {
         targetId: record.id,
         sourceData: canonical,
         sourceShadow: existingShadow ? fieldDataToRecord(existingShadow) : undefined,
-        sourceAssociations: record.associations?.length ? record.associations : undefined,
+        sourceAssociations: inboundAssoc.length ? inboundAssoc : undefined,
         sourceShadowAssociations: existingShadow ? parseSentinelAssociations(existingShadow) : undefined,
       });
 
@@ -1888,7 +1962,7 @@ export class SyncEngine {
         const tw = this.wired.get(targetMember.connectorId);
         if (!tw) continue;
 
-        let remap = this._remapAssociations(record.associations, sourceMember.connectorId, targetMember.connectorId, channelId);
+        let remap = this._remapAssociations(inboundAssoc, sourceMember.connectorId, targetMember.connectorId, channelId);
         if (remap !== null && "error" in remap) {
           results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: remap.error });
           hadErrors = true;
@@ -1902,7 +1976,7 @@ export class SyncEngine {
           deferredTargets.add(targetMember.connectorId);
           // Fall through with partial remap — dispatch the record without the unresolvable
           // association. The deferred retry will add it once the identity link is established.
-          const partial = this._remapAssociationsPartial(record.associations, sourceMember.connectorId, targetMember.connectorId, channelId);
+          const partial = this._remapAssociationsPartial(inboundAssoc, sourceMember.connectorId, targetMember.connectorId, channelId);
           if ("error" in partial) {
             results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: "", error: partial.error });
             hadErrors = true;
@@ -1928,7 +2002,7 @@ export class SyncEngine {
         // that the source cannot express (e.g. secondaryCompanyId when source only has orgId).
         // For INSERTs (existingTargetId === undefined) there is no prior state to preserve.
         // Spec: specs/associations.md § 8
-        const existingTargetAssoc = existingTargetId !== undefined
+        const existingTargetAssoc = (existingTargetId !== undefined && targetShadow !== undefined)
           ? parseSentinelAssociations(targetShadow)
           : undefined;
         const mergedAssoc = this._mergeOutboundAssociations(remap, existingTargetAssoc, sourceMember, targetMember);

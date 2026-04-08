@@ -1,6 +1,6 @@
 # PLAN: JSON-LD Connector Contract
 
-**Status:** proposed  
+**Status:** complete  
 **Date:** 2026-04-08  
 **Effort:** L  
 **Domain:** packages/sdk, packages/engine, all connectors  

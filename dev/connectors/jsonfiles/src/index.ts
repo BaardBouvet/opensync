@@ -5,7 +5,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { basename, extname } from "node:path";
 import type {
-  Association,
   Connector,
   ConnectorContext,
   EntityDefinition,
@@ -16,7 +15,10 @@ import type {
   UpdateRecord,
   UpdateResult,
   DeleteResult,
+  Association,
+  Ref,
 } from "@opensync/sdk";
+import { isRef } from "@opensync/sdk";
 
 // ─── File format ─────────────────────────────────────────────────────────────
 // Each JSON file is an array of objects with top-level envelope fields:
@@ -187,12 +189,18 @@ function makeRecordEntity(
 ): EntityDefinition {
   function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
-    const data = (r[dataField] as Record<string, unknown> | undefined) ?? {};
-    const record: ReadRecord = { id, data };
-    if (Array.isArray(r[associationsField])) {
-      record.associations = r[associationsField] as Association[];
+    const data = { ...(r[dataField] as Record<string, unknown> | undefined) ?? {} };
+    // Convert associations from file format to Ref values in data.
+    // Spec: specs/connector-sdk.md § Ref — engine extracts associations from Ref values.
+    const rawAssocs = r[associationsField];
+    if (Array.isArray(rawAssocs)) {
+      for (const assoc of rawAssocs as Association[]) {
+        if (assoc.predicate && (assoc.targetId || assoc.targetEntity)) {
+          data[assoc.predicate] = { '@id': assoc.targetId ?? '', '@entity': assoc.targetEntity } satisfies Ref;
+        }
+      }
     }
-    return record;
+    return { id, data };
   }
 
   return {
@@ -259,23 +267,38 @@ function makeRecordEntity(
         const existing = readFile(entityFilePath);
         const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
         const wm = nextWatermark(existing, watermarkField);
+
+        // Extract Ref values from data and serialize back to file association format.
+        const plainData: Record<string, unknown> = {};
+        const fileAssocs: Association[] = [];
+        for (const [k, v] of Object.entries(record.data)) {
+          if (isRef(v)) {
+            const ref = v as Ref;
+            if (ref['@entity']) {
+              fileAssocs.push({ predicate: k, targetEntity: ref['@entity'], targetId: ref['@id'] });
+            }
+          } else {
+            plainData[k] = v;
+          }
+        }
+
         const newRecord: FileRecord = {
           [idField]: id,
-          [dataField]: record.data,
+          [dataField]: plainData,
           [watermarkField]: wm,
-          ...(record.associations ? { [associationsField]: record.associations } : {}),
+          ...(fileAssocs.length > 0 ? { [associationsField]: fileAssocs } : {}),
         };
         writeFile(entityFilePath, [...existing, newRecord]);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.4
         if (auditLog) {
           appendLogEntry(logFilePath(entityFilePath), {
-            op: "insert", id, data: record.data,
-            ...(record.associations ? { associations: record.associations } : {}),
+            op: "insert", id, data: plainData,
+            ...(fileAssocs.length > 0 ? { associations: fileAssocs } : {}),
             updated: wm,
             at: new Date().toISOString(),
           });
         }
-        yield { id, data: record.data };
+        yield { id, data: plainData };
       }
     },
 
@@ -290,34 +313,53 @@ function makeRecordEntity(
         const wm = nextWatermark(existing, watermarkField);
         const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
         const prevAssoc = existing[idx]![associationsField]; // capture before overwrite
-        const merged = { ...prev, ...record.data };
+
+        // Separate Ref values from scalar data in the incoming update payload.
+        const incomingPlain: Record<string, unknown> = {};
+        const incomingAssocs: Association[] = [];
+        for (const [k, v] of Object.entries(record.data)) {
+          if (isRef(v)) {
+            const ref = v as Ref;
+            if (ref['@entity']) {
+              incomingAssocs.push({ predicate: k, targetEntity: ref['@entity'], targetId: ref['@id'] });
+            }
+          } else {
+            incomingPlain[k] = v;
+          }
+        }
+
+        const merged = { ...prev, ...incomingPlain };
+        // Merge associations: keep existing ones not overridden, add/replace incoming ones.
+        const existingAssocList = Array.isArray(prevAssoc) ? (prevAssoc as Association[]) : [];
+        const mergedAssocs = [
+          ...existingAssocList.filter((a) => !incomingAssocs.some((ia) => ia.predicate === a.predicate)),
+          ...incomingAssocs,
+        ];
         const updated: FileRecord = {
           ...existing[idx],
           [dataField]: merged,
           [watermarkField]: wm,
-          ...(record.associations !== undefined
-            ? { [associationsField]: record.associations }
-            : {}),
+          ...(mergedAssocs.length > 0 ? { [associationsField]: mergedAssocs } : {}),
         };
         existing[idx] = updated;
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.5
         if (auditLog) {
           // Compute a field-level diff: only emit keys that actually changed.
-          const changedKeys = Object.keys(record.data).filter(
-            (k) => JSON.stringify(prev[k]) !== JSON.stringify(record.data[k])
+          const changedKeys = Object.keys(incomingPlain).filter(
+            (k) => JSON.stringify(prev[k]) !== JSON.stringify(incomingPlain[k])
           );
           const before: Record<string, unknown> = {};
           const after: Record<string, unknown> = {};
           for (const k of changedKeys) {
             before[k] = prev[k];
-            after[k] = record.data[k];
+            after[k] = incomingPlain[k];
           }
           // Include associations in the diff when they changed.
-          if (record.associations !== undefined) {
-            if (JSON.stringify(prevAssoc) !== JSON.stringify(record.associations)) {
+          if (incomingAssocs.length > 0) {
+            if (JSON.stringify(prevAssoc) !== JSON.stringify(mergedAssocs)) {
               before["associations"] = prevAssoc;
-              after["associations"] = record.associations;
+              after["associations"] = mergedAssocs;
             }
           }
           const hasDiff = Object.keys(before).length > 0;

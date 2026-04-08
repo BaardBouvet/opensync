@@ -129,10 +129,12 @@ interface OAuthConfig {
 //   { type: 'object'; properties?: Record<string, FieldType> }
 //   { type: 'array'; items?: FieldType }
 //   { type: 'array', items: { type: 'object', properties: { sku: 'string', qty: 'number' } } }
+//   { type: 'ref'; entity: string }  — FK field whose value is a Ref object (see §Ref)
 type FieldType =
   | 'string' | 'number' | 'boolean' | 'null'
   | { type: 'object'; properties?: Record<string, FieldType> }
-  | { type: 'array'; items?: FieldType };
+  | { type: 'array'; items?: FieldType }
+  | { type: 'ref'; entity: string };          // FK field — value is a Ref; engine uses entity for association inference
 
 interface FieldDescriptor {
   description?: string;
@@ -175,7 +177,7 @@ associationSchema: {
 
 **Engine behaviour:**
 
-1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only includes association predicates listed in the schema in `InsertRecord.associations` / `UpdateRecord.associations`. Predicates not in the schema are dropped silently (trace-level log). Entities without `associationSchema` receive all associations unchanged (current pass-through behaviour).
+1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only includes `Ref` fields for predicates listed in the schema in `InsertRecord.data` / `UpdateRecord.data`. Ref fields for predicates not in the schema are dropped silently (trace-level log). Entities without `associationSchema` receive all Ref fields unchanged.
 
 2. **Pre-flight warning (§ A)** — At channel setup, if a declared `targetEntity` is not registered as a channel member, the engine logs a warning. Dispatch still proceeds — the warning is informational.
 
@@ -302,10 +304,9 @@ Records returned by `read()` and `lookup()`. Also the record type inside `ReadBa
 ```typescript
 interface ReadRecord {
   id: string;                                    // this record's ID in the source system (uniqueness scope defined below)
-  data: Record<string, unknown | unknown[]>;     // raw JSON blob — values may be single or multi-valued
+  data: Record<string, unknown | unknown[]>;     // raw JSON blob — values may be single or multi-valued; FK fields carry Ref objects
   version?: string;                              // opaque concurrency token (e.g. ETag) — passed back in UpdateRecord.version
   deleted?: boolean;                             // connector's intent to remove this record from the target (see ReadRecord — Deletion below)
-  associations?: Association[];                  // pre-extracted reference fields (see Associations)
   updatedAt?: string;                            // source-assigned modification timestamp, ISO 8601 (e.g. '2026-03-15T10:32:00Z').
                                                  // Engine uses this as the base LWW timestamp for every field in this record.
                                                  // Omit for sources that have no modification timestamp.
@@ -321,11 +322,10 @@ interface ReadRecord {
                                                  // of data. Omit for connectors without per-field modification times.
 }
 
-interface Association {
-  predicate: string;                         // the field key in data whose value is this reference (e.g. 'companyId', 'worksFor', 'https://schema.org/worksFor')
-  targetEntity: string;                      // target entity name (e.g. 'company') — forms composite key with targetId
-  targetId: string;                          // the referenced ID — usually the value of data[predicate]
-  metadata?: Record<string, unknown>;        // optional edge properties beyond the reference itself (e.g. { since: '2020-01-01' })
+// Ref — an inline reference value embedded in data[fieldName]
+interface Ref {
+  '@id': string;        // the referenced record's ID in this (source) system
+  '@entity'?: string;   // the entity name the target belongs to — omit only when the entity can be inferred from the field schema or associationSchema
 }
 ```
 
@@ -353,19 +353,30 @@ The engine always resolves records as `(entity, id)` — the entity name is the 
 
 ### Associations
 
-Associations are an explicit index of which fields in `data` are references to other records.
-The full design — rationale, storage layout, JSON-LD example, edge metadata — is in
-[`specs/associations.md`](associations.md).
-
-Short form: a contact with `data.companyId = 'hs_456'` declares the reference explicitly:
+Associations are encoded as inline `Ref` values in `data`. A contact that belongs to a company
+sets `data.companyId` to a `Ref` object rather than a plain string:
 
 ```typescript
-associations: [{ predicate: 'companyId', targetEntity: 'company', targetId: 'hs_456' }]
+// Instead of data.companyId = 'hs_456'
+data.companyId = { '@id': 'hs_456', '@entity': 'company' };
 ```
 
-`(targetEntity, targetId)` is the same composite key the identity map uses everywhere. The
-engine resolves the edge using the identity map. Pending associations (target not yet seen)
-are stored and resolved once the target record arrives.
+The engine finds `Ref` values in `data`, extracts the association graph from them, and remaps
+the `@id` to the target system's ID space before dispatch. Pending associations (target not yet
+seen) are stored and resolved once the target record arrives.
+
+**Entity inference** — the engine infers the target entity in order of precedence:
+1. `@entity` on the `Ref` itself (most explicit)
+2. `{ type: 'ref', entity: 'company' }` in the field's `schema` entry
+3. `associationSchema[predicate].targetEntity`
+4. None of the above → opaque Ref, engine strips it before dispatch
+
+**SDK helpers** — `@opensync/sdk` exports two helpers for connector authors:
+- `makeRefs(data, schema)` — wraps FK fields that match `{ type: 'ref', entity }` entries in the entity schema with `Ref` objects. Use in `read()` to avoid hand-constructing Ref values.
+- `readRefs(data)` — strips `Ref` wrappers recursively, restoring plain string IDs. Use in `insert()` / `update()` before calling external APIs that expect raw IDs.
+
+The full association design — rationale, storage layout, and remapping — is in
+[`specs/associations.md`](associations.md).
 
 ### Composite Primary Keys
 
@@ -394,16 +405,14 @@ The engine constructs typed records for each write operation. All fields are eng
 
 ```typescript
 interface InsertRecord {
-  data: Record<string, unknown | unknown[]>;
-  associations?: Association[];
+  data: Record<string, unknown | unknown[]>;   // FK fields targeting known records carry remapped Ref values
 }
 
 interface UpdateRecord {
   id: string;                                  // ID previously returned by InsertResult.id
-  data: Record<string, unknown | unknown[]>;
+  data: Record<string, unknown | unknown[]>;   // FK fields targeting known records carry remapped Ref values
   version?: string;                            // last-seen version token from ReadRecord.version — used for conditional writes (e.g. If-Match ETag)
   snapshot?: Record<string, unknown>;          // full field snapshot at the time the delta was computed — used for conflict detection without a lookup() round trip
-  associations?: Association[];
 }
 
 // delete() receives IDs directly — no record wrapper needed
@@ -413,12 +422,16 @@ All fields are engine-owned and read-only from the connector's perspective.
 
 The engine, not the connector, is responsible for maintaining `id`. Connectors must not mutate it.
 
-**Writing associations**: when `InsertRecord.associations` or `UpdateRecord.associations` is
-present, the connector is responsible for translating those entries into whatever API primitives
-the target system uses — a separate associations endpoint, an embedded FK field on the main
-record, a join-table upsert, etc. Association entries with predicates the connector does not
-recognise should be silently skipped; they may belong to another entity pair managed by a
-different channel member.
+**Writing associations**: when `InsertRecord.data` or `UpdateRecord.data` contains `Ref` values,
+the connector is responsible for translating them into whatever API primitives the target system
+uses — an embedded FK field, a separate associations endpoint, a join-table upsert, etc.
+Call `readRefs(record.data)` from `@opensync/sdk` to unwrap all `Ref` values to plain ID strings
+before submitting to an API. Ref fields with predicates the connector does not recognise can be
+silently ignored; they may belong to another entity pair managed by a different channel member.
+
+The engine only includes Ref fields for predicates listed in `associationSchema` when dispatching
+to a target entity that declares that schema. Targets without `associationSchema` receive all Ref
+fields unchanged.
 
 ## Write Results
 

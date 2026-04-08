@@ -1,35 +1,52 @@
 # Associations
 
-> **See also**: `connector-sdk.md` — the `ReadRecord.associations` field where this is
-> declared; `identity.md` — how the identity map resolves cross-connector references.
+> **See also**: `connector-sdk.md` — the `Ref` type and `ReadRecord` contract;
+> `identity.md` — how the identity map resolves cross-connector references.
 
 ## What Are Associations?
 
-Associations are an explicit index of which fields in a `ReadRecord.data` blob are references
-to other records, and in which entity they live. They let the engine build a relationship graph
-without parsing every field value looking for IDs it might recognise.
+Associations are FK fields in `ReadRecord.data` whose values are `Ref` objects rather than
+plain strings. A `Ref` carries both the referenced record's ID and the entity it belongs to,
+giving the engine a zero-ambiguity graph without scanning unknown field values.
 
 ```typescript
-interface Association {
-  predicate: string;                    // the field key in data that holds this reference
-                                        // e.g. 'companyId', 'worksFor', 'https://schema.org/worksFor'
-  targetEntity: string;                 // entity name the reference points to (e.g. 'company')
-  targetId: string;                     // the referenced ID in the target entity's namespace
+interface Ref {
+  '@id': string;        // the referenced record's ID in this (source) system
+  '@entity'?: string;   // the entity name — omit when inferable from schema or associationSchema
 }
 ```
 
-## Why the Explicit Index?
+```typescript
+// ReadRecord from a CRM contact
+{
+  id: 'contact-42',
+  data: {
+    name: 'Alice',
+    email: 'alice@example.com',
+    companyId: { '@id': 'hs_456', '@entity': 'company' },  // Ref
+  }
+}
+```
 
-The engine could scan every field in `data` looking for values that match a known external ID.
-But that is fragile — ID formats differ across systems, and the same value could be a reference
-or just a coincidentally matching string. The connector knows its own API: it knows that
-`data.companyId` is always a reference to a `company` record, never plain text. Making that
-explicit once in `associations` means the engine gets a reliable, zero-ambiguity graph.
+The engine extracts Ref values during ingest, resolves the identity map, and injects
+remapped Ref values into `InsertRecord.data` / `UpdateRecord.data` at dispatch time.
+
+## Entity Inference
+
+The engine infers which entity a Ref points to in order of precedence:
+
+1. `@entity` on the Ref itself (most explicit)
+2. `{ type: 'ref', entity: 'company' }` declared for that field in the entity's `schema`
+3. `associationSchema[predicate].targetEntity`
+4. None of the above → opaque Ref; the engine strips it before dispatch (no association created)
+
+Connectors that use consistent ID formats and declare `{ type: 'ref' }` in `schema` can omit
+`@entity` from every Ref and let the engine infer it from the schema — removing the repetition.
 
 ## The Composite Key
 
-`(targetEntity, targetId)` is the same composite key the identity map uses everywhere. The
-engine resolves associations using this pair:
+`(targetEntity, targetId)` — derived from the Ref's `@entity` and `@id` fields — is the
+composite key the identity map uses everywhere:
 
 ```
 identity_map WHERE entity_name = targetEntity AND external_id = targetId
@@ -61,22 +78,20 @@ to look in (`company`).
 
 ## JSON-LD Example
 
-For JSON-LD connectors (e.g. SPARQL endpoints), associations are built from `@id` references
-in the source data. `predicate` becomes the property URI and `targetId` becomes the object's
-`@id` value:
+For SPARQL / RDF connectors, Ref values are built from `@id` IRI bindings in the source data.
+The predicate is the property URI; `@id` is the referenced IRI:
 
 ```typescript
-associations: [
-  {
-    predicate: 'https://schema.org/worksFor',
-    targetEntity: 'organization',
-    targetId: 'https://example.com/org/acme'
+{
+  id: 'https://example.com/person/alice',
+  data: {
+    'https://schema.org/worksFor': { '@id': 'https://example.com/org/acme', '@entity': 'organization' }
   }
-]
+}
 ```
 
-The two representations (relational short-name vs. URI predicate) are two views of the same
-thing — `associations` is the pre-extracted, engine-readable form in both cases.
+This is structurally identical to the relational short-name form — only the naming convention
+for predicate strings differs.
 
 ## Flat Systems
 
@@ -86,10 +101,10 @@ No splitting required at the connector level.
 
 ## Storage in Shadow State
 
-Associations are stored as a special `__assoc__` field in `shadow_state.canonical_data`.
-The value is a stable JSON-serialised sentinel of the sorted association list. This lets the
-diff engine detect association changes using its standard field-delta algorithm — no special
-association diffing logic in the engine is needed.
+The engine extracts Ref values from `data` during ingest and serialises them into a special
+`__assoc__` sentinel field in `shadow_state.canonical_data`. The diff engine detects
+association changes using its standard field-delta algorithm — no special-cased diffing is
+needed.
 
 ## § 5 Record Processing Order
 
@@ -181,17 +196,20 @@ For each resolved association the engine performs these steps at dispatch time:
    without either connector knowing about the other.
 5. **Predicate translation**: look up the predicate through the canonical name in `assocMappings`
    (local → canonical in source, canonical → local in target). Predicates with no mapping → dropped.
-6. **Emit**: pass `{ predicate: <target-local name>, targetEntity: <translated name>, targetId: <target local ID> }` in
-   `UpdateRecord.associations` to the target connector.
+6. **Emit**: inject `{ '@id': <target local ID>, '@entity': <translated entity name> }` as
+   `data[<target-local predicate>]` in `InsertRecord.data` / `UpdateRecord.data` sent to the
+   target connector.
 
 ### § 7.3 FK injection is the connector's responsibility
 
-The remapped `targetId` arrives in `UpdateRecord.associations`. It is the **target connector's
-responsibility** to read it and write the value into whichever field its API expects (e.g.
-inject `targetId` back into `data.companyId` before calling the API). The engine does not
-auto-inject association values into `UpdateRecord.data`. This keeps the engine free of
-connector-specific field naming knowledge and is consistent with the "connectors are dumb
-pipes" invariant — the connector knows its own API shape.
+Remapped Ref values arrive in `InsertRecord.data` / `UpdateRecord.data` as `{ '@id': ..., '@entity': ... }` objects.
+The **connector** is responsible for reading them and writing the `@id` value into whichever
+field or endpoint its API requires (e.g. a separate associations endpoint, a join-table row,
+or directly as an FK field). Use `readRefs(record.data)` from `@opensync/sdk` to unwrap all
+Ref values to plain ID strings before calling an API that does not understand Ref objects.
+The engine does not auto-inject raw ID strings into non-Ref fields. This keeps the engine free
+of connector-specific field naming knowledge and is consistent with the “connectors are dumb
+pipes” invariant.
 
 ### § 7.4 Field mapping must not duplicate associations
 
@@ -259,10 +277,10 @@ See `connector-sdk.md § Association Schema` for full type definition and exampl
 ### § 8.1 Write-Side Filtering
 
 When the engine dispatches to a target entity that declares `associationSchema`, it filters
-`InsertRecord.associations` / `UpdateRecord.associations` to include only predicates present
-in the schema. Predicates absent from the schema are dropped (trace-level log).
+Ref fields in `InsertRecord.data` / `UpdateRecord.data` to include only predicates present
+in the schema. Ref fields for predicates absent from the schema are dropped (trace-level log).
 
-Entities **without** `associationSchema` receive all remapped associations unchanged — the
+Entities **without** `associationSchema` receive all remapped Ref fields unchanged — the
 opt-in nature means no existing connector behaviour changes until `associationSchema` is added.
 
 ### § 8.4 Source-Inexpressible Predicate Preservation
@@ -273,13 +291,13 @@ source's `assocMappings` chain through a canonical predicate to a target-local p
 
 Predicates that the source **cannot** express (e.g. `secondaryCompanyId` on CRM when the
 source is an ERP that only has `orgId → primaryCompanyRef`) must be **preserved** from the
-target's current association state. The engine merges the remapped source associations with
-the existing target shadow associations as follows:
+target's current association state. The engine merges the remapped source Ref fields with
+the existing target shadow Ref fields as follows:
 
 1. Identify target predicates expressible by the source (via `fromMember → canonical → toMember` chain).
-2. Start with the associations last written to the target (from its shadow).
+2. Start with the Ref values last written to the target (from its shadow).
 3. Clear source-owned predicates (the source owns them — it may set or clear).
-4. Apply the source's remapped associations (from `remap`).
+4. Apply the source’s remapped Ref values (from `remap`).
 
 This ensures that, for example, a CRM contact's `secondaryCompanyId` is never dropped when
 ERP (which has no `secondaryRef` mapping) updates the contact's `primaryCompanyId`.
@@ -308,20 +326,23 @@ is advisory (parallel to `FieldDescriptor.required`, which blocks inserts but no
 
 ## Design Rationale
 
-### Why Not Embed in `data`?
+### Why Inline in `data`?
 
-Associations could be encoded in `data` using a convention (e.g. all fields ending in `Id` are
-references). Rejected because:
-1. The engine would need to know the ID-naming convention for every connector
-2. Same-name fields in different APIs mean different things
-3. Multi-valued associations (e.g. an order with multiple `lineItems`) would require extra
-   conventions for arrays
+Associations are encoded as `Ref` values directly in `data[fieldName]` rather than in a
+separate `associations` array. This aligns the connector contract with JSON-LD conventions
+(`@id`, `@entity`) and makes the mapping layer simpler — one field in canonical state can
+hold either a scalar or a Ref, and field-mapping config handles both uniformly.
 
-An explicit declaration has zero ambiguity and zero convention.
+The engine extracts the association graph by scanning `data` for Ref-shaped values, using the
+field schema or `associationSchema` to resolve the entity name when `@entity` is absent.
+This is unambiguous: a Ref is a typed object with a `'@id'` key, structurally distinct from
+any plain string, number, or array, so the engine never confuses a plain value with a
+reference.
 
-### Why a Separate Array, Not Inline in `data`?
+### Why Not a Separate Array?
 
-Keeping `associations` separate from `data` means connectors don't have to modify the raw
-field values at all. The connector just adds the index alongside the unchanged `data`; the
-engine reads both. This separation also allows `data` to remain a faithful copy of the source
-API payload, which preserves the "raw data, no transformation" guarantee.
+The previous design kept a parallel `associations?: Association[]` field on `ReadRecord`,
+`InsertRecord`, and `UpdateRecord`. Separating the index from `data` meant connectors had
+to maintain the two in sync and the engine had to join them at dispatch. Inline Refs
+eliminate that duplication — one field in `data` is both the value and the association
+declaration.

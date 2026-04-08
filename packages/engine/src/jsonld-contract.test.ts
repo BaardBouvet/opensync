@@ -1,0 +1,722 @@
+/**
+ * JSON-LD Connector Contract tests.
+ * Spec: plans/connectors/PLAN_JSONLD_CONNECTOR_CONTRACT.md
+ *
+ * JLC1  Connector yields Ref value → engine extracts association → dispatches remapped Ref
+ * JLC2  Engine write injection: data.companyId = { '@id': remappedId, '@entity': 'company' }
+ * JLC3  { type: 'ref' } schema drives inference rule (rule 2 — schema field)
+ * JLC4  associationSchema drives inference (rule 3 — backward compat path)
+ * JLC5  Neither: Ref-shaped value treated as opaque; no association derived
+ * JLC7  Inexpressible predicates preserved as Ref values in data on update
+ * JLC10 readRefs unwraps Ref to plain string; recursively for nested objects/arrays
+ * JLC11 makeRefs wraps FK fields per schema; null left as-is; non-schema fields unchanged
+ */
+
+import { describe, it, expect } from "bun:test";
+import { SyncEngine } from "./engine.js";
+import { openDb } from "./db/index.js";
+import { readRefs, makeRefs, isRef } from "@opensync/sdk";
+import type {
+  Connector,
+  EntityDefinition,
+  InsertRecord,
+  InsertResult,
+  UpdateRecord,
+  UpdateResult,
+  AssociationDescriptor,
+} from "@opensync/sdk";
+import type { ResolvedConfig, ChannelMember } from "./config/loader.js";
+
+// ─── JLC1 + JLC2: Basic Ref roundtrip ─────────────────────────────────────────
+
+describe("JLC1: connector Ref value → engine extracts association → dispatches remapped Ref", () => {
+  it("read-side Ref is extracted and written as remapped Ref into the target's data", async () => {
+    const receivedInserts: InsertRecord[] = [];
+    const db = openDb(":memory:");
+
+    // Source: contact with companyId as a Ref
+    const srcConnector: Connector = {
+      metadata: { name: "src", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [
+          {
+            name: "contacts",
+            async *read() {
+              yield {
+                records: [
+                  {
+                    id: "c1",
+                    data: {
+                      name: "Alice",
+                      email: "alice@example.com",
+                      companyId: { '@id': 'co1', '@entity': 'companies' },
+                    },
+                  },
+                ],
+                since: "t1",
+              };
+            },
+            async *insert(records) {
+              for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+            },
+            async *update(records) {
+              for await (const r of records) yield { id: r.id };
+            },
+          },
+          {
+            name: "companies",
+            async *read() {
+              yield {
+                records: [{ id: "co1", data: { name: "Acme", domain: "acme.com" } }],
+                since: "t1",
+              };
+            },
+            async *insert(records) {
+              for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+            },
+            async *update(records) {
+              for await (const r of records) yield { id: r.id };
+            },
+          },
+        ];
+      },
+    };
+
+    // Target: receives Alice via insert — captures the insert record
+    const tgtConnector: Connector = {
+      metadata: { name: "tgt", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [
+          {
+            name: "contacts",
+            async *read() {
+              // Seed record so discover() finds shadow_state
+              yield { records: [{ id: "seed", data: { name: "Seed", email: "seed@tgt.example.com" } }], since: "t1" };
+            },
+            async *insert(records): AsyncIterable<InsertResult> {
+              for await (const r of records) {
+                receivedInserts.push(r);
+                yield { id: crypto.randomUUID(), data: r.data };
+              }
+            },
+            async *update(records): AsyncIterable<UpdateResult> {
+              for await (const r of records) yield { id: r.id };
+            },
+          },
+          {
+            name: "companies",
+            async *read() {
+              yield {
+                records: [{ id: "acc1", data: { name: "Acme", domain: "acme.com" } }],
+                since: "t1",
+              };
+            },
+            async *insert(records): AsyncIterable<InsertResult> {
+              for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+            },
+            async *update(records): AsyncIterable<UpdateResult> {
+              for await (const r of records) yield { id: r.id };
+            },
+          },
+        ];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "src", connector: srcConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [
+        {
+          id: "companies",
+          members: [
+            { connectorId: "src", entity: "companies" },
+            { connectorId: "tgt", entity: "companies" },
+          ],
+          identityFields: ["domain"],
+        },
+        {
+          id: "contacts",
+          members: [
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          ],
+          identityFields: ["email"],
+        },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+
+    // Onboard companies first so co1/acc1 are linked
+    for (const id of ["src", "tgt"]) {
+      await engine.ingest("companies", id, { collectOnly: true });
+    }
+    await engine.onboard("companies", await engine.discover("companies"));
+
+    // Onboard contacts — Alice is unique to src
+    for (const id of ["src", "tgt"]) {
+      await engine.ingest("contacts", id, { collectOnly: true });
+    }
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // JLC1: the insert was dispatched to tgt
+    expect(receivedInserts.length).toBeGreaterThan(0);
+    const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
+    expect(alice).toBeDefined();
+
+    // JLC2: companyId in the write payload is a Ref with the remapped target-local ID
+    const companyRef = alice!.data["companyId"];
+    expect(isRef(companyRef)).toBe(true);
+    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
+    expect((companyRef as { '@entity'?: string })['@entity']).toBe("companies");
+  });
+});
+
+// ─── JLC3: { type: 'ref' } schema field drives inference ─────────────────────
+
+describe("JLC3: { type: 'ref' } schema field drives association inference", () => {
+  it("engine derives association from schema when @entity is absent in Ref", async () => {
+    const receivedInserts: InsertRecord[] = [];
+    const db = openDb(":memory:");
+
+    const srcConnector: Connector = {
+      metadata: { name: "src", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          // Schema declares companyId as a ref — engine uses this when @entity is absent
+          schema: {
+            name: { type: "string" as const },
+            email: { type: "string" as const },
+            companyId: { type: { type: "ref" as const, entity: "companies" } },
+          },
+          async *read() {
+            yield {
+              records: [{
+                id: "c1",
+                // No @entity on the Ref — engine falls back to schema
+                data: { name: "Alice", email: "alice@example.com", companyId: { '@id': 'co1' } },
+              }],
+              since: "t1",
+            };
+          },
+          async *insert(records) {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records) {
+            for await (const r of records) yield { id: r.id };
+          },
+        }, {
+          name: "companies",
+          async *read() {
+            yield { records: [{ id: "co1", data: { name: "Acme", domain: "acme.com" } }], since: "t1" };
+          },
+          async *insert(records) {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records) {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const tgtConnector: Connector = {
+      metadata: { name: "tgt", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() {
+            yield { records: [{ id: "seed", data: { name: "Seed", email: "seed@tgt.example.com" } }], since: "t1" };
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) {
+              receivedInserts.push(r);
+              yield { id: crypto.randomUUID(), data: r.data };
+            }
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }, {
+          name: "companies",
+          async *read() {
+            yield { records: [{ id: "acc1", data: { name: "Acme", domain: "acme.com" } }], since: "t1" };
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "src", connector: srcConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [
+        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identityFields: ["domain"] },
+        {
+          id: "contacts",
+          members: [
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          ],
+          identityFields: ["email"],
+        },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+
+    for (const id of ["src", "tgt"]) await engine.ingest("companies", id, { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+    for (const id of ["src", "tgt"]) await engine.ingest("contacts", id, { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
+    expect(alice).toBeDefined();
+
+    // Schema-driven inference: companyId should be a Ref with the remapped ID
+    const companyRef = alice!.data["companyId"];
+    expect(isRef(companyRef)).toBe(true);
+    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
+  });
+});
+
+// ─── JLC4: associationSchema drives inference ─────────────────────────────────
+
+describe("JLC4: associationSchema drives association inference when @entity absent and no schema ref", () => {
+  it("derives association from associationSchema when neither @entity nor schema ref is present", async () => {
+    const receivedInserts: InsertRecord[] = [];
+    const db = openDb(":memory:");
+
+    const srcConnector: Connector = {
+      metadata: { name: "src", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          // No schema ref, but associationSchema declares companyId
+          associationSchema: { companyId: { targetEntity: "companies" } satisfies AssociationDescriptor },
+          async *read() {
+            yield {
+              records: [{
+                id: "c1",
+                // Ref with no @entity — engine uses associationSchema
+                data: { name: "Alice", email: "alice@example.com", companyId: { '@id': 'co1' } },
+              }],
+              since: "t1",
+            };
+          },
+          async *insert(records) {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records) {
+            for await (const r of records) yield { id: r.id };
+          },
+        }, {
+          name: "companies",
+          async *read() {
+            yield { records: [{ id: "co1", data: { name: "Acme", domain: "acme.com" } }], since: "t1" };
+          },
+          async *insert(records) {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records) {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const tgtConnector: Connector = {
+      metadata: { name: "tgt", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() {
+            yield { records: [{ id: "seed", data: { name: "Seed", email: "seed@tgt.example.com" } }], since: "t1" };
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) {
+              receivedInserts.push(r);
+              yield { id: crypto.randomUUID(), data: r.data };
+            }
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }, {
+          name: "companies",
+          async *read() {
+            yield { records: [{ id: "acc1", data: { name: "Acme", domain: "acme.com" } }], since: "t1" };
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "src", connector: srcConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [
+        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identityFields: ["domain"] },
+        {
+          id: "contacts",
+          members: [
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          ],
+          identityFields: ["email"],
+        },
+      ],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+
+    for (const id of ["src", "tgt"]) await engine.ingest("companies", id, { collectOnly: true });
+    await engine.onboard("companies", await engine.discover("companies"));
+    for (const id of ["src", "tgt"]) await engine.ingest("contacts", id, { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
+    expect(alice).toBeDefined();
+
+    const companyRef = alice!.data["companyId"];
+    expect(isRef(companyRef)).toBe(true);
+    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
+  });
+});
+
+// ─── JLC5: opaque Ref — no association derived ────────────────────────────────
+
+describe("JLC5: Ref-shaped value treated as opaque when no inference rule applies", () => {
+  it("does not derive association or remap a Ref with no @entity and no schema/assocSchema", async () => {
+    const receivedInserts: InsertRecord[] = [];
+    const db = openDb(":memory:");
+
+    const srcConnector: Connector = {
+      metadata: { name: "src", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          // No schema, no associationSchema — opaque Ref
+          async *read() {
+            yield {
+              records: [{
+                id: "c1",
+                data: {
+                  name: "Alice",
+                  email: "alice@example.com",
+                  // Ref with no @entity and no schema/assocSchema → opaque
+                  externalRef: { '@id': 'some-external-id' },
+                },
+              }],
+              since: "t1",
+            };
+          },
+          async *insert(records) {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records) {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const tgtConnector: Connector = {
+      metadata: { name: "tgt", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() {
+            yield { records: [{ id: "opaque-seed", data: { name: "Seed", email: "seed@tgt.example.com" } }], since: "t1" };
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) {
+              receivedInserts.push(r);
+              yield { id: crypto.randomUUID(), data: r.data };
+            }
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "src", connector: srcConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [{
+        id: "contacts",
+        members: [
+          { connectorId: "src", entity: "contacts" },
+          { connectorId: "tgt", entity: "contacts" },
+        ],
+        identityFields: ["email"],
+      }],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+    for (const id of ["src", "tgt"]) await engine.ingest("contacts", id, { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Alice should have been inserted into tgt
+    const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
+    expect(alice).toBeDefined();
+
+    // externalRef is opaque — it is passed through as-is (no association remapping)
+    // It should be stripped from the write payload (Ref values are stripped before inject)
+    // Actually: since externalRef has no @entity and no assocMappings, it is opaque and
+    // stripped from the outboundData (Refs without a resolved association are not injected).
+    // The canonical MAY store it, but since assocMappings is absent, no assocSentinel is stored.
+    // The engine strips Refs from localData before dispatch — externalRef won't reach tgt.
+    expect(alice!.data["externalRef"]).toBeUndefined();
+  });
+});
+
+// ─── JLC7: inexpressible predicates preserved ─────────────────────────────────
+
+describe("JLC7: inexpressible predicates preserved as Ref values in data on update", () => {
+  it("target-local Ref not expressible by source is preserved in the update payload", async () => {
+    const db = openDb(":memory:");
+    let crmCallN = 0;
+    let erpCallN = 0;
+    const crmUpdates: UpdateRecord[] = [];
+
+    const members: ChannelMember[] = [
+      {
+        connectorId: "crm",
+        entity: "contacts",
+        assocMappings: [
+          { source: "primaryCompanyId", target: "primaryRef" },
+          { source: "secondaryCompanyId", target: "secondaryRef" },
+        ],
+      },
+      {
+        connectorId: "erp",
+        entity: "employees",
+        assocMappings: [
+          { source: "orgId", target: "primaryRef" },
+          // No secondaryRef mapping: ERP cannot express secondaryCompanyId
+        ],
+      },
+    ];
+
+    const crmConnector: Connector = {
+      metadata: { name: "crm", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() {
+            crmCallN++;
+            if (crmCallN === 1) {
+              yield {
+                records: [{
+                  id: "crm-alice",
+                  data: {
+                    email: "alice@example.com",
+                    name: "Alice",
+                    primaryCompanyId:   { '@id': '', '@entity': 'contacts' },
+                    secondaryCompanyId: { '@id': '', '@entity': 'contacts' },
+                  },
+                }],
+                since: "t1",
+              };
+            } else {
+              yield { records: [], since: "t2" };
+            }
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) {
+              crmUpdates.push(r);
+              yield { id: r.id };
+            }
+          },
+        }];
+      },
+    };
+
+    const erpConnector: Connector = {
+      metadata: { name: "erp", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "employees",
+          async *read() {
+            erpCallN++;
+            if (erpCallN === 1) {
+              yield {
+                records: [{
+                  id: "erp-alice",
+                  data: { email: "alice@example.com", name: "Alice", orgId: { '@id': '', '@entity': 'employees' } },
+                }],
+                since: "t1",
+              };
+            } else if (erpCallN === 2) {
+              // Field change → dispatch to CRM
+              yield {
+                records: [{
+                  id: "erp-alice",
+                  data: { email: "alice@example.com", name: "Alice Updated", orgId: { '@id': '', '@entity': 'employees' } },
+                }],
+                since: "t2",
+              };
+            } else {
+              yield { records: [], since: "t3" };
+            }
+          },
+          async *insert(records): AsyncIterable<InsertResult> {
+            for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
+          },
+          async *update(records): AsyncIterable<UpdateResult> {
+            for await (const r of records) yield { id: r.id };
+          },
+        }];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [
+        { id: "crm", connector: crmConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "erp", connector: erpConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels: [{ id: "contacts", members, identityFields: ["email"] }],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+
+    await engine.ingest("contacts", "crm", { collectOnly: true });
+    await engine.ingest("contacts", "erp", { collectOnly: true });
+    await engine.onboard("contacts", await engine.discover("contacts"));
+
+    // Second ERP poll: field change → CRM update
+    await engine.ingest("contacts", "erp");
+
+    expect(crmUpdates.length).toBe(1);
+    const update = crmUpdates[0]!;
+
+    // JLC7: secondaryCompanyId is preserved as a Ref in the update data
+    expect(update.data["primaryCompanyId"]).toBeDefined();
+    expect(update.data["secondaryCompanyId"]).toBeDefined();
+  });
+});
+
+// ─── JLC10: readRefs unwraps Ref values ───────────────────────────────────────
+
+describe("JLC10: readRefs unwraps Ref to plain string; recursively for nested structures", () => {
+  it("unwraps top-level Ref to its @id string", () => {
+    const data = { name: "Alice", companyId: { '@id': 'co1', '@entity': 'company' } };
+    const result = readRefs(data);
+    expect(result["companyId"]).toBe("co1");
+    expect(result["name"]).toBe("Alice");
+  });
+
+  it("passes through non-Ref values unchanged", () => {
+    const data = { count: 42, active: true, meta: { key: "val" } };
+    const result = readRefs(data);
+    expect(result["count"]).toBe(42);
+    expect(result["active"]).toBe(true);
+    expect(result["meta"]).toEqual({ key: "val" });
+  });
+
+  it("recursively unwraps Refs inside nested objects", () => {
+    const data = {
+      contact: {
+        name: "Alice",
+        companyId: { '@id': 'co1', '@entity': 'company' },
+      },
+    };
+    const result = readRefs(data) as { contact: Record<string, unknown> };
+    expect(result.contact["companyId"]).toBe("co1");
+  });
+
+  it("recursively unwraps Refs inside arrays", () => {
+    const data = {
+      tags: [
+        { '@id': 'tag1', '@entity': 'tags' },
+        { '@id': 'tag2', '@entity': 'tags' },
+        "plain",
+      ],
+    };
+    const result = readRefs(data) as { tags: unknown[] };
+    expect(result.tags[0]).toBe("tag1");
+    expect(result.tags[1]).toBe("tag2");
+    expect(result.tags[2]).toBe("plain");
+  });
+});
+
+// ─── JLC11: makeRefs wraps FK fields per schema ───────────────────────────────
+
+describe("JLC11: makeRefs wraps FK fields per schema", () => {
+  const schema = {
+    name:      { type: "string" as const },
+    companyId: { type: { type: "ref" as const, entity: "company" } },
+    tagId:     { type: { type: "ref" as const, entity: "tag" } },
+  };
+
+  it("wraps a declared ref field with Ref object", () => {
+    const data = { name: "Alice", companyId: "co1" };
+    const result = makeRefs(data, schema);
+    expect(isRef(result["companyId"])).toBe(true);
+    expect((result["companyId"] as { '@id': string })['@id']).toBe("co1");
+    expect((result["companyId"] as { '@entity'?: string })['@entity']).toBe("company");
+  });
+
+  it("non-schema fields pass through unchanged", () => {
+    const data = { name: "Alice", companyId: "co1", extra: 42 };
+    const result = makeRefs(data, schema);
+    expect(result["name"]).toBe("Alice");
+    expect(result["extra"]).toBe(42);
+  });
+
+  it("null/undefined ref values are left as-is (no Ref emitted)", () => {
+    const data = { name: "Alice", companyId: null };
+    const result = makeRefs(data, schema);
+    expect(result["companyId"]).toBeNull();
+    expect(isRef(result["companyId"])).toBe(false);
+  });
+
+  it("absent ref field is not added", () => {
+    const data = { name: "Alice" };
+    const result = makeRefs(data, schema);
+    expect("companyId" in result).toBe(false);
+  });
+
+  it("already-wrapped Ref fields are not double-wrapped", () => {
+    const data = { name: "Alice", companyId: { '@id': 'co1', '@entity': 'company' } };
+    const result = makeRefs(data, schema);
+    // isRef should still be true, and @id should be unchanged
+    expect(isRef(result["companyId"])).toBe(true);
+    expect((result["companyId"] as { '@id': string })['@id']).toBe("co1");
+  });
+});
