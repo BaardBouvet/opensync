@@ -18,7 +18,7 @@ import type {
   Association,
   Ref,
 } from "@opensync/sdk";
-import { isRef } from "@opensync/sdk";
+
 
 // ─── File format ─────────────────────────────────────────────────────────────
 // Each JSON file is an array of objects with top-level envelope fields:
@@ -268,32 +268,28 @@ function makeRecordEntity(
         const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
         const wm = nextWatermark(existing, watermarkField);
 
-        // Extract Ref values from data and serialize back to file association format.
+        // Separate FK fields (from record.associations) from plain scalar fields.
+        // FK predicate names appear in both record.associations and record.data;
+        // we store them in the file's associations section, not in _data.
+        const insertAssocs = record.associations ?? [];
+        const fkPredicates = new Set(insertAssocs.map((a) => a.predicate));
         const plainData: Record<string, unknown> = {};
-        const fileAssocs: Association[] = [];
         for (const [k, v] of Object.entries(record.data)) {
-          if (isRef(v)) {
-            const ref = v as Ref;
-            if (ref['@entity']) {
-              fileAssocs.push({ predicate: k, targetEntity: ref['@entity'], targetId: ref['@id'] });
-            }
-          } else {
-            plainData[k] = v;
-          }
+          if (!fkPredicates.has(k)) plainData[k] = v;
         }
 
         const newRecord: FileRecord = {
           [idField]: id,
           [dataField]: plainData,
           [watermarkField]: wm,
-          ...(fileAssocs.length > 0 ? { [associationsField]: fileAssocs } : {}),
+          ...(insertAssocs.length > 0 ? { [associationsField]: insertAssocs } : {}),
         };
         writeFile(entityFilePath, [...existing, newRecord]);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.4
         if (auditLog) {
           appendLogEntry(logFilePath(entityFilePath), {
             op: "insert", id, data: plainData,
-            ...(fileAssocs.length > 0 ? { associations: fileAssocs } : {}),
+            ...(insertAssocs.length > 0 ? { associations: insertAssocs } : {}),
             updated: wm,
             at: new Date().toISOString(),
           });
@@ -314,25 +310,23 @@ function makeRecordEntity(
         const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
         const prevAssoc = existing[idx]![associationsField]; // capture before overwrite
 
-        // Separate Ref values from scalar data in the incoming update payload.
+        // Use engine-provided association metadata to identify and route FK fields.
+        // record.associations includes both remapped source associations and target-local
+        // "inexpressible" predicates preserved by the engine from the target shadow.
+        const incomingAssocs = record.associations ?? [];
+        const fkPredicates = new Set(incomingAssocs.map((a) => a.predicate));
+
         const incomingPlain: Record<string, unknown> = {};
-        const incomingAssocs: Association[] = [];
         for (const [k, v] of Object.entries(record.data)) {
-          if (isRef(v)) {
-            const ref = v as Ref;
-            if (ref['@entity']) {
-              incomingAssocs.push({ predicate: k, targetEntity: ref['@entity'], targetId: ref['@id'] });
-            }
-          } else {
-            incomingPlain[k] = v;
-          }
+          if (!fkPredicates.has(k)) incomingPlain[k] = v;
         }
 
         const merged = { ...prev, ...incomingPlain };
-        // Merge associations: keep existing ones not overridden, add/replace incoming ones.
-        const existingAssocList = Array.isArray(prevAssoc) ? (prevAssoc as Association[]) : [];
+        // Merge associations: incoming (from engine) take precedence; preserve prior entries
+        // not overridden by the engine (e.g. associations the current source cannot express).
+        const prevAssocList = Array.isArray(prevAssoc) ? (prevAssoc as Association[]) : [];
         const mergedAssocs = [
-          ...existingAssocList.filter((a) => !incomingAssocs.some((ia) => ia.predicate === a.predicate)),
+          ...prevAssocList.filter((a) => !incomingAssocs.some((ia) => ia.predicate === a.predicate)),
           ...incomingAssocs,
         ];
         const updated: FileRecord = {
@@ -345,7 +339,6 @@ function makeRecordEntity(
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.5
         if (auditLog) {
-          // Compute a field-level diff: only emit keys that actually changed.
           const changedKeys = Object.keys(incomingPlain).filter(
             (k) => JSON.stringify(prev[k]) !== JSON.stringify(incomingPlain[k])
           );
@@ -355,7 +348,6 @@ function makeRecordEntity(
             before[k] = prev[k];
             after[k] = incomingPlain[k];
           }
-          // Include associations in the diff when they changed.
           if (incomingAssocs.length > 0) {
             if (JSON.stringify(prevAssoc) !== JSON.stringify(mergedAssocs)) {
               before["associations"] = prevAssoc;

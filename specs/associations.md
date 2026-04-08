@@ -29,7 +29,9 @@ interface Ref {
 ```
 
 The engine extracts Ref values during ingest, resolves the identity map, and injects
-remapped Ref values into `InsertRecord.data` / `UpdateRecord.data` at dispatch time.
+remapped plain ID strings into `InsertRecord.data` / `UpdateRecord.data` at dispatch time.
+Full association metadata is also provided in `InsertRecord.associations` /
+`UpdateRecord.associations` for connectors that need to persist FK data in a separate format.
 
 ## Entity Inference
 
@@ -197,20 +199,21 @@ For each resolved association the engine performs these steps at dispatch time:
    without either connector knowing about the other.
 5. **Predicate translation**: look up the predicate through the canonical name in `assocMappings`
    (local → canonical in source, canonical → local in target). Predicates with no mapping → dropped.
-6. **Emit**: inject `{ '@id': <target local ID>, '@entity': <translated entity name> }` as
-   `data[<target-local predicate>]` in `InsertRecord.data` / `UpdateRecord.data` sent to the
-   target connector.
+6. **Emit**: write `assoc.targetId` as a plain string to `data[<target-local predicate>]` in
+   `InsertRecord.data` / `UpdateRecord.data` sent to the target connector. The full association
+   metadata is also present in `InsertRecord.associations` / `UpdateRecord.associations` for
+   connectors that need to persist FK data in a separate format.
 
-### § 7.3 FK injection is the connector's responsibility
+### § 7.3 FK routing is the connector's responsibility
 
-Remapped Ref values arrive in `InsertRecord.data` / `UpdateRecord.data` as `{ '@id': ..., '@entity': ... }` objects.
-The **connector** is responsible for reading them and writing the `@id` value into whichever
-field or endpoint its API requires (e.g. a separate associations endpoint, a join-table row,
-or directly as an FK field). Use `readRefs(record.data)` from `@opensync/sdk` to unwrap all
-Ref values to plain ID strings before calling an API that does not understand Ref objects.
-The engine does not auto-inject raw ID strings into non-Ref fields. This keeps the engine free
-of connector-specific field naming knowledge and is consistent with the “connectors are dumb
-pipes” invariant.
+Remapped association IDs arrive in `InsertRecord.data` / `UpdateRecord.data` as **plain strings**.
+The **connector** is responsible for routing them to whichever field or endpoint its API requires
+(e.g. a separate associations endpoint, a join-table row, or directly as an FK column).
+
+Connectors that need to know which fields are FK predicates (e.g. to route them to a relationship
+table) should use `record.associations` — the `Association[]` metadata provided by the engine
+alongside the plain strings. This removes the need for connectors to introspect value types or
+maintain compile-time lists of FK field names.
 
 ### § 7.4 Field mapping must not duplicate associations
 

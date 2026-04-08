@@ -800,7 +800,7 @@ export class SyncEngine {
 
         const insertData1 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData1 }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData1, associations: assocToInsert }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -905,7 +905,7 @@ export class SyncEngine {
 
         const insertData2 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData2 }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData2, associations: assocToInsert }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -1396,8 +1396,9 @@ export class SyncEngine {
     if (!associations?.length) return data;
     const result = { ...data };
     for (const assoc of associations) {
-      const ref: Ref = { '@id': assoc.targetId, '@entity': assoc.targetEntity };
-      result[assoc.predicate] = ref;
+      // Inject the remapped target-local ID as a plain string.
+      // Spec: specs/connector-sdk.md § Write Records — FK fields carry remapped plain ID strings.
+      result[assoc.predicate] = assoc.targetId;
     }
     return result;
   }
@@ -1643,7 +1644,7 @@ export class SyncEngine {
         let newId: string | undefined;
         let err: string | undefined;
         for await (const result of targetEntityDef.insert!(
-          (async function* (self: SyncEngine): AsyncIterable<InsertRecord> { yield { data: self._injectRefsIntoData(localData, filteredAssociations) }; })(this),
+          (async function* (self: SyncEngine): AsyncIterable<InsertRecord> { yield { data: self._injectRefsIntoData(localData, filteredAssociations), associations: filteredAssociations ?? undefined }; })(this),
           targetWired.ctx,
         )) { if (result.error) err = result.error; else newId = result.id; }
         if (err) return { type: "error", error: err };
@@ -1653,7 +1654,7 @@ export class SyncEngine {
         let notFound = false;
         for await (const result of targetEntityDef.update!(
           (async function* (self: SyncEngine): AsyncIterable<UpdateRecord> {
-            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
+            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), associations: filteredAssociations ?? undefined, version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
           })(this),
           targetWired.ctx,
         )) {

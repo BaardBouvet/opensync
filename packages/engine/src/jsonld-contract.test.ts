@@ -2,20 +2,18 @@
  * JSON-LD Connector Contract tests.
  * Spec: plans/connectors/PLAN_JSONLD_CONNECTOR_CONTRACT.md
  *
- * JLC1  Connector yields Ref value → engine extracts association → dispatches remapped Ref
- * JLC2  Engine write injection: data.companyId = { '@id': remappedId, '@entity': 'company' }
+ * JLC1  Connector yields Ref value → engine extracts association → dispatches remapped plain string
+ * JLC2  Engine write injection: data.companyId = remappedId as plain string
  * JLC3  { type: 'ref' } schema drives inference rule (rule 2 — schema field)
  * JLC4  associationSchema drives inference (rule 3 — backward compat path)
  * JLC5  Neither: Ref-shaped value treated as opaque; no association derived
- * JLC7  Inexpressible predicates preserved as Ref values in data on update
- * JLC10 readRefs unwraps Ref to plain string; recursively for nested objects/arrays
- * JLC11 makeRefs wraps FK fields per schema; null left as-is; non-schema fields unchanged
+ * JLC7  Inexpressible predicates preserved as plain string values in data on update
  */
 
 import { describe, it, expect } from "bun:test";
 import { SyncEngine } from "./engine.js";
 import { openDb } from "./db/index.js";
-import { readRefs, makeRefs, isRef } from "@opensync/sdk";
+import { isRef } from "@opensync/sdk";
 import type {
   Connector,
   EntityDefinition,
@@ -168,11 +166,8 @@ describe("JLC1: connector Ref value → engine extracts association → dispatch
     const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
     expect(alice).toBeDefined();
 
-    // JLC2: companyId in the write payload is a Ref with the remapped target-local ID
-    const companyRef = alice!.data["companyId"];
-    expect(isRef(companyRef)).toBe(true);
-    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
-    expect((companyRef as { '@entity'?: string })['@entity']).toBe("companies");
+    // JLC2: companyId in the write payload is the remapped target-local ID as a plain string
+    expect(alice!.data["companyId"]).toBe("acc1");
   });
 });
 
@@ -287,10 +282,8 @@ describe("JLC3: { type: 'ref' } schema field drives association inference", () =
     const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
     expect(alice).toBeDefined();
 
-    // Schema-driven inference: companyId should be a Ref with the remapped ID
-    const companyRef = alice!.data["companyId"];
-    expect(isRef(companyRef)).toBe(true);
-    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
+    // Schema-driven inference: companyId should be the remapped ID as a plain string
+    expect(alice!.data["companyId"]).toBe("acc1");
   });
 });
 
@@ -401,9 +394,7 @@ describe("JLC4: associationSchema drives association inference when @entity abse
     const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
     expect(alice).toBeDefined();
 
-    const companyRef = alice!.data["companyId"];
-    expect(isRef(companyRef)).toBe(true);
-    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
+    expect(alice!.data["companyId"]).toBe("acc1");
   });
 });
 
@@ -625,99 +616,9 @@ describe("JLC7: inexpressible predicates preserved as Ref values in data on upda
     expect(crmUpdates.length).toBe(1);
     const update = crmUpdates[0]!;
 
-    // JLC7: secondaryCompanyId is preserved as a Ref in the update data
+    // JLC7: secondaryCompanyId is preserved as a plain string value in the update data
     expect(update.data["primaryCompanyId"]).toBeDefined();
     expect(update.data["secondaryCompanyId"]).toBeDefined();
-  });
-});
-
-// ─── JLC10: readRefs unwraps Ref values ───────────────────────────────────────
-
-describe("JLC10: readRefs unwraps Ref to plain string; recursively for nested structures", () => {
-  it("unwraps top-level Ref to its @id string", () => {
-    const data = { name: "Alice", companyId: { '@id': 'co1', '@entity': 'company' } };
-    const result = readRefs(data);
-    expect(result["companyId"]).toBe("co1");
-    expect(result["name"]).toBe("Alice");
-  });
-
-  it("passes through non-Ref values unchanged", () => {
-    const data = { count: 42, active: true, meta: { key: "val" } };
-    const result = readRefs(data);
-    expect(result["count"]).toBe(42);
-    expect(result["active"]).toBe(true);
-    expect(result["meta"]).toEqual({ key: "val" });
-  });
-
-  it("recursively unwraps Refs inside nested objects", () => {
-    const data = {
-      contact: {
-        name: "Alice",
-        companyId: { '@id': 'co1', '@entity': 'company' },
-      },
-    };
-    const result = readRefs(data) as { contact: Record<string, unknown> };
-    expect(result.contact["companyId"]).toBe("co1");
-  });
-
-  it("recursively unwraps Refs inside arrays", () => {
-    const data = {
-      tags: [
-        { '@id': 'tag1', '@entity': 'tags' },
-        { '@id': 'tag2', '@entity': 'tags' },
-        "plain",
-      ],
-    };
-    const result = readRefs(data) as { tags: unknown[] };
-    expect(result.tags[0]).toBe("tag1");
-    expect(result.tags[1]).toBe("tag2");
-    expect(result.tags[2]).toBe("plain");
-  });
-});
-
-// ─── JLC11: makeRefs wraps FK fields per schema ───────────────────────────────
-
-describe("JLC11: makeRefs wraps FK fields per schema", () => {
-  const schema = {
-    name:      { type: "string" as const },
-    companyId: { type: "string" as const, entity: "company" },
-    tagId:     { type: "string" as const, entity: "tag" },
-  };
-
-  it("wraps a declared ref field with Ref object", () => {
-    const data = { name: "Alice", companyId: "co1" };
-    const result = makeRefs(data, schema);
-    expect(isRef(result["companyId"])).toBe(true);
-    expect((result["companyId"] as { '@id': string })['@id']).toBe("co1");
-    expect((result["companyId"] as { '@entity'?: string })['@entity']).toBe("company");
-  });
-
-  it("non-schema fields pass through unchanged", () => {
-    const data = { name: "Alice", companyId: "co1", extra: 42 };
-    const result = makeRefs(data, schema);
-    expect(result["name"]).toBe("Alice");
-    expect(result["extra"]).toBe(42);
-  });
-
-  it("null/undefined ref values are left as-is (no Ref emitted)", () => {
-    const data = { name: "Alice", companyId: null };
-    const result = makeRefs(data, schema);
-    expect(result["companyId"]).toBeNull();
-    expect(isRef(result["companyId"])).toBe(false);
-  });
-
-  it("absent ref field is not added", () => {
-    const data = { name: "Alice" };
-    const result = makeRefs(data, schema);
-    expect("companyId" in result).toBe(false);
-  });
-
-  it("already-wrapped Ref fields are not double-wrapped", () => {
-    const data = { name: "Alice", companyId: { '@id': 'co1', '@entity': 'company' } };
-    const result = makeRefs(data, schema);
-    // isRef should still be true, and @id should be unchanged
-    expect(isRef(result["companyId"])).toBe(true);
-    expect((result["companyId"] as { '@id': string })['@id']).toBe("co1");
   });
 });
 
@@ -828,11 +729,8 @@ describe("ASYN1: plain string FK field + schema { type: 'ref' } → engine synth
     const alice = receivedInserts.find((r) => r.data["email"] === "alice@example.com");
     expect(alice).toBeDefined();
 
-    // companyId in the write payload must be a remapped Ref — synthesized from the plain string
-    const companyRef = alice!.data["companyId"];
-    expect(isRef(companyRef)).toBe(true);
-    expect((companyRef as { '@id': string })['@id']).toBe("acc1");
-    expect((companyRef as { '@entity'?: string })['@entity']).toBe("companies");
+    // companyId in the write payload must be the remapped target-local ID as a plain string
+    expect(alice!.data["companyId"]).toBe("acc1");
   });
 });
 

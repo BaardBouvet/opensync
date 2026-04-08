@@ -176,7 +176,7 @@ associationSchema: {
 
 **Engine behaviour:**
 
-1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only includes `Ref` fields for predicates listed in the schema in `InsertRecord.data` / `UpdateRecord.data`. Ref fields for predicates not in the schema are dropped silently (trace-level log). Entities without `associationSchema` receive all Ref fields unchanged.
+1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only passes associations whose predicates are listed in the schema. Predicates not in the schema are dropped silently. Entities without `associationSchema` receive all association metadata unchanged.
 
 2. **Pre-flight warning (§ A)** — At channel setup, if a declared `targetEntity` is not registered as a channel member, the engine logs a warning. Dispatch still proceeds — the warning is informational.
 
@@ -384,9 +384,7 @@ yield { records: [{ id: r.id, data: r }] };
 4. `associationSchema[predicate].targetEntity`
 5. None of the above → opaque, no association derived
 
-**SDK helpers** — `@opensync/sdk` exports two helpers for connectors that need Ref objects:
-- `makeRefs(data, schema)` — wraps FK fields that have `entity` declared in the schema with `Ref` objects. Useful when the connector needs to inspect or forward Refs in write logic.
-- `readRefs(data)` — strips `Ref` wrappers recursively, restoring plain string IDs. Use in `insert()` / `update()` before submitting to APIs that expect raw ID strings.
+**SDK helpers** — `@opensync/sdk` exports `isRef(value)` to test whether a value is a `Ref` object. This is useful in `read()` implementations that explicitly construct Refs (e.g. RDF/SPARQL connectors that need to annotate IRI fields before the engine auto-synthesis step).
 
 The full association design — rationale, storage layout, and remapping — is in
 [`specs/associations.md`](associations.md).
@@ -418,12 +416,14 @@ The engine constructs typed records for each write operation. All fields are eng
 
 ```typescript
 interface InsertRecord {
-  data: Record<string, unknown | unknown[]>;   // FK fields targeting known records carry remapped Ref values
+  data: Record<string, unknown | unknown[]>;   // FK fields carry remapped plain ID strings
+  associations?: Association[];               // full FK metadata (predicate, targetEntity, targetId); engine-provided
 }
 
 interface UpdateRecord {
   id: string;                                  // ID previously returned by InsertResult.id
-  data: Record<string, unknown | unknown[]>;   // FK fields targeting known records carry remapped Ref values
+  data: Record<string, unknown | unknown[]>;   // FK fields carry remapped plain ID strings
+  associations?: Association[];               // full FK metadata; includes inexpressible target-local predicates
   version?: string;                            // last-seen version token from ReadRecord.version — used for conditional writes (e.g. If-Match ETag)
   snapshot?: Record<string, unknown>;          // full field snapshot at the time the delta was computed — used for conflict detection without a lookup() round trip
 }
@@ -435,16 +435,19 @@ All fields are engine-owned and read-only from the connector's perspective.
 
 The engine, not the connector, is responsible for maintaining `id`. Connectors must not mutate it.
 
-**Writing associations**: when `InsertRecord.data` or `UpdateRecord.data` contains `Ref` values,
-the connector is responsible for translating them into whatever API primitives the target system
-uses — an embedded FK field, a separate associations endpoint, a join-table upsert, etc.
-Call `readRefs(record.data)` from `@opensync/sdk` to unwrap all `Ref` values to plain ID strings
-before submitting to an API. Ref fields with predicates the connector does not recognise can be
-silently ignored; they may belong to another entity pair managed by a different channel member.
+**Writing associations**: FK reference fields appear as **plain ID strings** in `data`. Most REST
+API connectors can pass `record.data` directly to the API. Connectors that need to persist FK
+data in a separate format (a relationship table, an associations file section, a SPARQL triple
+pattern) should use `record.associations` which provides full metadata: `predicate`, `targetEntity`,
+and `targetId`. The `associations` array includes both remapped source associations and any
+"inexpressible" target-local associations the source cannot express — ensuring they are not lost
+on update.
 
-The engine only includes Ref fields for predicates listed in `associationSchema` when dispatching
-to a target entity that declares that schema. Targets without `associationSchema` receive all Ref
-fields unchanged.
+Association predicates that the connector does not recognise can be silently ignored.
+
+The engine only passes associations whose predicates are listed in `associationSchema` when
+dispatching to a target entity that declares that schema. Targets without `associationSchema`
+receive all association metadata unchanged.
 
 ## Write Results
 

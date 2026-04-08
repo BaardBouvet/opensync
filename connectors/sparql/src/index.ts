@@ -43,7 +43,7 @@ import type {
   DeleteResult,
   Ref,
 } from "@opensync/sdk";
-import { AuthError, ConnectorError, ValidationError, isRef } from "@opensync/sdk";
+import { AuthError, ConnectorError, ValidationError } from "@opensync/sdk";
 
 // ─── RDF namespace constants ──────────────────────────────────────────────────
 
@@ -246,10 +246,9 @@ function makeRdfEntity(opts: {
       `<${iri}> ${modPred} "${escapeLiteral(now)}"^^<${XSD}dateTime> .`,
     ];
     for (const [field, def] of propEntries) {
-      // For Ref-valued fields (FK references), unwrap the IRI before serialising.
+      // FK fields arrive as plain strings from the engine (remapped target IRI).
       const rawValue = data[field];
-      const value = isRef(rawValue) ? (rawValue as Ref)['@id'] : rawValue;
-      const term = toRdfTerm(value);
+      const term = toRdfTerm(rawValue);
       if (term !== null) lines.push(`<${iri}> <${def.predicate}> ${term} .`);
     }
     return lines;

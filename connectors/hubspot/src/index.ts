@@ -12,7 +12,7 @@ import type {
   OAuthConfig,
   Ref,
 } from "@opensync/sdk";
-import { ConnectorError, RateLimitError, isRef } from "@opensync/sdk";
+import { ConnectorError, RateLimitError } from "@opensync/sdk";
 
 const BASE = "https://api.hubspot.com";
 
@@ -292,8 +292,9 @@ async function fetchContactCompanyRefMap(
 
 /**
  * Write contact→company associations extracted from Ref values in a write payload.
- * Reads predicate → Ref from `data`; calls the v4 Associations batch create endpoint.
- * Spec: specs/connector-sdk.md § Write Contract
+ * Write contact→company associations from plain string FK values in a write payload.
+ * Reads predicate → ID string from `data`; calls the v4 Associations batch create endpoint.
+ * Spec: specs/connector-sdk.md § Write Records
  */
 async function writeContactCompanyRefs(
   pairs: Array<{ contactId: string; data: Record<string, unknown> }>,
@@ -307,10 +308,8 @@ async function writeContactCompanyRefs(
   const allInputs: AssocInput[] = [];
   for (const { contactId, data } of pairs) {
     for (const [predicate, typeId] of Object.entries(PREDICATE_TO_COMPANY_TYPE_ID)) {
-      const value = data[predicate];
-      if (!isRef(value)) continue;
-      const companyId = (value as Ref)['@id'];
-      if (!companyId) continue;
+      const companyId = data[predicate];
+      if (typeof companyId !== 'string' || !companyId) continue;
       allInputs.push({
         from: { id: contactId },
         to: { id: companyId },
@@ -415,11 +414,11 @@ const contactEntity: EntityDefinition = {
     ctx: ConnectorContext
   ): AsyncIterable<InsertResult> {
     for await (const batch of chunk(records, 100)) {
-      // Separate scalar properties from Ref-valued FK fields.
+      // Separate FK fields (routed to associations API) from scalar properties.
       const inputs = batch.map((r) => {
         const props: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(r.data)) {
-          if (!isRef(v)) props[k] = v;
+          if (!Object.prototype.hasOwnProperty.call(PREDICATE_TO_COMPANY_TYPE_ID, k)) props[k] = v;
         }
         return { properties: props };
       });
@@ -440,7 +439,7 @@ const contactEntity: EntityDefinition = {
       const assocPairs = body.results
         .map((item, i) => ({ contactId: item.id, data: batch[i]!.data as Record<string, unknown> }))
         .filter(({ data }) =>
-          Object.keys(PREDICATE_TO_COMPANY_TYPE_ID).some((p) => isRef(data[p]))
+          Object.keys(PREDICATE_TO_COMPANY_TYPE_ID).some((p) => typeof data[p] === 'string' && data[p])
         );
       if (assocPairs.length > 0) await writeContactCompanyRefs(assocPairs, ctx);
 
@@ -455,11 +454,11 @@ const contactEntity: EntityDefinition = {
     ctx: ConnectorContext
   ): AsyncIterable<UpdateResult> {
     for await (const batch of chunk(records, 100)) {
-      // Separate scalar properties from Ref-valued FK fields.
+      // Separate FK fields (routed to associations API) from scalar properties.
       const inputs = batch.map((r) => {
         const props: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(r.data)) {
-          if (!isRef(v)) props[k] = v;
+          if (!Object.prototype.hasOwnProperty.call(PREDICATE_TO_COMPANY_TYPE_ID, k)) props[k] = v;
         }
         return { id: r.id, properties: props };
       });
@@ -475,10 +474,10 @@ const contactEntity: EntityDefinition = {
         results: Array<{ id: string; properties: Record<string, unknown> }>;
       };
 
-      // Write company associations using Ref values from the update payload.
+      // Write company associations for records that have FK fields set.
       const assocPairs = batch
         .filter((r) =>
-          Object.keys(PREDICATE_TO_COMPANY_TYPE_ID).some((p) => isRef((r.data as Record<string, unknown>)[p]))
+          Object.keys(PREDICATE_TO_COMPANY_TYPE_ID).some((p) => typeof (r.data as Record<string, unknown>)[p] === 'string' && (r.data as Record<string, unknown>)[p])
         )
         .map((r) => ({ contactId: r.id, data: r.data as Record<string, unknown> }));
       if (assocPairs.length > 0) await writeContactCompanyRefs(assocPairs, ctx);

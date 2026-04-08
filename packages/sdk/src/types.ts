@@ -160,9 +160,15 @@ export interface ReadBatch {
 
 /** Payload for creating a new record in the target system. */
 export interface InsertRecord {
-  /** Field values to write. FK reference fields carry remapped `Ref` values injected by the
-   *  engine — use `readRefs(data)` to strip them to plain strings for REST API payloads. */
+  /** Field values to write. FK reference fields carry remapped plain ID strings injected by
+   *  the engine. Pass data directly to most REST API payloads. */
   data: Record<string, unknown | unknown[]>;
+
+  /** Remapped association metadata for this write. FK IDs already appear as plain strings in
+   *  data; this field provides the full metadata (predicate, targetEntity, targetId) for
+   *  connectors that need to persist FK data in a separate format (e.g. an associations file
+   *  section or a relationship table). Engine-provided; connectors must not mutate this. */
+  associations?: Association[];
 }
 
 /** Payload for updating an existing record in the target system. */
@@ -172,9 +178,16 @@ export interface UpdateRecord {
   id: string;
 
   /** Field values to write. Immutable fields (schema.immutable: true) are stripped by
-   *  the engine before this reaches the connector. FK reference fields carry remapped `Ref`
-   *  values injected by the engine — use `readRefs(data)` to strip them for REST API payloads. */
+   *  the engine before this reaches the connector. FK reference fields carry remapped plain
+   *  ID strings injected by the engine. */
   data: Record<string, unknown | unknown[]>;
+
+  /** Remapped association metadata for this write. FK IDs already appear as plain strings in
+   *  data; this field provides the full metadata (predicate, targetEntity, targetId) for
+   *  connectors that need to persist FK data in a separate format. Engine-provided; connectors
+   *  must not mutate this. Includes associations from the target shadow that the source
+   *  cannot express ("inexpressible predicates") so they are not lost on update.  */
+  associations?: Association[];
 
   /** Version token from ReadRecord.version (e.g. ETag). Set by the engine when it has
    *  a live lookup result for this record in the current dispatch pass. Connectors
