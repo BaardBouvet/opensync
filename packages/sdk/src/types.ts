@@ -163,12 +163,6 @@ export interface InsertRecord {
   /** Field values to write. FK reference fields carry remapped plain ID strings injected by
    *  the engine. Pass data directly to most REST API payloads. */
   data: Record<string, unknown | unknown[]>;
-
-  /** Remapped association metadata for this write. FK IDs already appear as plain strings in
-   *  data; this field provides the full metadata (predicate, targetEntity, targetId) for
-   *  connectors that need to persist FK data in a separate format (e.g. an associations file
-   *  section or a relationship table). Engine-provided; connectors must not mutate this. */
-  associations?: Association[];
 }
 
 /** Payload for updating an existing record in the target system. */
@@ -181,13 +175,6 @@ export interface UpdateRecord {
    *  the engine before this reaches the connector. FK reference fields carry remapped plain
    *  ID strings injected by the engine. */
   data: Record<string, unknown | unknown[]>;
-
-  /** Remapped association metadata for this write. FK IDs already appear as plain strings in
-   *  data; this field provides the full metadata (predicate, targetEntity, targetId) for
-   *  connectors that need to persist FK data in a separate format. Engine-provided; connectors
-   *  must not mutate this. Includes associations from the target shadow that the source
-   *  cannot express ("inexpressible predicates") so they are not lost on update.  */
-  associations?: Association[];
 
   /** Version token from ReadRecord.version (e.g. ETag). Set by the engine when it has
    *  a live lookup result for this record in the current dispatch pass. Connectors
@@ -306,32 +293,6 @@ export interface ConnectorContext {
   webhookUrl: string;
 }
 
-// ─── Association Schema ───────────────────────────────────────────────────────
-
-/**
- * Metadata for a single association predicate declared on an entity.
- * Used by: agents (description), engine (write-side filter, pre-flight warnings).
- * Spec: specs/connector-sdk.md § Association Schema
- */
-export interface AssociationDescriptor {
-  /** Entity name (connector's own, as registered in channel config) that this predicate
-   *  points to. Matches Association.targetEntity values emitted by read() or expected in
-   *  insert()/update(). */
-  targetEntity: string;
-
-  /** Human-readable description of the relationship.
-   *  E.g. "The company this contact belongs to." Agents use this for mapping suggestions. */
-  description?: string;
-
-  /** Whether a record is considered incomplete if this association is absent.
-   *  Does not block dispatch — it produces a warning entry in the sync result. */
-  required?: boolean;
-
-  /** Whether a single record can carry multiple associations with this predicate
-   *  (e.g. a task assigned to several owners). Defaults to false (at most one). */
-  multiple?: boolean;
-}
-
 // ─── Entity Definition ────────────────────────────────────────────────────────
 
 /**
@@ -400,20 +361,6 @@ export interface EntityDefinition {
    *  Optional. Connectors with opaque local IDs (HubSpot integers, ERP codes) do not need it.
    *  Spec: specs/connector-sdk.md § Context */
   context?: { '@context': Record<string, string | Record<string, unknown>> };
-
-  /** Association metadata: declares which predicates this entity emits from read() and
-   *  accepts in insert()/update(). Key is the predicate string as it appears in
-   *  Association.predicate — short field name ('companyId') or full URI.
-   *
-   *  The engine uses this as the write-side filter: when dispatching to a target entity
-   *  that declares associationSchema, only predicates declared here are included in
-   *  UpdateRecord.associations and InsertRecord.associations. Predicates absent from the
-   *  schema are dropped silently. Omitting the field leaves behaviour unchanged (pass-through).
-   *
-   *  Also used at channel setup for pre-flight warnings: if a declared targetEntity is not
-   *  registered in the channel, the engine logs a warning.
-   *  Spec: specs/connector-sdk.md § Association Schema */
-  associationSchema?: Record<string, AssociationDescriptor>;
 
   /** OAuth scopes split by role. The engine unions only what the channel actually uses,
    *  so a source-only user is never prompted for write permissions.

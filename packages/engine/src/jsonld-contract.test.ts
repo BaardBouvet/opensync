@@ -5,7 +5,7 @@
  * JLC1  Connector yields Ref value → engine extracts association → dispatches remapped plain string
  * JLC2  Engine write injection: data.companyId = remappedId as plain string
  * JLC3  { type: 'ref' } schema drives inference rule (rule 2 — schema field)
- * JLC4  associationSchema drives inference (rule 3 — backward compat path)
+ * JLC4  schema[field].entity drives inference (rule 2 — plain string FK via schema)
  * JLC5  Neither: Ref-shaped value treated as opaque; no association derived
  * JLC7  Inexpressible predicates preserved as plain string values in data on update
  */
@@ -21,7 +21,6 @@ import type {
   InsertResult,
   UpdateRecord,
   UpdateResult,
-  AssociationDescriptor,
 } from "@opensync/sdk";
 import type { ResolvedConfig, ChannelMember } from "./config/loader.js";
 
@@ -287,10 +286,10 @@ describe("JLC3: { type: 'ref' } schema field drives association inference", () =
   });
 });
 
-// ─── JLC4: associationSchema drives inference ─────────────────────────────────
+// ─── JLC4: schema[field].entity drives inference ──────────────────────────────
 
-describe("JLC4: associationSchema drives association inference when @entity absent and no schema ref", () => {
-  it("derives association from associationSchema when neither @entity nor schema ref is present", async () => {
+describe("JLC4: schema[field].entity drives association inference when @entity absent from Ref", () => {
+  it("derives association from schema.entity when @entity is absent from Ref", async () => {
     const receivedInserts: InsertRecord[] = [];
     const db = openDb(":memory:");
 
@@ -299,13 +298,13 @@ describe("JLC4: associationSchema drives association inference when @entity abse
       getEntities(): EntityDefinition[] {
         return [{
           name: "contacts",
-          // No schema ref, but associationSchema declares companyId
-          associationSchema: { companyId: { targetEntity: "companies" } satisfies AssociationDescriptor },
+          // schema declares companyId as an FK — engine infers @entity from it
+          schema: { companyId: { entity: "companies" } },
           async *read() {
             yield {
               records: [{
                 id: "c1",
-                // Ref with no @entity — engine uses associationSchema
+                // Ref with no @entity — engine uses schema.companyId.entity
                 data: { name: "Alice", email: "alice@example.com", companyId: { '@id': 'co1' } },
               }],
               since: "t1",

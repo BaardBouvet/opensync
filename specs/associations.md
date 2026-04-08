@@ -12,7 +12,7 @@ giving the engine a zero-ambiguity graph without scanning unknown field values.
 ```typescript
 interface Ref {
   '@id': string;        // the referenced record's ID in this (source) system
-  '@entity'?: string;   // the entity name — omit when inferable from schema or associationSchema
+  '@entity'?: string;   // the entity name — omit when inferable from schema (FieldDescriptor.entity)
 }
 ```
 
@@ -30,8 +30,6 @@ interface Ref {
 
 The engine extracts Ref values during ingest, resolves the identity map, and injects
 remapped plain ID strings into `InsertRecord.data` / `UpdateRecord.data` at dispatch time.
-Full association metadata is also provided in `InsertRecord.associations` /
-`UpdateRecord.associations` for connectors that need to persist FK data in a separate format.
 
 ## Entity Inference
 
@@ -43,8 +41,7 @@ The engine infers which entity a field references, in order of precedence:
    the schema and return raw API payloads. This is the recommended path for SaaS connectors.
 2. `@entity` on an explicit `Ref` object in `data`
 3. `entity` on the `FieldDescriptor` in `schema` when `@entity` is absent from the Ref
-4. `associationSchema[predicate].targetEntity`
-5. None of the above → opaque; no association derived
+4. None of the above → opaque; no association derived
 
 ## The Composite Key
 
@@ -200,20 +197,16 @@ For each resolved association the engine performs these steps at dispatch time:
 5. **Predicate translation**: look up the predicate through the canonical name in `assocMappings`
    (local → canonical in source, canonical → local in target). Predicates with no mapping → dropped.
 6. **Emit**: write `assoc.targetId` as a plain string to `data[<target-local predicate>]` in
-   `InsertRecord.data` / `UpdateRecord.data` sent to the target connector. The full association
-   metadata is also present in `InsertRecord.associations` / `UpdateRecord.associations` for
-   connectors that need to persist FK data in a separate format.
+   `InsertRecord.data` / `UpdateRecord.data` sent to the target connector. If the association
+   target is not yet cross-linked the field is absent from `data` (a deferred row is written
+   so the engine retries once the link is established).
 
 ### § 7.3 FK routing is the connector's responsibility
 
-Remapped association IDs arrive in `InsertRecord.data` / `UpdateRecord.data` as **plain strings**.
-The **connector** is responsible for routing them to whichever field or endpoint its API requires
-(e.g. a separate associations endpoint, a join-table row, or directly as an FK column).
-
-Connectors that need to know which fields are FK predicates (e.g. to route them to a relationship
-table) should use `record.associations` — the `Association[]` metadata provided by the engine
-alongside the plain strings. This removes the need for connectors to introspect value types or
-maintain compile-time lists of FK field names.
+Remapped association IDs arrive in `InsertRecord.data` / `UpdateRecord.data` as **plain strings**
+under the target-local predicate name. Connectors receive `record.data` directly and can pass
+it to the API as-is. No `record.associations` field is provided — the engine handles all FK
+routeing internally.
 
 ### § 7.4 Field mapping must not duplicate associations
 
@@ -263,29 +256,27 @@ maps connector-local predicate names to a canonical (channel-internal) name:
 - Changing or adding a predicate mapping never invalidates existing shadows. No migration
   is needed when mapping config is updated.
 
-## § 8 Association Schema — Declared Predicates on Entities
+## § 8 FK Schema — Write-Side Filtering and Pre-Flight Warnings
 
-An entity may declare `associationSchema` (an optional field on `EntityDefinition`) to list
-the association predicates it supports. This is the machine-readable counterpart to the
-channel-level `associations` predicate mappings in § 7.
+Foreign-key declarations live on `FieldDescriptor.entity` in `EntityDefinition.schema`.
+When a field carries `entity: 'company'`, the engine knows that field is an FK reference
+to the `company` entity. No separate `associationSchema` is needed.
 
 ```typescript
-// EntityDefinition.associationSchema — optional, keyed by predicate strings
-associationSchema: {
-  companyId: { targetEntity: 'company', description: 'The company this contact belongs to.' },
+// EntityDefinition.schema — FK field annotated with entity
+schema: {
+  companyId: { entity: 'company' },
 }
 ```
 
-See `connector-sdk.md § Association Schema` for full type definition and examples.
-
 ### § 8.1 Write-Side Filtering
 
-When the engine dispatches to a target entity that declares `associationSchema`, it filters
-Ref fields in `InsertRecord.data` / `UpdateRecord.data` to include only predicates present
-in the schema. Ref fields for predicates absent from the schema are dropped (trace-level log).
+When the engine dispatches to a target entity that declares `schema` fields with `entity`,
+association metadata is filtered internally: only FK predicates with `entity` set are tracked.
+Predicates with no corresponding FK field in `schema` are dropped silently.
 
-Entities **without** `associationSchema` receive all remapped Ref fields unchanged — the
-opt-in nature means no existing connector behaviour changes until `associationSchema` is added.
+The write-side FK values in `data` always reflect this filter — the connector never receives
+FK fields for predicates it did not declare in its schema.
 
 ### § 8.4 Source-Inexpressible Predicate Preservation
 
@@ -310,23 +301,21 @@ This applies only to UPDATE dispatches. INSERT dispatches have no prior target s
 
 ### § 8.2 Pre-Flight Warnings
 
-At channel setup (when `addConnector()` wires an entity into a channel), if a declared
-`targetEntity` in `associationSchema` names an entity not registered in that channel, the
-engine logs a `[WARN]` entry. Dispatch is not blocked — the warning is informational.
+At channel setup (when `addConnector()` wires an entity into a channel), if a field with
+`entity` set names an entity not registered in that channel, the engine logs a `[WARN]` entry.
+Dispatch is not blocked — the warning is informational.
 
 Format:
 ```
-[WARN] <connectorId>:<entity>.associationSchema['<predicate>'] targets entity '<targetEntity>'
+[WARN] <connectorId>:<entity>.schema['<predicate>'].entity targets entity '<targetEntity>'
        but no '<targetEntity>' entity is registered in channel '<channelId>'.
        Associations with this predicate will have unresolvable targets.
 ```
 
 ### § 8.3 Required-Association Warnings
 
-If an association predicate is marked `required: true` in `associationSchema` and a
-dispatched record arrives without it, the engine appends a `missing_required_association`
-warning to the `RecordSyncResult`. Dispatch is not blocked — `required` on associations
-is advisory (parallel to `FieldDescriptor.required`, which blocks inserts but not updates).
+*Removed.* The `required` field has been dropped from `AssociationDescriptor`.
+Use `FieldDescriptor.required` on the schema entry for the predicate field instead.
 
 ## Design Rationale
 
@@ -337,8 +326,8 @@ separate `associations` array. This aligns the connector contract with JSON-LD c
 (`@id`, `@entity`) and makes the mapping layer simpler — one field in canonical state can
 hold either a scalar or a Ref, and field-mapping config handles both uniformly.
 
-The engine extracts the association graph by scanning `data` for Ref-shaped values, using the
-field schema or `associationSchema` to resolve the entity name when `@entity` is absent.
+The engine extracts the association graph by scanning `data` for Ref-shaped values, using
+`entity` on the field's `FieldDescriptor` to resolve the entity name when `@entity` is absent.
 This is unambiguous: a Ref is a typed object with a `'@id'` key, structurally distinct from
 any plain string, number, or array, so the engine never confuses a plain value with a
 reference.
@@ -347,6 +336,6 @@ reference.
 
 The previous design kept a parallel `associations?: Association[]` field on `ReadRecord`,
 `InsertRecord`, and `UpdateRecord`. Separating the index from `data` meant connectors had
-to maintain the two in sync and the engine had to join them at dispatch. Inline Refs
-eliminate that duplication — one field in `data` is both the value and the association
-declaration.
+to maintain the two in sync and the engine had to join them at dispatch. Inline values in
+`data` (plain strings declared via `schema[field].entity`) eliminate that duplication —
+one field in `data` is both the value and the association declaration.

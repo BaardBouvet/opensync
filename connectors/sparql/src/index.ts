@@ -33,7 +33,6 @@ import type {
   ConnectorContext,
   EntityDefinition,
   FieldDescriptor,
-  AssociationDescriptor,
   ReadBatch,
   ReadRecord,
   InsertRecord,
@@ -268,22 +267,10 @@ function makeRdfEntity(opts: {
           type: def.type,
           required: def.required,
           immutable: def.immutable,
+          ...(def.refEntity ? { entity: def.refEntity } : {}),
         } satisfies FieldDescriptor,
       ])
     ),
-
-    // Spec: specs/connector-sdk.md § Association Schema
-    // Build from props that declare refEntity — predicate key is the full URI.
-    associationSchema: (() => {
-      const entries = propEntries.filter(([, def]) => def.refEntity);
-      if (entries.length === 0) return undefined;
-      return Object.fromEntries(
-        entries.map(([, def]) => [
-          def.predicate,
-          { targetEntity: def.refEntity!, description: def.description } satisfies AssociationDescriptor,
-        ])
-      );
-    })(),
 
     async *read(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
       const PAGE_SIZE = 200;

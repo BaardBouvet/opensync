@@ -3,11 +3,12 @@
 // isolated sandbox (Deno, vm.Context, workerd) because it directly imports
 // node:fs. Do not use node:* imports in connectors intended for remote execution.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { extname } from "node:path";
 import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
+  FieldDescriptor,
   ReadBatch,
   ReadRecord,
   InsertRecord,
@@ -15,25 +16,34 @@ import type {
   UpdateRecord,
   UpdateResult,
   DeleteResult,
-  Association,
-  Ref,
 } from "@opensync/sdk";
 
 
 // ─── File format ─────────────────────────────────────────────────────────────
 // Each JSON file is an array of objects with top-level envelope fields:
 //
-//   { id, data, updated?, associations? }
+//   { id, data, updated? }
 //
-// `id`           — required; unique record identifier within the file.
-// `data`         — required; the record payload passed to the engine as-is.
-// `updated`      — optional watermark. Can be an ISO 8601 timestamp or a
-//                  monotonically-increasing integer. Records without this field
-//                  are always included in every read regardless of `since`.
-// `associations` — optional; pre-declared edges in the SDK Association shape.
+// `id`      — required; unique record identifier within the file.
+// `data`    — required; the record payload passed to the engine as-is. FK
+//             reference fields are stored as plain strings (the referenced ID).
+//             The engine synthesises associations from plain strings when the
+//             entity schema declares `entity` on the field.
+// `updated` — optional watermark. Can be an ISO 8601 timestamp or a
+//             monotonically-increasing integer. Records without this field
+//             are always included in every read regardless of `since`.
 //
 // Field names are configurable via connector config (idField, dataField,
-// watermarkField, associationsField) but the defaults cover the common case.
+// watermarkField) but the defaults cover the common case.
+//
+// Entity / FK schema declaration:
+//   Use `config.entities` to declare entities with their file paths and optional
+//   per-entity FK schema overrides:
+//     entities: {
+//       contacts: { filePath: "contacts.json", schema: { companyId: { entity: "companies" } } },
+//       companies: { filePath: "companies.json" }
+//     }
+//   The engine synthesises associations from the plain string values automatically.
 //
 // ── Audit log (auditLog: true) ──────────────────────────────────────────────
 // When auditLog is enabled, every mutation is also appended to a companion
@@ -42,10 +52,10 @@ import type {
 // The log file is purely observational — the connector never reads from it.
 //
 // Log entry shapes:
-//   insert: { op: "insert", id, data, associations?, updated, at }
+//   insert: { op: "insert", id, data, updated, at }
 //   update: { op: "update", id, before, after, updated, at }
-//     before — changed data fields (old values) + old associations (if changed)
-//     after  — changed data fields (new values) + new associations (if changed)
+//     before — changed data fields (old values)
+//     after  — changed data fields (new values)
 //   delete: { op: "delete", id, updated, at }
 //   `at`  — ISO 8601 wall-clock timestamp of the mutation (always present)
 //
@@ -55,7 +65,6 @@ interface FileRecord {
   id?: unknown;
   data?: Record<string, unknown>;
   updated?: unknown;
-  associations?: unknown;
   [key: string]: unknown;
 }
 
@@ -63,7 +72,6 @@ interface FieldConfig {
   idField: string;
   dataField: string;
   watermarkField: string;
-  associationsField: string;
 }
 
 interface LogConfig {
@@ -83,14 +91,12 @@ function writeFile(filePath: string, records: FileRecord[]): void {
 const DEFAULT_ID_FIELD = "id";
 const DEFAULT_DATA_FIELD = "data";
 const DEFAULT_WATERMARK_FIELD = "updated";
-const DEFAULT_ASSOCIATIONS_FIELD = "associations";
 
 function fieldConfig(ctx: ConnectorContext): FieldConfig {
   return {
     idField: (ctx.config["idField"] as string | undefined) ?? DEFAULT_ID_FIELD,
     dataField: (ctx.config["dataField"] as string | undefined) ?? DEFAULT_DATA_FIELD,
     watermarkField: (ctx.config["watermarkField"] as string | undefined) ?? DEFAULT_WATERMARK_FIELD,
-    associationsField: (ctx.config["associationsField"] as string | undefined) ?? DEFAULT_ASSOCIATIONS_FIELD,
   };
 }
 
@@ -147,9 +153,8 @@ interface LogEntry {
   op: "insert" | "update" | "delete";
   id: string;
   data?: Record<string, unknown>;          // insert only
-  before?: Record<string, unknown> & { associations?: unknown }; // update only — old values of changed fields
-  after?: Record<string, unknown> & { associations?: unknown };  // update only — new values of changed fields
-  associations?: unknown;                  // insert only
+  before?: Record<string, unknown>;        // update only — old values of changed fields
+  after?: Record<string, unknown>;         // update only — new values of changed fields
   updated: unknown;
   at: string;                              // ISO 8601 wall-clock timestamp
 }
@@ -169,14 +174,18 @@ function appendLogEntry(logPath: string, entry: LogEntry): void {
 }
 
 /**
- * Parse the `filePaths` config value (string array) into
- * { entityName, entityFilePath } pairs. Entity name = file basename without extension.
+ * Parse the `entities` config value into { entityName, entityFilePath, schemaOverrides } triples.
+ * The key is the entity name; each value carries `filePath` and an optional `schema` override.
  */
-function parseFilePaths(ctx: ConnectorContext): Array<{ entityName: string; entityFilePath: string }> {
-  const raw = ctx.config["filePaths"] as string[];
-  if (!Array.isArray(raw) || raw.length === 0)
-    throw new Error("config.filePaths must be a non-empty array of file paths");
-  return raw.map((fp) => ({ entityName: basename(fp, extname(fp)), entityFilePath: fp }));
+function parseEntities(ctx: ConnectorContext): Array<{ entityName: string; entityFilePath: string; schemaOverrides?: Record<string, FieldDescriptor> }> {
+  const raw = ctx.config["entities"] as Record<string, { filePath: string; schema?: Record<string, FieldDescriptor> }> | undefined;
+  if (!raw || typeof raw !== "object" || Object.keys(raw).length === 0)
+    throw new Error("config.entities must be a non-empty object mapping entity names to { filePath, schema? }");
+  return Object.entries(raw).map(([entityName, { filePath: entityFilePath, schema }]) => ({
+    entityName,
+    entityFilePath,
+    schemaOverrides: schema,
+  }));
 }
 
 // ─── Entity ───────────────────────────────────────────────────────────────────
@@ -184,22 +193,13 @@ function parseFilePaths(ctx: ConnectorContext): Array<{ entityName: string; enti
 function makeRecordEntity(
   entityName: string,
   entityFilePath: string,
-  { idField, dataField, watermarkField, associationsField }: FieldConfig,
-  { auditLog }: LogConfig
+  { idField, dataField, watermarkField }: FieldConfig,
+  { auditLog }: LogConfig,
+  schemaOverrides?: Record<string, FieldDescriptor>,
 ): EntityDefinition {
   function extractRecord(r: FileRecord): ReadRecord {
     const id = String(r[idField]);
     const data = { ...(r[dataField] as Record<string, unknown> | undefined) ?? {} };
-    // Convert associations from file format to Ref values in data.
-    // Spec: specs/connector-sdk.md § Ref — engine extracts associations from Ref values.
-    const rawAssocs = r[associationsField];
-    if (Array.isArray(rawAssocs)) {
-      for (const assoc of rawAssocs as Association[]) {
-        if (assoc.predicate && (assoc.targetId || assoc.targetEntity)) {
-          data[assoc.predicate] = { '@id': assoc.targetId ?? '', '@entity': assoc.targetEntity } satisfies Ref;
-        }
-      }
-    }
     return { id, data };
   }
 
@@ -222,10 +222,7 @@ function makeRecordEntity(
         description: "Sync watermark. ISO 8601 timestamp or monotonically-increasing integer. Optional — records without it are always included.",
         type: "string",
       },
-      [associationsField]: {
-        description: "Pre-declared associations to other entities.",
-        type: { type: "array" } as const,
-      },
+      ...schemaOverrides,
     },
 
     async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
@@ -268,33 +265,21 @@ function makeRecordEntity(
         const id = (record.data[idField] as string | undefined) ?? crypto.randomUUID();
         const wm = nextWatermark(existing, watermarkField);
 
-        // Separate FK fields (from record.associations) from plain scalar fields.
-        // FK predicate names appear in both record.associations and record.data;
-        // we store them in the file's associations section, not in _data.
-        const insertAssocs = record.associations ?? [];
-        const fkPredicates = new Set(insertAssocs.map((a) => a.predicate));
-        const plainData: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(record.data)) {
-          if (!fkPredicates.has(k)) plainData[k] = v;
-        }
-
         const newRecord: FileRecord = {
           [idField]: id,
-          [dataField]: plainData,
+          [dataField]: record.data,
           [watermarkField]: wm,
-          ...(insertAssocs.length > 0 ? { [associationsField]: insertAssocs } : {}),
         };
         writeFile(entityFilePath, [...existing, newRecord]);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.4
         if (auditLog) {
           appendLogEntry(logFilePath(entityFilePath), {
-            op: "insert", id, data: plainData,
-            ...(insertAssocs.length > 0 ? { associations: insertAssocs } : {}),
+            op: "insert", id, data: record.data,
             updated: wm,
             at: new Date().toISOString(),
           });
         }
-        yield { id, data: plainData };
+        yield { id, data: record.data };
       }
     },
 
@@ -308,53 +293,27 @@ function makeRecordEntity(
         }
         const wm = nextWatermark(existing, watermarkField);
         const prev = (existing[idx]![dataField] as Record<string, unknown> | undefined) ?? {};
-        const prevAssoc = existing[idx]![associationsField]; // capture before overwrite
 
-        // Use engine-provided association metadata to identify and route FK fields.
-        // record.associations includes both remapped source associations and target-local
-        // "inexpressible" predicates preserved by the engine from the target shadow.
-        const incomingAssocs = record.associations ?? [];
-        const fkPredicates = new Set(incomingAssocs.map((a) => a.predicate));
-
-        const incomingPlain: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(record.data)) {
-          if (!fkPredicates.has(k)) incomingPlain[k] = v;
-        }
-
-        const merged = { ...prev, ...incomingPlain };
-        // Merge associations: incoming (from engine) take precedence; preserve prior entries
-        // not overridden by the engine (e.g. associations the current source cannot express).
-        const prevAssocList = Array.isArray(prevAssoc) ? (prevAssoc as Association[]) : [];
-        const mergedAssocs = [
-          ...prevAssocList.filter((a) => !incomingAssocs.some((ia) => ia.predicate === a.predicate)),
-          ...incomingAssocs,
-        ];
+        const merged = { ...prev, ...record.data };
         const updated: FileRecord = {
           ...existing[idx],
           [dataField]: merged,
           [watermarkField]: wm,
-          ...(mergedAssocs.length > 0 ? { [associationsField]: mergedAssocs } : {}),
         };
         existing[idx] = updated;
         writeFile(entityFilePath, existing);
         // Spec: plans/connectors/PLAN_JSONFILES_LOG_FORMAT.md §3.5
         if (auditLog) {
-          const changedKeys = Object.keys(incomingPlain).filter(
-            (k) => JSON.stringify(prev[k]) !== JSON.stringify(incomingPlain[k])
+          const changedKeys = Object.keys(record.data).filter(
+            (k) => JSON.stringify(prev[k]) !== JSON.stringify(record.data[k])
           );
           const before: Record<string, unknown> = {};
           const after: Record<string, unknown> = {};
           for (const k of changedKeys) {
             before[k] = prev[k];
-            after[k] = incomingPlain[k];
+            after[k] = record.data[k];
           }
-          if (incomingAssocs.length > 0) {
-            if (JSON.stringify(prevAssoc) !== JSON.stringify(mergedAssocs)) {
-              before["associations"] = prevAssoc;
-              after["associations"] = mergedAssocs;
-            }
-          }
-          const hasDiff = Object.keys(before).length > 0;
+          const hasDiff = changedKeys.length > 0;
           appendLogEntry(logFilePath(entityFilePath), {
             op: "update", id: record.id,
             ...(hasDiff ? { before, after } : {}),
@@ -395,10 +354,9 @@ const connector: Connector = {
     version: "0.1.0",
     auth: { type: "none" },
     configSchema: {
-      filePaths: {
-        type: "array",
-        items: { type: "string" },
-        description: "JSON file paths. Each file becomes one entity named after its basename.",
+      entities: {
+        type: "object",
+        description: "Entity map. Keys are entity names. Each value must have a `filePath` (path to the JSON file) and an optional `schema` (field descriptor map for FK references — use `entity` to declare FK targets so the engine can synthesise associations from plain string values).",
         required: true,
       },
       idField: {
@@ -419,12 +377,6 @@ const connector: Connector = {
         required: false,
         default: DEFAULT_WATERMARK_FIELD,
       },
-      associationsField: {
-        type: "string",
-        description: "Top-level field name containing pre-declared associations to other entities.",
-        required: false,
-        default: DEFAULT_ASSOCIATIONS_FIELD,
-      },
       auditLog: {
         type: "boolean",
         description: "Write a companion <basename>.log.json file recording every mutation. Insert entries carry the full data; update entries carry a before/after diff of only the changed fields; delete entries carry the id.",
@@ -437,10 +389,11 @@ const connector: Connector = {
   getEntities(ctx: ConnectorContext): EntityDefinition[] {
     const fields = fieldConfig(ctx);
     const log = logConfig(ctx);
-    return parseFilePaths(ctx).map(({ entityName, entityFilePath }) =>
-      makeRecordEntity(entityName, entityFilePath, fields, log)
+    return parseEntities(ctx).map(({ entityName, entityFilePath, schemaOverrides }) =>
+      makeRecordEntity(entityName, entityFilePath, fields, log, schemaOverrides)
     );
   },
 };
 
 export default connector;
+

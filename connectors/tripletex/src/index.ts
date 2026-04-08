@@ -346,17 +346,6 @@ const invoiceEntity: EntityDefinition = {
         records: page.map((item) => ({
           id: String(item["id"]),
           data: item,
-          // Invoices reference a customer — expose the association explicitly.
-          associations:
-            item["customer"] && typeof item["customer"] === "object"
-              ? [
-                  {
-                    predicate: "customer",
-                    targetEntity: "customer",
-                    targetId: String((item["customer"] as { id: number }).id),
-                  },
-                ]
-              : undefined,
         })),
         since: maxDate ?? since,
       };
@@ -427,9 +416,10 @@ const contactEntity: EntityDefinition = {
     lastName:          { description: "Last name.",              type: "string", required: true },
     email:             { description: "Email address.",          type: "string" },
     phoneNumberMobile: { description: "Mobile phone number.",    type: "string" },
-    customer: {
-      description: "Customer account this contact belongs to. Surfaced as the orgId association.",
-      type: { type: "object" },
+    orgId: {
+      description: "Customer account this contact belongs to (plain ID string).",
+      type: "string",
+      entity: "customer",
     },
     changedDate: {
       description: "Timestamp of last modification (ISO 8601). Used as the sync watermark.",
@@ -463,10 +453,7 @@ const contactEntity: EntityDefinition = {
           const customer = item["customer"] as { id: number } | null | undefined;
           return {
             id: String(item["id"]),
-            data: item,
-            associations: customer
-              ? [{ predicate: "orgId", targetEntity: "customer", targetId: String(customer.id) }]
-              : undefined,
+            data: { ...item, ...(customer ? { orgId: String(customer.id) } : {}) },
           };
         }),
         since: maxChanged ?? since,
@@ -486,10 +473,7 @@ const contactEntity: EntityDefinition = {
       const customer = item["customer"] as { id: number } | null | undefined;
       results.push({
         id,
-        data: item,
-        associations: customer
-          ? [{ predicate: "orgId", targetEntity: "customer", targetId: String(customer.id) }]
-          : undefined,
+        data: { ...item, ...(customer ? { orgId: String(customer.id) } : {}) },
       });
     }
     return results;
@@ -501,9 +485,9 @@ const contactEntity: EntityDefinition = {
   ): AsyncIterable<InsertResult> {
     const base = ctx.config["baseUrl"] as string;
     for await (const record of records) {
-      const orgAssoc = record.associations?.find((a) => a.predicate === "orgId");
+      const orgId = record.data["orgId"] as string | undefined;
       const body: Record<string, unknown> = { ...record.data };
-      if (orgAssoc) body["customer"] = { id: Number(orgAssoc.targetId) };
+      if (orgId) body["customer"] = { id: Number(orgId) };
       const res = await ctx.http(`${base}/contact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -521,9 +505,9 @@ const contactEntity: EntityDefinition = {
   ): AsyncIterable<UpdateResult> {
     const base = ctx.config["baseUrl"] as string;
     for await (const record of records) {
-      const orgAssoc = record.associations?.find((a) => a.predicate === "orgId");
+      const orgId = record.data["orgId"] as string | undefined;
       const body: Record<string, unknown> = { id: Number(record.id), ...record.data };
-      if (orgAssoc) body["customer"] = { id: Number(orgAssoc.targetId) };
+      if (orgId) body["customer"] = { id: Number(orgId) };
       const res = await ctx.http(`${base}/contact/${record.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

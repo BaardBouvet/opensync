@@ -63,7 +63,7 @@ function makeInstance(id: string, dir: string): ResolvedConfig["connectors"][0] 
   return {
     id,
     connector: jsonfiles,
-    config: { filePaths: [join(dir, "contacts.json")] },
+    config: { entities: { contacts: { filePath: join(dir, "contacts.json") } } },
     auth: {},
     batchIdRef: { current: undefined },
     triggerRef: { current: undefined },
@@ -71,10 +71,11 @@ function makeInstance(id: string, dir: string): ResolvedConfig["connectors"][0] 
 }
 
 function makeInstanceEntity(id: string, dir: string, filename: string): ResolvedConfig["connectors"][0] {
+  const entityName = filename.replace(/\.[^/.]+$/, "");
   return {
     id,
     connector: jsonfiles,
-    config: { filePaths: [join(dir, filename)] },
+    config: { entities: { [entityName]: { filePath: join(dir, filename) } } },
     auth: {},
     batchIdRef: { current: undefined },
     triggerRef: { current: undefined },
@@ -855,13 +856,12 @@ describe("T29: first propagation of association → update (not suppressed)", ()
     writeJson(join(dirA, "contacts.json"), [
       {
         id: "a1",
-        data: { name: "Alice", email: "alice@example.com" },
+        data: { name: "Alice", email: "alice@example.com", works_at: "org-1" },
         updated: 2,
-        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
       },
     ]);
 
-    // Association is new on the target → must NOT suppress
+    // New field on the target → must NOT suppress
     const result = await engine.ingest("ch", "system-a");
     const updates = result.records.filter((r) => r.action === "update" && r.targetConnectorId === "system-b");
     expect(updates).toHaveLength(1);
@@ -899,12 +899,11 @@ describe("T30: second poll with unchanged association → noop suppressed", () =
     writeJson(join(dirA, "contacts.json"), [
       {
         id: "a1",
-        data: { name: "Alice", email: "alice@example.com" },
+        data: { name: "Alice", email: "alice@example.com", works_at: "org-1" },
         updated: 2,
-        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
       },
     ]);
-    await engine.ingest("ch", "system-a"); // dispatches association → target shadow stores __assoc__
+    await engine.ingest("ch", "system-a"); // dispatches new field → target shadow updated
 
     // Second clear: same data + same association, updated:3.
     // Target shadow now has __assoc__ → guard should suppress.
@@ -913,9 +912,8 @@ describe("T30: second poll with unchanged association → noop suppressed", () =
     writeJson(join(dirA, "contacts.json"), [
       {
         id: "a1",
-        data: { name: "Alice", email: "alice@example.com" },
+        data: { name: "Alice", email: "alice@example.com", works_at: "org-1" },
         updated: 3,
-        associations: [{ predicate: "works_at", targetEntity: "orgs" }],
       },
     ]);
 
@@ -940,10 +938,8 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
 
     // system-a: three contacts, three companies (including Initech)
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
-      { id: "c3", data: { name: "Carol", email: "carol@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co3" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
+      { id: "c3", data: { name: "Carol", email: "carol@example.com", companyId: "co3" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -952,8 +948,7 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
 
     // system-b: one contact (Alice), one account (Acme) — NO Initech, NO Carol
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "acc1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "accounts.json"), [
       { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -962,7 +957,7 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id,
       connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1012,11 +1007,10 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
     // Carol's entry in system-b should now have a companyId association pointing to Initech
     const bContacts = JSON.parse(
       (await import("node:fs")).readFileSync(join(dirB, "contacts.json"), "utf8"),
-    ) as Array<{ id: string; data: { email: string }; associations?: unknown[] }>;
+    ) as Array<{ id: string; data: { email: string; companyId?: string } }>;
     const carol = bContacts.find((r) => r.data.email === "carol@example.com");
     expect(carol).toBeDefined();
-    expect(carol!.associations).toBeDefined();
-    expect((carol!.associations ?? []).length).toBeGreaterThan(0);
+    expect(carol!.data.companyId).toBeDefined();
   });
 });
 
@@ -1025,8 +1019,7 @@ describe("T32: deferred row removed after successful retry", () => {
     const dirA = makeTempDir();
     const dirB = makeTempDir();
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co2" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1042,7 +1035,7 @@ describe("T32: deferred row removed after successful retry", () => {
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1085,8 +1078,7 @@ describe("T33: deferred row retained when source record deleted before retry", (
     const dirA = makeTempDir();
     const dirB = makeTempDir();
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co2" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1102,7 +1094,7 @@ describe("T33: deferred row retained when source record deleted before retry", (
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1154,15 +1146,13 @@ describe("T34: deferred retry updates association for record inserted without it
     const dirB = makeTempDir();
 
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "acc1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "accounts.json"), [
       { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1170,7 +1160,7 @@ describe("T34: deferred retry updates association for record inserted without it
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1196,10 +1186,8 @@ describe("T34: deferred retry updates association for record inserted without it
 
     // Add Dave to sa + Globex company — but only ingest contacts first (Globex not yet synced)
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
-      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 2,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com", companyId: "co2" }, updated: 2 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme",   domain: "acme.com"   }, updated: 1 },
@@ -1247,8 +1235,7 @@ describe("T35: targetEntity is translated to the target connector's entity name 
     const dirB = makeTempDir();
 
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1262,7 +1249,7 @@ describe("T35: targetEntity is translated to the target connector's entity name 
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1287,20 +1274,15 @@ describe("T35: targetEntity is translated to the target connector's entity name 
       await engine.onboard(ch, await engine.discover(ch));
     }
 
-    // Alice should now exist in sb/contacts with her association remapped.
+    // Alice should now exist in sb/contacts with her companyId pointing at the sb-side account.
     const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
       id: string;
-      data: { email: string };
-      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+      data: { email: string; companyId?: string };
     }>;
     const alice = sbContacts.find((r) => r.data.email === "alice@example.com");
     expect(alice).toBeDefined();
-    expect(alice!.associations).toBeDefined();
-    expect(alice!.associations!.length).toBeGreaterThan(0);
-    // targetEntity must be the sb-side entity name ("accounts"), not the sa-side name ("companies")
-    expect(alice!.associations![0].targetEntity).toBe("accounts");
-    // targetId must be the sb-side ID (acc1)
-    expect(alice!.associations![0].targetId).toBe("acc1");
+    // companyId must be the sb-side account ID (acc1)
+    expect(alice!.data.companyId).toBe("acc1");
   });
 });
 
@@ -1319,18 +1301,15 @@ describe("T36: record with unresolvable association is inserted immediately with
 
     // Both systems start with Acme only. Globex exists only in sa.
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
-      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 2,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com", companyId: "co2" }, updated: 2 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme",   domain: "acme.com"   }, updated: 1 },
       { id: "co2", data: { name: "Globex", domain: "globex.com" }, updated: 2 },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "accounts", targetId: "acc1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "acc1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "accounts.json"), [
       { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1338,7 +1317,7 @@ describe("T36: record with unresolvable association is inserted immediately with
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1372,12 +1351,9 @@ describe("T36: record with unresolvable association is inserted immediately with
       { id: "co3", data: { name: "Hooli",  domain: "hooli.com"  }, updated: 3 },
     ]);
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
-      { id: "c2", data: { name: "Dave", email: "dave@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
-      { id: "c3", data: { name: "Eve", email: "eve@example.com" }, updated: 3,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co3" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
+      { id: "c2", data: { name: "Dave", email: "dave@example.com", companyId: "co2" }, updated: 1 },
+      { id: "c3", data: { name: "Eve", email: "eve@example.com", companyId: "co3" }, updated: 3 },
     ]);
 
     // Ingest contacts only — Hooli (co3) has never been ingested into companies channel.
@@ -1394,13 +1370,13 @@ describe("T36: record with unresolvable association is inserted immediately with
     ).get() as { n: number };
     expect(deferred.n).toBeGreaterThan(0);
 
-    // Eve exists in sb but without the companyId association.
+    // Eve exists in sb but without the companyId value.
     const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
-      data: { email: string }; associations?: unknown[];
+      data: { email: string; companyId?: string };
     }>;
     const eve = sbContacts.find((r) => r.data.email === "eve@example.com");
     expect(eve).toBeDefined();
-    expect((eve!.associations ?? []).length).toBe(0);
+    expect(eve!.data.companyId).toBeUndefined();
   });
 });
 
@@ -1410,8 +1386,7 @@ describe("T37: deferred retry adds the association once the company is synced", 
     const dirB = makeTempDir();
 
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Eve", email: "eve@example.com" }, updated: 2,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Eve", email: "eve@example.com", companyId: "co2" }, updated: 2 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme",  domain: "acme.com"  }, updated: 1 },
@@ -1426,7 +1401,7 @@ describe("T37: deferred retry adds the association once the company is synced", 
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1464,14 +1439,13 @@ describe("T37: deferred retry adds the association once the company is synced", 
     ).get() as { n: number };
     expect(deferred.n).toBe(0);
 
-    // Eve's sb record now has the companyId association pointing at the Hooli account.
+    // Eve's sb record now has the companyId pointing at the Hooli account.
     const sbContacts = readJson(join(dirB, "contacts.json")) as Array<{
-      data: { email: string };
-      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+      data: { email: string; companyId?: string };
     }>;
     const eve = sbContacts.find((r) => r.data.email === "eve@example.com");
     expect(eve).toBeDefined();
-    expect((eve!.associations ?? []).length).toBeGreaterThan(0);
+    expect(eve!.data.companyId).toBeDefined();
   });
 });
 
@@ -1495,7 +1469,7 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { managerId: { entity: "contacts" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1518,10 +1492,8 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
     // Add c1 and c2 referencing each other — both new to sb
     writeJson(join(dirA, "contacts.json"), [
       { id: "seed1", data: { name: "Seed", email: "seed@example.com" }, updated: 1 },
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 2,
-        associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c2" }] },
-      { id: "c2", data: { name: "Bob", email: "bob@example.com" }, updated: 2,
-        associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", managerId: "c2" }, updated: 2 },
+      { id: "c2", data: { name: "Bob", email: "bob@example.com", managerId: "c1" }, updated: 2 },
     ]);
 
     // First ingest: c1 processed first → partial remap, inserted without assoc, deferred.
@@ -1551,15 +1523,14 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
     ).get() as { n: number };
     expect(deferredAfterRetry.n).toBe(0);
 
-    // Both sb contacts now have their managerId association
+    // Both sb contacts now have their managerId value
     const sbFinal = readJson(join(dirB, "contacts.json")) as Array<{
-      data: { email: string };
-      associations?: Array<{ predicate: string }>;
+      data: { email: string; managerId?: string };
     }>;
     const aliceFinal = sbFinal.find((r) => r.data.email === "alice@example.com");
     const bobFinal   = sbFinal.find((r) => r.data.email === "bob@example.com");
-    expect((aliceFinal!.associations ?? []).some((a) => a.predicate === "managerId")).toBe(true);
-    expect((bobFinal!.associations   ?? []).some((a) => a.predicate === "managerId")).toBe(true);
+    expect(aliceFinal!.data.managerId).toBeDefined();
+    expect(bobFinal!.data.managerId).toBeDefined();
   });
 });
 
@@ -1751,7 +1722,7 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
     const iA = {
       id: "system-a",
       connector: jsonfiles,
-      config: { filePaths: [join(dirA, "companies.json"), join(dirA, "contacts.json")] },
+      config: { entities: { companies: { filePath: join(dirA, "companies.json") }, contacts: { filePath: join(dirA, "contacts.json") } } },
       auth: {},
       batchIdRef: { current: undefined },
       triggerRef: { current: undefined },
@@ -1759,7 +1730,7 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
     const iB = {
       id: "system-b",
       connector: jsonfiles,
-      config: { filePaths: [join(dirB, "accounts.json"), join(dirB, "employees.json")] },
+      config: { entities: { accounts: { filePath: join(dirB, "accounts.json") }, employees: { filePath: join(dirB, "employees.json") } } },
       auth: {},
       batchIdRef: { current: undefined },
       triggerRef: { current: undefined },
@@ -1826,7 +1797,7 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
     const iA = {
       id: "system-a",
       connector: jsonfiles,
-      config: { filePaths: [join(dirA, "companies.json"), join(dirA, "contacts.json")] },
+      config: { entities: { companies: { filePath: join(dirA, "companies.json") }, contacts: { filePath: join(dirA, "contacts.json") } } },
       auth: {},
       batchIdRef: { current: undefined },
       triggerRef: { current: undefined },
@@ -1834,7 +1805,7 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
     const iB = {
       id: "system-b",
       connector: jsonfiles,
-      config: { filePaths: [join(dirB, "accounts.json"), join(dirB, "employees.json")] },
+      config: { entities: { accounts: { filePath: join(dirB, "accounts.json") }, employees: { filePath: join(dirB, "employees.json") } } },
       auth: {},
       batchIdRef: { current: undefined },
       triggerRef: { current: undefined },
@@ -1900,10 +1871,9 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
     const dirB = makeTempDir();
     const dirC = makeTempDir();
 
-    // sa has companies + contacts (Alice with a companyId association)
+    // sa has companies + contacts (Alice with a companyId FK)
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1911,8 +1881,7 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
 
     // sb has the same records matched (Alice + Acme)
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "acc1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "acc1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "companies.json"), [
       { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -1929,7 +1898,7 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -1978,17 +1947,15 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
     }
     await engine.onboard("contacts", await engine.discover("contacts"));
 
-    // sc should now have Alice with her association (step 1b fanout with lookup)
+    // sc should now have Alice with her companyId pointing at the sc-side company ID
     const scContacts = readJson(join(dirC, "contacts.json")) as Array<{
       id: string;
-      data: { email: string };
-      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+      data: { email: string; companyId?: string };
     }>;
     const alice = scContacts.find((r) => r.data.email === "alice@example.com");
     expect(alice).toBeDefined();
-    expect(alice!.associations?.length).toBeGreaterThan(0);
-    // The association targetId must be the sc-side company ID (org1)
-    expect(alice!.associations![0].targetId).toBe("org1");
+    // The companyId must be the sc-side company ID (org1)
+    expect(alice!.data.companyId).toBe("org1");
   });
 });
 
@@ -2011,17 +1978,15 @@ describe("T44: RecordSyncResult association payload fields", () => {
       { id: "org1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
     ]);
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "org1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "org1" }, updated: 1 },
     ]);
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -2056,12 +2021,10 @@ describe("T44: RecordSyncResult association payload fields", () => {
     await engine.ingest("contacts", "sa", { fullSync: true });
     await engine.ingest("contacts", "sb", { fullSync: true });
 
-    // Add a new contact with an association — sa has never seen this record
+    // Add a new contact with a FK — sa has never seen this record
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
-      { id: "c2", data: { name: "Bob", email: "bob@example.com" }, updated: 2,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
+      { id: "c2", data: { name: "Bob", email: "bob@example.com", companyId: "co1" }, updated: 2 },
     ]);
 
     const result = await engine.ingest("contacts", "sa");
@@ -2086,17 +2049,15 @@ describe("T44: RecordSyncResult association payload fields", () => {
       { id: "org2", data: { name: "Beta Corp", domain: "beta.com" }, updated: 1 },
     ]);
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirB, "contacts.json"), [
-      { id: "e1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "org1" }] },
+      { id: "e1", data: { name: "Alice", email: "alice@example.com", companyId: "org1" }, updated: 1 },
     ]);
 
     const makeInst = (id: string, dir: string, entities: string[]) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(e === "contacts" ? { schema: { companyId: { entity: "companies" } } } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -2135,8 +2096,7 @@ describe("T44: RecordSyncResult association payload fields", () => {
 
     // Alice changes company in sa (co1 → co2), fields unchanged (name/email same, timestamp bumped)
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 2,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co2" }, updated: 2 },
     ]);
 
     const result = await engine.ingest("contacts", "sa");
@@ -2169,8 +2129,7 @@ describe("T45: association predicate is translated from source name to target na
     const dirB = makeTempDir(); // ERP: employees with orgId, accounts
 
     writeJson(join(dirA, "contacts.json"), [
-      { id: "c1", data: { name: "Alice", email: "alice@example.com" }, updated: 1,
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }] },
+      { id: "c1", data: { name: "Alice", email: "alice@example.com", companyId: "co1" }, updated: 1 },
     ]);
     writeJson(join(dirA, "companies.json"), [
       { id: "co1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
@@ -2184,9 +2143,9 @@ describe("T45: association predicate is translated from source name to target na
       { id: "acc1", data: { name: "Acme", domain: "acme.com" }, updated: 1 },
     ]);
 
-    const makeInst = (id: string, dir: string, entities: string[]) => ({
+    const makeInst = (id: string, dir: string, entities: string[], schemas?: Record<string, Record<string, { entity: string }>>) => ({
       id, connector: jsonfiles,
-      config: { filePaths: entities.map((e) => join(dir, `${e}.json`)) },
+      config: { entities: Object.fromEntries(entities.map((e) => [e, { filePath: join(dir, `${e}.json`), ...(schemas?.[e] ? { schema: schemas[e] } : {}) }])) },
       auth: {},
       batchIdRef: { current: undefined } as { current: string | undefined },
       triggerRef: { current: undefined } as { current: "poll" | "webhook" | "on_enable" | "on_disable" | "oauth_refresh" | undefined },
@@ -2195,8 +2154,8 @@ describe("T45: association predicate is translated from source name to target na
     const db = openDb(":memory:");
     const engine = new SyncEngine({
       connectors: [
-        makeInst("crm", dirA, ["contacts", "companies"]),
-        makeInst("erp", dirB, ["contacts", "accounts"]),
+        makeInst("crm", dirA, ["contacts", "companies"], { contacts: { companyId: { entity: "companies" } } }),
+        makeInst("erp", dirB, ["contacts", "accounts"], { contacts: { orgId: { entity: "accounts" } } }),
       ],
       channels: [
         { id: "companies", members: [
@@ -2226,19 +2185,15 @@ describe("T45: association predicate is translated from source name to target na
     }
     await engine.onboard("contacts", await engine.discover("contacts"));
 
-    // ERP's contacts file should have Alice with predicate "orgId" (not "companyId")
+    // ERP's contacts file should have Alice with orgId pointing at the ERP-side account
     const erpContacts = readJson(join(dirB, "contacts.json")) as Array<{
       id: string;
-      data: { email: string };
-      associations?: Array<{ predicate: string; targetEntity: string; targetId: string }>;
+      data: { email: string; orgId?: string };
     }>;
     const alice = erpContacts.find((r) => r.data.email === "alice@example.com");
     expect(alice).toBeDefined();
-    expect(alice!.associations?.length).toBeGreaterThan(0);
-    // Predicate must be the ERP-local name
-    expect(alice!.associations![0].predicate).toBe("orgId");
-    // Target must be remapped to the ERP-side account ID
-    expect(alice!.associations![0].targetId).toBe("acc1");
+    // orgId must be the ERP-side account ID (acc1)
+    expect(alice!.data.orgId).toBe("acc1");
 
     // Incremental ingest from CRM → no spurious UPDATEs to ERP (echo detection correct)
     const result = await engine.ingest("contacts", "crm");

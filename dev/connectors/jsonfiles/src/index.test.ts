@@ -7,9 +7,9 @@ import type { ConnectorContext, EntityDefinition, InsertRecord, UpdateRecord } f
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeCtx(filePaths: string[], extra: Record<string, unknown> = {}): ConnectorContext {
+function makeCtx(entities: Record<string, { filePath: string; schema?: Record<string, unknown> }>, extra: Record<string, unknown> = {}): ConnectorContext {
   return {
-    config: { filePaths, ...extra },
+    config: { entities, ...extra },
     state: {} as ConnectorContext["state"],
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     http: null as unknown as ConnectorContext["http"],
@@ -36,7 +36,7 @@ describe("jsonfiles connector", () => {
 
   beforeEach(() => {
     fp = join(tmpdir(), `jsonfiles-test-${crypto.randomUUID()}.json`);
-    ctx = makeCtx([fp]);
+    ctx = makeCtx({ records: { filePath: fp } });
     entity = connector.getEntities!(ctx)[0];
   });
 
@@ -56,7 +56,7 @@ describe("jsonfiles connector", () => {
     });
 
     it("reflects custom idField and watermarkField in schema", () => {
-      const e = connector.getEntities!(makeCtx([fp], { idField: "uuid", watermarkField: "modifiedAt" }))[0];
+      const e = connector.getEntities!(makeCtx({ records: { filePath: fp } }, { idField: "uuid", watermarkField: "modifiedAt" }))[0];
       expect(e.schema).toHaveProperty("uuid");
       expect(e.schema).toHaveProperty("modifiedAt");
       expect(e.schema).not.toHaveProperty("id");
@@ -66,15 +66,6 @@ describe("jsonfiles connector", () => {
     it("marks the id field as required and immutable", () => {
       expect(entity.schema!["id"].required).toBe(true);
       expect(entity.schema!["id"].immutable).toBe(true);
-    });
-
-    it("includes associationsField in schema when configured", () => {
-      const e = connector.getEntities!(makeCtx([fp], { associationsField: "links" }))[0];
-      expect(e.schema).toHaveProperty("links");
-    });
-
-    it("includes default associations field in schema when not configured", () => {
-      expect(Object.keys(entity.schema!)).toEqual(["id", "data", "updated", "associations"]);
     });
   });
   // ── fetch ──────────────────────────────────────────────────────────────────
@@ -254,7 +245,7 @@ describe("jsonfiles connector", () => {
     let customEntity: EntityDefinition;
 
     beforeEach(() => {
-      customCtx = makeCtx([fp], { idField: "uuid", watermarkField: "modifiedAt" });
+      customCtx = makeCtx({ records: { filePath: fp } }, { idField: "uuid", watermarkField: "modifiedAt" });
       customEntity = connector.getEntities!(customCtx)[0];
     });
 
@@ -302,69 +293,6 @@ describe("jsonfiles connector", () => {
     });
   });
 
-  // ── associations ───────────────────────────────────────────────────────────
-
-  describe("associations", () => {
-    it("extracts associations from the configured field", async () => {
-      writeFileSync(fp, JSON.stringify([
-        {
-          id: "1",
-          data: { name: "Alice" },
-          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
-        },
-      ]));
-
-      const assocCtx = makeCtx([fp], { associationsField: "links" });
-      const assocEntity = connector.getEntities!(assocCtx)[0];
-      const [batch] = await collect(assocEntity.read!(assocCtx));
-
-      // Associations are now emitted as Ref values in data, not a separate field.
-      expect(batch.records[0].data["company"]).toEqual({ '@id': 'c1', '@entity': 'company' });
-    });
-
-    it("strips the associations field from data", async () => {
-      writeFileSync(fp, JSON.stringify([
-        {
-          id: "1",
-          data: { name: "Alice" },
-          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
-        },
-      ]));
-
-      const assocCtx = makeCtx([fp], { associationsField: "links" });
-      const assocEntity = connector.getEntities!(assocCtx)[0];
-      const [batch] = await collect(assocEntity.read!(assocCtx));
-
-      expect(batch.records[0].data).not.toHaveProperty("links");
-    });
-
-    it("also exposes associations via lookup", async () => {
-      writeFileSync(fp, JSON.stringify([
-        {
-          id: "1",
-          data: { name: "Alice" },
-          links: [{ predicate: "company", targetEntity: "company", targetId: "c1" }],
-        },
-      ]));
-
-      const assocCtx = makeCtx([fp], { associationsField: "links" });
-      const assocEntity = connector.getEntities!(assocCtx)[0];
-      const [record] = await assocEntity.lookup!(["1"]);
-
-      // Associations are now emitted as Ref values in data.
-      expect(record.data["company"]).toEqual({ '@id': 'c1', '@entity': 'company' });
-    });
-
-    it("does not set associations when field is not configured", async () => {
-      writeFileSync(fp, JSON.stringify([{ id: "1", data: {}, links: [] }]));
-
-      const [batch] = await collect(entity.read!(ctx));
-      // No associations field in file → no Ref values added to data.
-      expect(Object.keys(batch.records[0].data).filter((k) =>
-        typeof batch.records[0].data[k] === 'object' && batch.records[0].data[k] !== null && '@id' in (batch.records[0].data[k] as object)
-      )).toHaveLength(0);
-    });
-  });
 
   // ── multiple files ─────────────────────────────────────────────────────────
 
@@ -384,7 +312,7 @@ describe("jsonfiles connector", () => {
     });
 
     it("creates one entity per file with the filename as entity name", () => {
-      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const multiCtx = makeCtx({ customers: { filePath: customersFile }, invoices: { filePath: invoicesFile } });
       const entities = connector.getEntities!(multiCtx);
       expect(entities.map((e) => e.name)).toEqual(["customers", "invoices"]);
     });
@@ -393,7 +321,7 @@ describe("jsonfiles connector", () => {
       writeFileSync(customersFile, JSON.stringify([{ id: "c1", data: { name: "ACME" } }]));
       writeFileSync(invoicesFile, JSON.stringify([{ id: "i1", data: { amount: 100 } }]));
 
-      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const multiCtx = makeCtx({ customers: { filePath: customersFile }, invoices: { filePath: invoicesFile } });
       const [customersEntity, invoicesEntity] = connector.getEntities!(multiCtx);
 
       const [customerBatch] = await collect(customersEntity.read!(multiCtx));
@@ -404,7 +332,7 @@ describe("jsonfiles connector", () => {
     });
 
     it("inserting into one entity does not affect the other file", async () => {
-      const multiCtx = makeCtx([customersFile, invoicesFile]);
+      const multiCtx = makeCtx({ customers: { filePath: customersFile }, invoices: { filePath: invoicesFile } });
       const [customersEntity, invoicesEntity] = connector.getEntities!(multiCtx);
 
       await collect(customersEntity.insert!(from([{ data: { _id: "c1" } }] satisfies InsertRecord[])));
@@ -423,7 +351,7 @@ describe("jsonfiles connector", () => {
     let logFp: string;
 
     beforeEach(() => {
-      logCtx = makeCtx([fp], { auditLog: true });
+      logCtx = makeCtx({ records: { filePath: fp } }, { auditLog: true });
       logEntity = connector.getEntities!(logCtx)[0];
       logFp = fp.replace(/\.json$/, ".log.json");
     });
@@ -460,19 +388,6 @@ describe("jsonfiles connector", () => {
       // unchanged field "name" not present in diff
       expect(log[1].before).not.toHaveProperty("name");
       expect(log[1].after).not.toHaveProperty("name");
-    });
-
-    it("update diff includes associations when they change", async () => {
-      // associations are passed as Ref values in data (Ref contract)
-      const ref1 = { '@id': 'org1', '@entity': 'orgs' };
-      const ref2 = { '@id': 'org2', '@entity': 'orgs' };
-      const assoc1 = [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org1" }];
-      const assoc2 = [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org2" }];
-      const [ins] = await collect(logEntity.insert!(from([{ data: { name: "Alice", orgRef: ref1 } }] satisfies InsertRecord[])));
-      await collect(logEntity.update!(from([{ id: ins.id, data: { orgRef: ref2 } }] satisfies UpdateRecord[])));
-      const log = JSON.parse(readFileSync(logFp, "utf8")) as Array<{ op: string; before?: Record<string, unknown>; after?: Record<string, unknown> }>;
-      expect(log[1].before).toMatchObject({ associations: assoc1 });
-      expect(log[1].after).toMatchObject({ associations: assoc2 });
     });
 
     it("update mutates main file in-place (not append)", async () => {

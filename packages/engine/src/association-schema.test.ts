@@ -1,15 +1,14 @@
 /**
  * packages/engine/src/association-schema.test.ts
  *
- * Tests for the associationSchema feature on EntityDefinition.
+ * Tests for FK-field-driven association filtering and pre-flight warnings.
+ * FK declarations live on FieldDescriptor.entity — no separate associationSchema.
  * Spec: specs/associations.md § 8 — Association Schema
  *
- * AS-1  AssociationDescriptor is exported from the SDK.
- * AS-2  Pre-flight warning fires when associationSchema.targetEntity is not in channel.
- * AS-3  Pre-flight warning is silent when all targetEntity values are in channel.
- * AS-4  Write-side filter: associations not listed in associationSchema are dropped before dispatch.
- * AS-5  Write-side pass-through: entity without associationSchema receives all associations.
- * AS-6  Required-association warning appears in RecordSyncResult when predicate is absent.
+ * AS-2  Pre-flight warning fires when schema[field].entity is not in channel.
+ * AS-3  Pre-flight warning is silent when all entity values are in channel.
+ * AS-4  Write-side filter: associations for fields without schema.entity are dropped before dispatch.
+ * AS-5  Write-side pass-through: entity without FK schema fields receives all associations.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -21,7 +20,6 @@ import type {
   ReadBatch,
   UpdateRecord,
   UpdateResult,
-  AssociationDescriptor,
 } from "@opensync/sdk";
 import { SyncEngine, openDb, type ResolvedConfig } from "./index.js";
 import type { ChannelMember } from "./config/loader.js";
@@ -83,11 +81,9 @@ function makeTargetEntity(
   name: string,
   receivedInserts: InsertRecord[],
   receivedUpdates: UpdateRecord[],
-  associationSchema?: Record<string, AssociationDescriptor>,
 ): EntityDefinition {
   return {
     name,
-    associationSchema,
     async *read() { yield { records: [], since: "t0" }; },
     async *insert(records): AsyncIterable<InsertResult> {
       for await (const r of records) {
@@ -104,25 +100,9 @@ function makeTargetEntity(
   };
 }
 
-// ─── AS-1 ─────────────────────────────────────────────────────────────────────
-
-describe("AS-1: AssociationDescriptor exported from SDK", () => {
-  it("type exists and carries expected shape", () => {
-    // Compile-time check: assigning a valid AssociationDescriptor must not error.
-    const d: AssociationDescriptor = {
-      targetEntity: "company",
-      description: "The company this contact belongs to.",
-      required: true,
-      multiple: false,
-    };
-    expect(d.targetEntity).toBe("company");
-    expect(d.required).toBe(true);
-  });
-});
-
 // ─── AS-2 ─────────────────────────────────────────────────────────────────────
 
-describe("AS-2: pre-flight warning fires when targetEntity is absent from channel", () => {
+describe("AS-2: pre-flight warning fires when schema entity is absent from channel", () => {
   it("logs a warning at construction time", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
@@ -130,10 +110,8 @@ describe("AS-2: pre-flight warning fires when targetEntity is absent from channe
 
     try {
       const sourceWithSchema = makeSourceEntity("contact", []);
-      sourceWithSchema.associationSchema = {
-        // 'company' is NOT a member of the channel below
-        companyId: { targetEntity: "company", description: "The company." },
-      };
+      // 'company' is NOT a member of the channel below
+      sourceWithSchema.schema = { companyId: { entity: "company" } };
 
       makeConfig(
         [sourceWithSchema],
@@ -164,18 +142,16 @@ describe("AS-2: pre-flight warning fires when targetEntity is absent from channe
 
 // ─── AS-3 ─────────────────────────────────────────────────────────────────────
 
-describe("AS-3: pre-flight is silent when all targetEntity values are channel members", () => {
-  it("no warning when targetEntity exists in channel", () => {
+describe("AS-3: pre-flight is silent when all entity values are channel members", () => {
+  it("no warning when entity exists in channel", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => { warnings.push(String(args[0])); };
 
     try {
       const sourceWithSchema = makeSourceEntity("contact", []);
-      sourceWithSchema.associationSchema = {
-        // 'contact' IS a member of the channel (same entity type, cross-reference)
-        managerId: { targetEntity: "contact", description: "The manager contact." },
-      };
+      // 'contact' IS a member of the channel (self-referential)
+      sourceWithSchema.schema = { managerId: { entity: "contact" } };
 
       const db = openDb(":memory:");
       new SyncEngine(makeConfig(
@@ -187,7 +163,7 @@ describe("AS-3: pre-flight is silent when all targetEntity values are channel me
         ],
       ), db);
 
-      // No associationSchema-related warning
+      // No entity-related warning
       expect(warnings.some((w) => w.includes("managerId") || (w.includes("unresolvable") && w.includes("contact")))).toBe(false);
     } finally {
       console.warn = originalWarn;
@@ -197,8 +173,8 @@ describe("AS-3: pre-flight is silent when all targetEntity values are channel me
 
 // ─── AS-4 ─────────────────────────────────────────────────────────────────────
 
-describe("AS-4: write-side filter drops predicates absent from associationSchema", () => {
-  it("only declared predicates reach update() after a change", async () => {
+describe("AS-4: write-side filter drops predicates absent from schema entity fields", () => {
+  it("only schema-declared FK predicates reach update() after a change", async () => {
     const receivedUpdates4: UpdateRecord[] = [];
     const db4 = openDb(":memory:");
     let callN4 = 0;
@@ -252,10 +228,10 @@ describe("AS-4: write-side filter drops predicates absent from associationSchema
       async *update(records) { for await (const r of records) yield { id: r.id }; },
     };
 
-    // Target: only managerId is listed in associationSchema
+    // Target: only managerId is listed as a schema FK field
     const tgtEnt4: EntityDefinition = {
       name: "contact",
-      associationSchema: { managerId: { targetEntity: "contact" } },
+      schema: { managerId: { entity: "contact" } },
       async *read() {
         tgtCallN4++;
         if (tgtCallN4 === 1) {
@@ -310,7 +286,7 @@ describe("AS-4: write-side filter drops predicates absent from associationSchema
 
 // ─── AS-5 ─────────────────────────────────────────────────────────────────────
 
-describe("AS-5: entity without associationSchema receives all associations (pass-through)", () => {
+describe("AS-5: entity without FK schema fields receives all associations (pass-through)", () => {
   it("all remapped predicates pass through to update() when no schema declared", async () => {
     const receivedUpdates5: UpdateRecord[] = [];
     const db5 = openDb(":memory:");
@@ -407,79 +383,6 @@ describe("AS-5: entity without associationSchema receives all associations (pass
       expect(captured5.data["managerId"]).toBeDefined();
       expect(captured5.data["tagId"]).toBeDefined();
     }
-  });
-});
-
-// ─── AS-6 ─────────────────────────────────────────────────────────────────────
-
-describe("AS-6: required-association warning appears in RecordSyncResult", () => {
-  it("warnings[] contains missing_required_association when required predicate is absent", async () => {
-    const db6: ReturnType<typeof openDb> = openDb(":memory:");
-    let callN6 = 0;
-    let tgtCallN6 = 0;
-
-    const members6: ChannelMember[] = [
-      { connectorId: "src", entity: "contact", assocMappings: [{ source: "managerId", target: "managerId" }] },
-      { connectorId: "tgt", entity: "contact", assocMappings: [{ source: "managerId", target: "managerId" }] },
-    ];
-
-    // Source: first read = carol with no associations; second read = carol updated, still no assocs
-    const srcEnt6: EntityDefinition = {
-      name: "contact",
-      async *read() {
-        callN6++;
-        if (callN6 === 1) {
-          yield { records: [{ id: "carol-1", data: { email: "carol@example.com", name: "Carol" } }], since: "t1" };
-        } else if (callN6 === 2) {
-          yield { records: [{ id: "carol-1", data: { email: "carol@example.com", name: "Carol Updated" } }], since: "t2" };
-        } else {
-          yield { records: [], since: "t3" };
-        }
-      },
-      async *insert(records) { for await (const r of records) yield { id: crypto.randomUUID(), data: r.data }; },
-      async *update(records) { for await (const r of records) yield { id: r.id }; },
-    };
-
-    // Target: managerId is required but never present
-    const tgtEnt6: EntityDefinition = {
-      name: "contact",
-      associationSchema: { managerId: { targetEntity: "contact", required: true } },
-      async *read() {
-        tgtCallN6++;
-        if (tgtCallN6 === 1) {
-          yield { records: [{ id: "tgt-carol-1", data: { email: "carol@example.com", name: "Carol" } }], since: "t1" };
-        } else {
-          yield { records: [], since: "t2" };
-        }
-      },
-      async *insert(records): AsyncIterable<InsertResult> {
-        for await (const r of records) yield { id: crypto.randomUUID(), data: r.data };
-      },
-      async *update(records): AsyncIterable<UpdateResult> {
-        for await (const r of records) yield { id: r.id };
-      },
-    };
-    void tgtCallN6;
-
-    const cfg6 = makeConfig([srcEnt6], [tgtEnt6], members6);
-    const eng6 = new SyncEngine(cfg6, db6);
-
-    await eng6.ingest("ch", "src", { collectOnly: true });
-    await eng6.ingest("ch", "tgt", { collectOnly: true });
-    const rep6 = await eng6.discover("ch");
-    await eng6.onboard("ch", rep6);
-
-    // Second ingest: carol updated, still no managerId → required warning expected
-    const result6 = await eng6.ingest("ch", "src");
-
-    const updateResults = result6.records.filter((r) => r.action === "update" && r.targetConnectorId === "tgt");
-    expect(updateResults.length).toBeGreaterThan(0);
-
-    const withWarning = updateResults.find((r) =>
-      r.warnings?.some((w) => w.includes("missing_required_association"))
-    );
-    expect(withWarning).toBeDefined();
-    expect(withWarning!.warnings!.some((w) => w.includes("managerId"))).toBe(true);
   });
 });
 

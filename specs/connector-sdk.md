@@ -40,7 +40,6 @@ interface EntityDefinition {
   update?(records: AsyncIterable<UpdateRecord>, ctx: ConnectorContext): AsyncIterable<UpdateResult>;
   delete?(ids: AsyncIterable<string>, ctx: ConnectorContext): AsyncIterable<DeleteResult>;
   schema?: Record<string, FieldDescriptor>;    // field metadata (e.g. { "fnavn": { description: "First name" }, "amount": { description: "Value in NOK", type: "number" } })
-  associationSchema?: Record<string, AssociationDescriptor>; // association predicate metadata (see § Association Schema)
   scopes?: { read?: string[]; write?: string[]; always?: string[] }; // OAuth scopes by role; 'always' is requested whenever the entity is enabled
   dependsOn?: string[];                        // e.g. ['company'] — sync companies before contacts (entity names)
   onEnable?(ctx: ConnectorContext): Promise<void>;  // register webhook subscription for this entity's events
@@ -145,45 +144,6 @@ interface FieldDescriptor {
 // EntityCapabilities removed — insert/update/delete presence on EntityDefinition is the capability declaration.
 ```
 
-### § Association Schema
-
-`associationSchema` on an entity declares which association predicates it emits from `read()` and accepts in `insert()`/`update()`. Key is the predicate string exactly as it appears in `Association.predicate` — a short field name (`companyId`) or a full URI (`https://schema.org/worksFor`).
-
-```typescript
-interface AssociationDescriptor {
-  targetEntity: string;   // entity name the predicate points to (connector's own name)
-  description?: string;   // human-readable description; agents use for mapping suggestions
-  required?: boolean;     // advisory: warn if a dispatched record is missing this predicate
-  multiple?: boolean;     // true if a record may carry > 1 association for this predicate (default: false)
-}
-```
-
-Example — HubSpot contact:
-```typescript
-associationSchema: {
-  companyId: { targetEntity: 'company', description: 'The company this contact belongs to.' },
-  ownerId:   { targetEntity: 'owner',   description: 'HubSpot user who owns this contact.' },
-},
-```
-
-Example — SPARQL person with URI predicates:
-```typescript
-associationSchema: {
-  'https://schema.org/worksFor':  { targetEntity: 'organization', description: 'Organisation the person works for.' },
-  'https://schema.org/memberOf':  { targetEntity: 'organization', description: 'Organisation the person is a member of.', multiple: true },
-},
-```
-
-**Engine behaviour:**
-
-1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only passes associations whose predicates are listed in the schema. Predicates not in the schema are dropped silently. Entities without `associationSchema` receive all association metadata unchanged.
-
-2. **Pre-flight warning (§ A)** — At channel setup, if a declared `targetEntity` is not registered as a channel member, the engine logs a warning. Dispatch still proceeds — the warning is informational.
-
-3. **Required-association warning (§ C)** — When a dispatched record is missing an association predicate marked `required: true`, the engine appends a `missing_required_association` warning to the `RecordSyncResult`. This is advisory; dispatch is not blocked.
-
-`associationSchema` is optional on every entity. Omitting it leaves all existing behaviour unchanged.
-
 ### Config Schema
 
 `configSchema` declares non-auth configuration a connector instance needs — things the user must supply beyond what the declared auth type handles (e.g. a `portalId`, a `baseUrl`, a database DSN). Auth credentials (`clientId`, `clientSecret`, API keys, passwords) are never declared here.
@@ -204,10 +164,10 @@ configSchema: {
 Array fields are declared with `type: 'array'` and an `items` descriptor. The engine presents them as a multi-value input and delivers the value as a native array in `ctx.config`:
 ```typescript
 configSchema: {
-  filePaths: {
+  topicNames: {
     type: 'array',
     items: { type: 'string' },
-    description: 'JSON file paths. Each file becomes one entity.',
+    description: 'Kafka topic names to subscribe to.',
     required: true,
   },
 }
@@ -381,8 +341,7 @@ yield { records: [{ id: r.id, data: r }] };
 1. Engine auto-synthesis: plain string value + `entity` on the schema descriptor (no Ref object needed in `read()`)
 2. `@entity` on an explicit `Ref` object in `data`
 3. `entity` on the schema descriptor when `@entity` is absent from the Ref
-4. `associationSchema[predicate].targetEntity`
-5. None of the above → opaque, no association derived
+4. None of the above → opaque, no association derived
 
 **SDK helpers** — `@opensync/sdk` exports `isRef(value)` to test whether a value is a `Ref` object. This is useful in `read()` implementations that explicitly construct Refs (e.g. RDF/SPARQL connectors that need to annotate IRI fields before the engine auto-synthesis step).
 
@@ -417,13 +376,11 @@ The engine constructs typed records for each write operation. All fields are eng
 ```typescript
 interface InsertRecord {
   data: Record<string, unknown | unknown[]>;   // FK fields carry remapped plain ID strings
-  associations?: Association[];               // full FK metadata (predicate, targetEntity, targetId); engine-provided
 }
 
 interface UpdateRecord {
   id: string;                                  // ID previously returned by InsertResult.id
   data: Record<string, unknown | unknown[]>;   // FK fields carry remapped plain ID strings
-  associations?: Association[];               // full FK metadata; includes inexpressible target-local predicates
   version?: string;                            // last-seen version token from ReadRecord.version — used for conditional writes (e.g. If-Match ETag)
   snapshot?: Record<string, unknown>;          // full field snapshot at the time the delta was computed — used for conflict detection without a lookup() round trip
 }
@@ -435,19 +392,18 @@ All fields are engine-owned and read-only from the connector's perspective.
 
 The engine, not the connector, is responsible for maintaining `id`. Connectors must not mutate it.
 
-**Writing associations**: FK reference fields appear as **plain ID strings** in `data`. Most REST
-API connectors can pass `record.data` directly to the API. Connectors that need to persist FK
-data in a separate format (a relationship table, an associations file section, a SPARQL triple
-pattern) should use `record.associations` which provides full metadata: `predicate`, `targetEntity`,
-and `targetId`. The `associations` array includes both remapped source associations and any
-"inexpressible" target-local associations the source cannot express — ensuring they are not lost
-on update.
+**Writing associations**: FK reference fields appear as **plain ID strings** in `data` under the
+target-local predicate name. Connectors receive `record.data` directly and can pass it to the API as-is.
+The engine handles all remapping from source-local IDs to target-local IDs before dispatch.
+If the association target is not yet cross-linked the field is absent from `data` (and a deferred row
+is written so the engine retries once the link is established).
 
-Association predicates that the connector does not recognise can be silently ignored.
-
-The engine only passes associations whose predicates are listed in `associationSchema` when
-dispatching to a target entity that declares that schema. Targets without `associationSchema`
-receive all association metadata unchanged.
+To enable FK synthesis, declare the FK field in the entity's `schema`:
+```typescript
+schema: { companyId: { entity: "companies" } }
+```
+The engine then synthesises association metadata from the plain string value automatically. No special
+write handling is needed in the connector.
 
 ## Write Results
 
@@ -920,7 +876,7 @@ Three connectors ship with the project for development and testing:
 The simplest possible connector — reads and writes a JSON array file. Intended as the
 starting point for anyone learning the SDK.
 - Entity: `record` (arbitrary fields from the JSON objects)
-- Storage: a `.json` file on disk (path from `ctx.config.filePaths`)
+- Storage: a `.json` file on disk (path from `ctx.config.entities`)
 - `read()` reads the file, returns all objects (or filters by a `updatedAt` field if `since` is provided)
 - `insert()` appends, `update()` replaces by ID, `delete()` removes by ID — all write back to the file
 - Does not use `ctx.http` — demonstrates that connectors are not limited to REST APIs

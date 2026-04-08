@@ -219,7 +219,7 @@ export class SyncEngine {
       this.breakers.set(ch.id, new CircuitBreaker(ch.id, db));
     }
 
-    // Spec: specs/associations.md § 8.2 — pre-flight: warn when associationSchema declares
+    // Spec: specs/associations.md § 8.2 — pre-flight: warn when schema[field].entity declares
     // a targetEntity that is not registered in the same channel.
     for (const ch of config.channels) {
       const channelEntityNames = new Set(ch.members.map((m) => m.entity));
@@ -227,12 +227,13 @@ export class SyncEngine {
         const wiredMember = this.wired.get(member.connectorId);
         if (!wiredMember) continue;
         const entityDef = wiredMember.entities.find((e) => e.name === member.entity);
-        if (!entityDef?.associationSchema) continue;
-        for (const [predicate, descriptor] of Object.entries(entityDef.associationSchema)) {
-          if (!channelEntityNames.has(descriptor.targetEntity)) {
+        if (!entityDef?.schema) continue;
+        for (const [predicate, fieldDef] of Object.entries(entityDef.schema)) {
+          if (!fieldDef.entity) continue;
+          if (!channelEntityNames.has(fieldDef.entity)) {
             console.warn(
-              `[WARN] ${member.connectorId}:${member.entity}.associationSchema['${predicate}'] targets entity '${descriptor.targetEntity}' ` +
-              `but no '${descriptor.targetEntity}' entity is registered in channel '${ch.id}'. ` +
+              `[WARN] ${member.connectorId}:${member.entity}.schema['${predicate}'].entity targets entity '${fieldDef.entity}' ` +
+              `but no '${fieldDef.entity}' entity is registered in channel '${ch.id}'. ` +
               `Associations with this predicate will have unresolvable targets.`
             );
           }
@@ -800,7 +801,7 @@ export class SyncEngine {
 
         const insertData1 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData1, associations: assocToInsert }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData1 }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -905,7 +906,7 @@ export class SyncEngine {
 
         const insertData2 = this._injectRefsIntoData(outboundData, assocToInsert);
         for await (const result of targetEntityDef.insert(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData2, associations: assocToInsert }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: insertData2 }; })(),
           targetWired.ctx,
         )) {
           if (result.error) { insertError = result.error; }
@@ -1351,9 +1352,8 @@ export class SyncEngine {
    *
    * Rule (applied in order):
    *   1. `@entity` set on the Ref → use it directly.
-   *   2. Field declared as `{ type: 'ref', entity: E }` in entityDef.schema → entity = E.
-   *   3. Field key present in entityDef.associationSchema → entity = descriptor.targetEntity.
-   *   4. Neither — Ref treated as opaque object, no Association derived.
+   *   2. Field declared with `entity: E` in entityDef.schema → entity = E.
+   *   3. Neither — Ref treated as opaque object, no Association derived.
    */
   private _extractRefsFromData(
     data: Record<string, unknown>,
@@ -1367,7 +1367,7 @@ export class SyncEngine {
       handledFields.add(field);
       let targetEntity = (value as Ref)['@entity'];
       if (!targetEntity) {
-        targetEntity = entityDef?.schema?.[field]?.entity ?? entityDef?.associationSchema?.[field]?.targetEntity;
+        targetEntity = entityDef?.schema?.[field]?.entity;
       }
       if (!targetEntity) continue; // opaque — rule 4
       result.push({ predicate: field, targetEntity, targetId: (value as Ref)['@id'] });
@@ -1568,29 +1568,32 @@ export class SyncEngine {
     if (!targetEntityDef?.insert || !targetEntityDef?.update) return { type: "skip" };
 
     // Spec: specs/associations.md § 8.1 — write-side association filter.
-    // When the target entity declares associationSchema, only pass through predicates
-    // that are listed. Unlisted predicates are dropped silently.
+    // When the target entity declares schema fields with entity, only pass through
+    // predicates that name a known FK field. Unlisted predicates are dropped silently.
     let filteredAssociations = associations;
-    if (associations?.length && targetEntityDef.associationSchema) {
-      filteredAssociations = associations.filter((a) => a.predicate in targetEntityDef.associationSchema!);
-    }
-
-    // Spec: specs/associations.md § 8.3 — required-association warnings.
-    // Advisory: does not block dispatch.
-    const dispatchWarnings: string[] = [];
-    if (targetEntityDef.associationSchema) {
-      const presentPredicates = new Set((filteredAssociations ?? []).map((a) => a.predicate));
-      for (const [predicate, descriptor] of Object.entries(targetEntityDef.associationSchema)) {
-        if (descriptor.required && !presentPredicates.has(predicate)) {
-          dispatchWarnings.push(`missing_required_association: predicate '${predicate}' (targetEntity '${descriptor.targetEntity}') is absent`);
-        }
+    if (associations?.length && targetEntityDef.schema) {
+      const schemaFkFields = new Set(
+        Object.entries(targetEntityDef.schema)
+          .filter(([, fd]) => fd.entity != null)
+          .map(([f]) => f)
+      );
+      if (schemaFkFields.size > 0) {
+        filteredAssociations = associations.filter((a) => schemaFkFields.has(a.predicate));
       }
     }
+
+    const dispatchWarnings: string[] = [];
 
     const rawLocalData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
     // Strip any Ref values that bled into the canonical from source data — they are managed
     // exclusively through the associations pipeline and must not reach the connector as raw values.
-    const localData = Object.fromEntries(Object.entries(rawLocalData).filter(([, v]) => !isRef(v)));
+    // Also strip source-side FK predicate values: the engine will inject properly remapped
+    // target-local IDs via _injectRefsIntoData. Raw source IDs are connector-local and
+    // meaningless to the target connector.
+    const sourceFkPredicates = new Set((sourceMember.assocMappings ?? []).map((m) => m.source));
+    const localData = Object.fromEntries(
+      Object.entries(rawLocalData).filter(([k, v]) => !isRef(v) && !sourceFkPredicates.has(k)),
+    );
 
     // Spec: specs/field-mapping.md §5.2 — reverse record filter on flat members.
     // Applied before the written_state noop check so filtered-out canonicals don't get a
@@ -1644,7 +1647,7 @@ export class SyncEngine {
         let newId: string | undefined;
         let err: string | undefined;
         for await (const result of targetEntityDef.insert!(
-          (async function* (self: SyncEngine): AsyncIterable<InsertRecord> { yield { data: self._injectRefsIntoData(localData, filteredAssociations), associations: filteredAssociations ?? undefined }; })(this),
+          (async function* (self: SyncEngine): AsyncIterable<InsertRecord> { yield { data: self._injectRefsIntoData(localData, filteredAssociations) }; })(this),
           targetWired.ctx,
         )) { if (result.error) err = result.error; else newId = result.id; }
         if (err) return { type: "error", error: err };
@@ -1654,7 +1657,7 @@ export class SyncEngine {
         let notFound = false;
         for await (const result of targetEntityDef.update!(
           (async function* (self: SyncEngine): AsyncIterable<UpdateRecord> {
-            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), associations: filteredAssociations ?? undefined, version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
+            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
           })(this),
           targetWired.ctx,
         )) {

@@ -39,10 +39,11 @@ function write(dir: string, filename: string, records: unknown[]): void {
 }
 
 function inst(id: string, dir: string, filename = "contacts.json"): ResolvedConfig["connectors"][0] {
+  const entityName = filename.replace(/\.[^/.]+$/, "");
   return {
     id,
     connector: jsonfiles,
-    config: { filePaths: [join(dir, filename)] },
+    config: { entities: { [entityName]: { filePath: join(dir, filename) } } },
     auth: {},
     batchIdRef: { current: undefined },
     triggerRef: { current: undefined },
