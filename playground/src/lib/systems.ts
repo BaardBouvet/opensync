@@ -5,6 +5,30 @@ import type { ReadRecord } from "@opensync/sdk";
 
 export type EntitySeedMap = Record<string, Record<string, ReadRecord[]>>;
 
+/** Per-entity FK field declarations — mirrors the connector SDK `FieldDescriptor.entity` pattern.
+ *  The engine auto-synthesises associations from plain string values in `data` when the field
+ *  has `entity` declared here.  Spec: plans/connectors/PLAN_SCHEMA_REF_AUTOSYNTH.md §3.1 */
+export type EntitySchemaMap = Record<string, Record<string, Record<string, { entity: string }>>>;
+
+export const FIXED_SCHEMAS: EntitySchemaMap = {
+  crm: {
+    contacts: {
+      primaryCompanyId:   { entity: "companies" },
+      secondaryCompanyId: { entity: "companies" },
+    },
+  },
+  erp: {
+    employees: {
+      orgId: { entity: "accounts" },
+    },
+  },
+  hr: {
+    people: {
+      orgRef: { entity: "orgs" },
+    },
+  },
+};
+
 // ─── Fixed seed ───────────────────────────────────────────────────────────────
 
 export const FIXED_SEED: EntitySeedMap = {
@@ -17,23 +41,17 @@ export const FIXED_SEED: EntitySeedMap = {
     contacts: [
       {
         id: "c1",
-        data: { name: "Alice Liddell", email: "alice@example.com" },
-        // Alice has two typed company links — the canonical predicate-as-type pattern.
+        // Alice has two typed company links stored as plain FK strings in data.
         // Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md § 3.1
-        associations: [
-          { predicate: "primaryCompanyId",   targetEntity: "companies", targetId: "co1" },
-          { predicate: "secondaryCompanyId", targetEntity: "companies", targetId: "co2" },
-        ],
+        data: { name: "Alice Liddell", email: "alice@example.com", primaryCompanyId: "co1", secondaryCompanyId: "co2" },
       },
       {
         id: "c2",
-        data: { name: "Bob Martin",   email: "bob@example.com" },
-        associations: [{ predicate: "primaryCompanyId", targetEntity: "companies", targetId: "co2" }],
+        data: { name: "Bob Martin",  email: "bob@example.com",  primaryCompanyId: "co2" },
       },
       {
         id: "c3",
-        data: { name: "Carol White",  email: "carol@example.com" },
-        associations: [{ predicate: "primaryCompanyId", targetEntity: "companies", targetId: "co3" }],
+        data: { name: "Carol White", email: "carol@example.com", primaryCompanyId: "co3" },
       },
     ],
   },
@@ -45,13 +63,11 @@ export const FIXED_SEED: EntitySeedMap = {
     employees: [
       {
         id: "e1",
-        data: { fullName: "Alice Liddell", email: "alice@example.com" },
-        associations: [{ predicate: "orgId", targetEntity: "accounts", targetId: "acc1" }],
+        data: { fullName: "Alice Liddell", email: "alice@example.com", orgId: "acc1" },
       },
       {
         id: "e2",
-        data: { fullName: "Bob Martin",    email: "bob@example.com" },
-        associations: [{ predicate: "orgId", targetEntity: "accounts", targetId: "acc2" }],
+        data: { fullName: "Bob Martin",    email: "bob@example.com",   orgId: "acc2" },
       },
     ],
     orders: [
@@ -73,13 +89,11 @@ export const FIXED_SEED: EntitySeedMap = {
     people: [
       {
         id: "p1",
-        data: { displayName: "Bob Martin",   email: "bob@example.com" },
-        associations: [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org1" }],
+        data: { displayName: "Bob Martin",  email: "bob@example.com",  orgRef: "org1" },
       },
       {
         id: "p2",
-        data: { displayName: "Carol White",  email: "carol@example.com" },
-        associations: [{ predicate: "orgRef", targetEntity: "orgs", targetId: "org2" }],
+        data: { displayName: "Carol White", email: "carol@example.com", orgRef: "org2" },
       },
     ],
   },

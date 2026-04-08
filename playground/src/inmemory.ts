@@ -61,6 +61,7 @@ function makeEntity(
   modifiedAt: Map<string, number>,  // shared with connector level — id → ts
   softDeleted: Set<string>,         // ids to exclude from engine read
   bump: () => number,               // monotonic counter shared across all entities
+  entitySchema?: Record<string, { entity: string }>,
 ): EntityDefinition {
   // Assign initial watermarks and timestamps to seed records.
   const seedTs = Date.now();
@@ -71,6 +72,14 @@ function makeEntity(
 
   return {
     name: entityName,
+    schema: entitySchema
+      ? Object.fromEntries(
+          Object.entries(entitySchema).map(([field, desc]) => [
+            field,
+            { type: "string" as const, entity: desc.entity },
+          ]),
+        )
+      : undefined,
 
     async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
       const records = store.get(entityName) ?? [];
@@ -109,7 +118,6 @@ function makeEntity(
         const newRecord: ReadRecord = {
           id,
           data: record.data,
-          ...(record.associations ? { associations: record.associations as Association[] } : {}),
         };
         const existing = store.get(entityName) ?? [];
         store.set(entityName, [...existing, newRecord]);
@@ -135,9 +143,6 @@ function makeEntity(
         const updated: ReadRecord = {
           id: record.id,
           data: mergedData,
-          ...(record.associations !== undefined
-            ? { associations: record.associations as Association[] }
-            : prev.associations !== undefined ? { associations: prev.associations } : {}),
         };
         const next = [...existing];
         next[idx] = updated;
@@ -175,6 +180,7 @@ function makeEntity(
 export function createInMemoryConnector(
   systemId: string,
   seed: EntitySeed,
+  schemas?: Record<string, Record<string, { entity: string }>>,
 ): InMemoryConnector {
   const store = new Map<string, ReadRecord[]>();
   // Deep-copy the seed so resets don't mutate the original
@@ -197,7 +203,7 @@ export function createInMemoryConnector(
     allWatermarks.set(name, wms);
     allModifiedAt.set(name, mods);
     allSoftDeleted.set(name, sds);
-    return makeEntity(name, store, wms, mods, sds, bump);
+    return makeEntity(name, store, wms, mods, sds, bump, schemas?.[name]);
   });
 
   const connector: Connector = {
@@ -242,27 +248,38 @@ export function createInMemoryConnector(
         const mods = allModifiedAt.get(entity)   ?? new Map<string, number>();
         const wms  = allWatermarks.get(entity)   ?? new Map<string, number>();
         const sds  = allSoftDeleted.get(entity)  ?? new Set<string>();
-        out[entity] = records.map((r) => ({
-          ...r,
-          modifiedAt:  mods.get(r.id) ?? 0,
-          watermark:   wms.get(r.id)  ?? 0,
-          softDeleted: sds.has(r.id),
-        }));
+        const entitySchema = schemas?.[entity];
+        out[entity] = records.map((r) => {
+          // Derive associations from plain FK strings in data using the entity schema,
+          // so the UI badge display works without a separate associations field.
+          const derivedAssoc: Association[] = entitySchema
+            ? Object.entries(entitySchema)
+                .filter(([field, desc]) => desc.entity && typeof r.data[field] === "string" && r.data[field])
+                .map(([field, desc]) => ({ predicate: field, targetEntity: desc.entity, targetId: r.data[field] as string }))
+            : [];
+          return {
+            ...r,
+            ...(derivedAssoc.length ? { associations: derivedAssoc } : {}),
+            modifiedAt:  mods.get(r.id) ?? 0,
+            watermark:   wms.get(r.id)  ?? 0,
+            softDeleted: sds.has(r.id),
+          };
+        });
       }
       return out;
     },
 
-    insertRecord(entity: string, data: Record<string, unknown>, associations?: Association[], explicitId?: string): string {
+    insertRecord(entity: string, data: Record<string, unknown>, _associations?: Association[], explicitId?: string): string {
       const id = explicitId ?? (data["id"] as string | undefined) ?? crypto.randomUUID();
       const { wms, mods } = ensureMaps(entity);
       const existing = store.get(entity) ?? [];
-      store.set(entity, [...existing, { id, data: { ...data }, ...(associations ? { associations } : {}) }]);
+      store.set(entity, [...existing, { id, data: { ...data } }]);
       wms.set(id, bump());
       mods.set(id, Date.now());
       return id;
     },
 
-    updateRecord(entity: string, id: string, data: Record<string, unknown>, associations?: Association[]): void {
+    updateRecord(entity: string, id: string, data: Record<string, unknown>, _associations?: Association[]): void {
       const { wms, mods } = ensureMaps(entity);
       const existing = store.get(entity) ?? [];
       const idx = existing.findIndex((r) => r.id === id);
@@ -272,9 +289,6 @@ export function createInMemoryConnector(
       next[idx] = {
         id,
         data: { ...prev.data, ...data },
-        ...(associations !== undefined
-          ? { associations }
-          : prev.associations !== undefined ? { associations: prev.associations } : {}),
       };
       store.set(entity, next);
       wms.set(id, bump());

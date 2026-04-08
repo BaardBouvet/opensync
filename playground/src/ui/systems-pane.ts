@@ -239,10 +239,9 @@ function buildCard(
     editBtn.className = "btn-card";
     editBtn.textContent = "Edit";
     editBtn.addEventListener("click", () => {
-      const combined = { data: rec.data, associations: rec.associations ?? [] };
       openModal(
         `Edit  ${systemId} / ${entity} / ${rec.id}`,
-        JSON.stringify(combined, null, 2),
+        JSON.stringify({ data: rec.data }, null, 2),
         (raw) => {
           let parsed: { data?: Record<string, unknown>; associations?: Association[] };
           try { parsed = JSON.parse(raw) as typeof parsed; }
@@ -419,7 +418,7 @@ export function createSystemsPane(
         e.stopPropagation();
         openNewRecordModal(
           `New  ${connectorId} / ${entity}`,
-          '{\n  "data": {\n    \n  },\n  "associations": []\n}',
+          '{\n  "data": {\n    \n  }\n}',
           (raw, explicitId) => {
             let parsed: { data?: Record<string, unknown>; associations?: Association[] };
             try { parsed = JSON.parse(raw) as typeof parsed; }
@@ -596,7 +595,7 @@ export function createSystemsPane(
         e.stopPropagation();
         openNewRecordModal(
           `New  ${m.connectorId} / ${m.entity}`,
-          '{\n  "data": {\n    \n  },\n  "associations": []\n}',
+          '{\n  "data": {\n    \n  }\n}',
           (raw, explicitId) => {
             let parsed: { data?: Record<string, unknown>; associations?: Association[] };
             try { parsed = JSON.parse(raw) as typeof parsed; }

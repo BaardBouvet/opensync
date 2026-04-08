@@ -12,7 +12,7 @@ import { openBrowserDb } from "./db-sqljs.js";
 import { createInMemoryConnector } from "./inmemory.js";
 import type { InMemoryConnector } from "./inmemory.js";
 import type { ScenarioDefinition } from "./scenarios/index.js";
-import { FIXED_SEED, FIXED_SYSTEMS } from "./lib/systems.js";
+import { FIXED_SEED, FIXED_SCHEMAS, FIXED_SYSTEMS } from "./lib/systems.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -186,7 +186,7 @@ export async function startEngine(
   // 1. Create one in-memory connector per fixed system
   const connectors = new Map<string, InMemoryConnector>();
   for (const systemId of FIXED_SYSTEMS) {
-    connectors.set(systemId, createInMemoryConnector(systemId, FIXED_SEED[systemId] ?? {}));
+    connectors.set(systemId, createInMemoryConnector(systemId, FIXED_SEED[systemId] ?? {}, FIXED_SCHEMAS[systemId]));
   }
 
   // 1b. Let the UI render the seed-only state before onboarding fanout writes.
