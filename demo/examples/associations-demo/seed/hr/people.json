@@ -3,30 +3,18 @@
     "id": "p1",
     "data": {
       "displayName": "Bob Martin",
-      "email": "bob@example.com"
+      "email": "bob@example.com",
+      "orgRef": "org1"
     },
-    "updated": 1,
-    "associations": [
-      {
-        "predicate": "orgRef",
-        "targetEntity": "orgs",
-        "targetId": "org1"
-      }
-    ]
+    "updated": 1
   },
   {
     "id": "p2",
     "data": {
       "displayName": "Carol White",
-      "email": "carol@example.com"
+      "email": "carol@example.com",
+      "orgRef": "org2"
     },
-    "updated": 1,
-    "associations": [
-      {
-        "predicate": "orgRef",
-        "targetEntity": "orgs",
-        "targetId": "org2"
-      }
-    ]
+    "updated": 1
   }
 ]

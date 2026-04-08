@@ -3,45 +3,27 @@
     "id": "c1",
     "data": {
       "name": "Alice Liddell",
-      "email": "alice@example.com"
+      "email": "alice@example.com",
+      "companyId": "co1"
     },
-    "updated": 1,
-    "associations": [
-      {
-        "predicate": "companyId",
-        "targetEntity": "companies",
-        "targetId": "co1"
-      }
-    ]
+    "updated": 1
   },
   {
     "id": "c2",
     "data": {
       "name": "Bob Martin",
-      "email": "bob@example.com"
+      "email": "bob@example.com",
+      "companyId": "co2"
     },
-    "updated": 1,
-    "associations": [
-      {
-        "predicate": "companyId",
-        "targetEntity": "companies",
-        "targetId": "co2"
-      }
-    ]
+    "updated": 1
   },
   {
     "id": "c3",
     "data": {
       "name": "Carol White",
-      "email": "carol@example.com"
+      "email": "carol@example.com",
+      "companyId": "co3"
     },
-    "updated": 1,
-    "associations": [
-      {
-        "predicate": "companyId",
-        "targetEntity": "companies",
-        "targetId": "co3"
-      }
-    ]
+    "updated": 1
   }
 ]

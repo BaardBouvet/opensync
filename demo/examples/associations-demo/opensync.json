@@ -4,30 +4,39 @@
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
         "auditLog": true,
-        "filePaths": [
-          "demo/data/associations-demo/crm/companies.json",
-          "demo/data/associations-demo/crm/contacts.json"
-        ]
+        "entities": {
+          "companies": { "filePath": "demo/data/associations-demo/crm/companies.json" },
+          "contacts": {
+            "filePath": "demo/data/associations-demo/crm/contacts.json",
+            "schema": { "companyId": { "entity": "companies" } }
+          }
+        }
       }
     },
     "erp": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
         "auditLog": true,
-        "filePaths": [
-          "demo/data/associations-demo/erp/accounts.json",
-          "demo/data/associations-demo/erp/employees.json"
-        ]
+        "entities": {
+          "accounts": { "filePath": "demo/data/associations-demo/erp/accounts.json" },
+          "employees": {
+            "filePath": "demo/data/associations-demo/erp/employees.json",
+            "schema": { "orgId": { "entity": "accounts" } }
+          }
+        }
       }
     },
     "hr": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
         "auditLog": true,
-        "filePaths": [
-          "demo/data/associations-demo/hr/orgs.json",
-          "demo/data/associations-demo/hr/people.json"
-        ]
+        "entities": {
+          "orgs": { "filePath": "demo/data/associations-demo/hr/orgs.json" },
+          "people": {
+            "filePath": "demo/data/associations-demo/hr/people.json",
+            "schema": { "orgRef": { "entity": "orgs" } }
+          }
+        }
       }
     }
   }

@@ -128,9 +128,9 @@ if (uninitChannels.length > 0) {
 
 console.log(`[${exampleName}] polling every ${POLL_MS}ms — Ctrl+C to stop`);
 for (const ci of config.connectors) {
-  const filePaths = ci.config["filePaths"] as string[] | undefined;
-  if (filePaths) {
-    for (const p of filePaths) console.log(`  ${ci.id}  ${p}`);
+  const entities = ci.config["entities"] as Record<string, { filePath: string }> | undefined;
+  if (entities) {
+    for (const { filePath } of Object.values(entities)) console.log(`  ${ci.id}  ${filePath}`);
   }
 }
 console.log();
@@ -160,8 +160,17 @@ while (true) {
         const dir = `${member.connectorId}→${r.targetConnectorId}`;
         const changedKeys = r.action === "update" && r.before && r.after
           ? Object.keys(r.after).filter((k) => JSON.stringify(r.before![k]) !== JSON.stringify(r.after![k]))
-          : undefined;
-        const fieldHint = changedKeys?.length ? `  [${changedKeys.join(", ")}]` : "";
+          : [];
+        const changedAssocPredicates = r.action === "update"
+          ? (r.afterAssociations ?? [])
+            .filter((a) => {
+              const prev = r.beforeAssociations?.find((b) => b.predicate === a.predicate);
+              return !prev || prev.targetId !== a.targetId;
+            })
+            .map((a) => a.predicate)
+          : [];
+        const allChanged = [...changedKeys, ...changedAssocPredicates];
+        const fieldHint = allChanged.length ? `  [${allChanged.join(", ")}]` : "";
         console.log(`[${ts()}] ${dir}  ${tag}  ${r.entity}  ${src}… → ${tgt}…${fieldHint}`);
       }
     }

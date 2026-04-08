@@ -10,15 +10,21 @@ mappings:
     fields:
       - { source: name,      target: name }
       - { source: email,     target: email }
+    associations:
+      - { source: companyId, target: companyRef }
   - connector: erp
     entity: employees
     channel: contacts
     fields:
       - { source: fullName, target: name }
       - { source: email,    target: email }
+    associations:
+      - { source: orgId, target: companyRef }
   - connector: hr
     entity: people
     channel: contacts
     fields:
       - { source: displayName, target: name }
       - { source: email,       target: email }
+    associations:
+      - { source: orgRef, target: companyRef }

@@ -3,19 +3,25 @@
     "system-a": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/three-system/system-a/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/three-system/system-a/contacts.json" }
+        }
       }
     },
     "system-b": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/three-system/system-b/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/three-system/system-b/contacts.json" }
+        }
       }
     },
     "system-c": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/three-system/system-c/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/three-system/system-c/contacts.json" }
+        }
       }
     }
   }

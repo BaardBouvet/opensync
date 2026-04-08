@@ -58,7 +58,9 @@ example directory. Data file paths in connector `config` are relative to the wor
     "system-a": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/two-system/system-a/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/two-system/system-a/contacts.json" }
+        }
       }
     }
   }

@@ -3,13 +3,17 @@
     "system-a": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/two-system/system-a/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/two-system/system-a/contacts.json" }
+        }
       }
     },
     "system-b": {
       "plugin": "../../../dev/connectors/jsonfiles/src/index.ts",
       "config": {
-        "filePaths": ["demo/data/two-system/system-b/contacts.json"]
+        "entities": {
+          "contacts": { "filePath": "demo/data/two-system/system-b/contacts.json" }
+        }
       }
     }
   }
