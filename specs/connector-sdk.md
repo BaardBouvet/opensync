@@ -365,15 +365,29 @@ The engine finds `Ref` values in `data`, extracts the association graph from the
 the `@id` to the target system's ID space before dispatch. Pending associations (target not yet
 seen) are stored and resolved once the target record arrives.
 
-**Entity inference** — the engine infers the target entity in order of precedence:
-1. `@entity` on the `Ref` itself (most explicit)
-2. `{ type: 'ref', entity: 'company' }` in the field's `schema` entry
-3. `associationSchema[predicate].targetEntity`
-4. None of the above → opaque Ref, engine strips it before dispatch
+**Recommended light path** — declare `{ type: 'ref', entity: 'company' }` in the entity
+`schema` and return raw API payloads from `read()`. The engine auto-synthesizes `Ref` objects
+from plain string values for schema-declared ref fields during ingest — no code change to
+`read()` required. This is the common path for SaaS connectors.
 
-**SDK helpers** — `@opensync/sdk` exports two helpers for connector authors:
-- `makeRefs(data, schema)` — wraps FK fields that match `{ type: 'ref', entity }` entries in the entity schema with `Ref` objects. Use in `read()` to avoid hand-constructing Ref values.
-- `readRefs(data)` — strips `Ref` wrappers recursively, restoring plain string IDs. Use in `insert()` / `update()` before calling external APIs that expect raw IDs.
+```typescript
+schema: {
+  companyId: { type: { type: 'ref', entity: 'company' }, description: 'Parent company' },
+}
+// read() can then yield the raw API response verbatim:
+yield { records: [{ id: r.id, data: r }] };
+```
+
+**Entity inference** — the engine infers the target entity in order of precedence:
+1. Engine auto-synthesis: plain string value + `{ type: 'ref', entity }` in `schema` (no Ref object needed in `read()`)
+2. `@entity` on an explicit `Ref` object in `data`
+3. `{ type: 'ref', entity }` in `schema` when `@entity` is absent from the Ref
+4. `associationSchema[predicate].targetEntity`
+5. None of the above → opaque, no association derived
+
+**SDK helpers** — `@opensync/sdk` exports two helpers for connectors that need Ref objects:
+- `makeRefs(data, schema)` — wraps FK fields that match `{ type: 'ref', entity }` entries in the schema with `Ref` objects. Useful when the connector needs to inspect or forward Refs in write logic.
+- `readRefs(data)` — strips `Ref` wrappers recursively, restoring plain string IDs. Use in `insert()` / `update()` before submitting to APIs that expect raw ID strings.
 
 The full association design — rationale, storage layout, and remapping — is in
 [`specs/associations.md`](associations.md).

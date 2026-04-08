@@ -33,15 +33,16 @@ remapped Ref values into `InsertRecord.data` / `UpdateRecord.data` at dispatch t
 
 ## Entity Inference
 
-The engine infers which entity a Ref points to in order of precedence:
+The engine infers which entity a field references, in order of precedence:
 
-1. `@entity` on the Ref itself (most explicit)
-2. `{ type: 'ref', entity: 'company' }` declared for that field in the entity's `schema`
-3. `associationSchema[predicate].targetEntity`
-4. None of the above → opaque Ref; the engine strips it before dispatch (no association created)
-
-Connectors that use consistent ID formats and declare `{ type: 'ref' }` in `schema` can omit
-`@entity` from every Ref and let the engine infer it from the schema — removing the repetition.
+1. **Schema auto-synthesis** — field has a plain string value **and** `{ type: 'ref', entity: E }` in
+   the entity's `schema`. The engine wraps the string as a Ref internally during ingest.
+   Connector does not need to construct Ref objects — just declare the schema and return raw
+   API payloads. This is the recommended path for SaaS connectors.
+2. `@entity` on an explicit `Ref` object in `data`
+3. `{ type: 'ref', entity: E }` in `schema` when `@entity` is absent from the Ref
+4. `associationSchema[predicate].targetEntity`
+5. None of the above → opaque; no association derived
 
 ## The Composite Key
 

@@ -1360,8 +1360,11 @@ export class SyncEngine {
     entityDef: import("@opensync/sdk").EntityDefinition | undefined,
   ): Association[] {
     const result: Association[] = [];
+    // Pass 1: fields that are already Ref objects (rules 1–3–4)
+    const handledFields = new Set<string>();
     for (const [field, value] of Object.entries(data)) {
       if (!isRef(value)) continue;
+      handledFields.add(field);
       let targetEntity = (value as Ref)['@entity'];
       if (!targetEntity) {
         const fieldType = entityDef?.schema?.[field]?.type;
@@ -1373,6 +1376,17 @@ export class SyncEngine {
       }
       if (!targetEntity) continue; // opaque — rule 4
       result.push({ predicate: field, targetEntity, targetId: (value as Ref)['@id'] });
+    }
+    // Pass 2: schema auto-synthesis — plain string values for { type: 'ref', entity } fields.
+    // Spec: plans/connectors/PLAN_SCHEMA_REF_AUTOSYNTH.md §3.1
+    // Allows connectors to return raw API payloads without constructing Ref objects.
+    for (const [field, descriptor] of Object.entries(entityDef?.schema ?? {})) {
+      if (handledFields.has(field)) continue;
+      const ft = descriptor.type;
+      if (!ft || typeof ft !== 'object' || (ft as { type: string }).type !== 'ref') continue;
+      const value = data[field];
+      if (!value || typeof value !== 'string') continue; // only non-empty plain strings
+      result.push({ predicate: field, targetEntity: (ft as { type: 'ref'; entity: string }).entity, targetId: value });
     }
     return result;
   }

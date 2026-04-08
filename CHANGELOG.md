@@ -14,6 +14,7 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ### Changed
 - **Connector SDK — Associations are now inline `Ref` values in `data`** — replaced the parallel `associations?: Association[]` field on `ReadRecord`, `InsertRecord`, and `UpdateRecord` with inline `Ref` objects (`{ '@id': string; '@entity'?: string }`) embedded directly in `data`. The engine extracts the association graph by scanning `data` for Ref-shaped values and uses field `schema`, `associationSchema`, or `@entity` on the Ref for entity inference. SDK exports `readRefs(data)` (strips Refs to plain strings for API writes) and `makeRefs(data, schema)` (wraps FK fields per schema). `FieldType` gains `{ type: 'ref'; entity: string }` variant. `EntityDefinition` gains optional `context?` for RDF connectors. HubSpot, SPARQL, and jsonfiles connectors updated. Specs updated: `specs/connector-sdk.md`, `specs/associations.md`.
+- **Sync Engine — Schema-driven Ref auto-synthesis** — connectors that declare `{ type: 'ref', entity }` in `EntityDefinition.schema` no longer need to construct `Ref` objects or call `makeRefs()` in `read()`. The engine synthesizes Refs from plain string values during ingest. Connector returns raw API payload; the full association remapping pipeline fires automatically.
 - **Connector SDK — `Association.metadata` removed** — unused edge-property field dropped from the `Association` interface and spec; no connector ever populated it.
 
 ### Fixed
