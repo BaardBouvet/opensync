@@ -347,11 +347,13 @@ const contactEntity: EntityDefinition = {
       immutable: true,
     },
     primaryCompanyId: {
-      type: { type: "ref", entity: "company" },
+      type: "string",
+      entity: "company",
       description: "Primary company association (HubSpot association type 1)",
     },
     companyId: {
-      type: { type: "ref", entity: "company" },
+      type: "string",
+      entity: "company",
       description: "Company association (HubSpot association type 279)",
     },
   },

@@ -129,16 +129,15 @@ interface OAuthConfig {
 //   { type: 'object'; properties?: Record<string, FieldType> }
 //   { type: 'array'; items?: FieldType }
 //   { type: 'array', items: { type: 'object', properties: { sku: 'string', qty: 'number' } } }
-//   { type: 'ref'; entity: string }  — FK field whose value is a Ref object (see §Ref)
 type FieldType =
   | 'string' | 'number' | 'boolean' | 'null'
   | { type: 'object'; properties?: Record<string, FieldType> }
-  | { type: 'array'; items?: FieldType }
-  | { type: 'ref'; entity: string };          // FK field — value is a Ref; engine uses entity for association inference
+  | { type: 'array'; items?: FieldType };
 
 interface FieldDescriptor {
   description?: string;
   type?: FieldType;
+  entity?: string;      // FK ref to this connector-local entity name; engine synthesizes association from plain string value
   required?: boolean;   // field must be present; engine enforces before insert()/update() and execute()
   immutable?: boolean;  // field cannot be changed after creation; engine rejects updates that include it
 }
@@ -372,21 +371,21 @@ from plain string values for schema-declared ref fields during ingest — no cod
 
 ```typescript
 schema: {
-  companyId: { type: { type: 'ref', entity: 'company' }, description: 'Parent company' },
+  companyId: { type: 'string', entity: 'company', description: 'Parent company' },
 }
 // read() can then yield the raw API response verbatim:
 yield { records: [{ id: r.id, data: r }] };
 ```
 
 **Entity inference** — the engine infers the target entity in order of precedence:
-1. Engine auto-synthesis: plain string value + `{ type: 'ref', entity }` in `schema` (no Ref object needed in `read()`)
+1. Engine auto-synthesis: plain string value + `entity` on the schema descriptor (no Ref object needed in `read()`)
 2. `@entity` on an explicit `Ref` object in `data`
-3. `{ type: 'ref', entity }` in `schema` when `@entity` is absent from the Ref
+3. `entity` on the schema descriptor when `@entity` is absent from the Ref
 4. `associationSchema[predicate].targetEntity`
 5. None of the above → opaque, no association derived
 
 **SDK helpers** — `@opensync/sdk` exports two helpers for connectors that need Ref objects:
-- `makeRefs(data, schema)` — wraps FK fields that match `{ type: 'ref', entity }` entries in the schema with `Ref` objects. Useful when the connector needs to inspect or forward Refs in write logic.
+- `makeRefs(data, schema)` — wraps FK fields that have `entity` declared in the schema with `Ref` objects. Useful when the connector needs to inspect or forward Refs in write logic.
 - `readRefs(data)` — strips `Ref` wrappers recursively, restoring plain string IDs. Use in `insert()` / `update()` before submitting to APIs that expect raw ID strings.
 
 The full association design — rationale, storage layout, and remapping — is in

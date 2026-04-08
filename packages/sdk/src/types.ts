@@ -14,8 +14,7 @@ export type FieldType =
   | "boolean"
   | "null"
   | { type: "object"; properties?: Record<string, FieldType> }
-  | { type: "array"; items?: FieldType }
-  | { type: "ref"; entity: string };
+  | { type: "array"; items?: FieldType };
 
 /**
  * Metadata for a single field on an entity or action payload.
@@ -29,6 +28,12 @@ export interface FieldDescriptor {
   /** Declared value type. The engine warns at channel setup if the source type is incompatible
    *  with what the target entity expects. */
   type?: FieldType;
+
+  /** If set, this field is a FK reference to the named entity. The engine synthesizes an
+   *  association from the plain string value during ingest — no Ref object needed in read().
+   *  Connector-local entity name (e.g. 'company', 'account').
+   *  Spec: specs/connector-sdk.md § Associations */
+  entity?: string;
 
   /** If true, the field must be present in every insert/update record (entity) or action payload.
    *  The engine rejects records missing required fields before they reach the connector,
@@ -51,9 +56,8 @@ export interface FieldDescriptor {
  * On write: engine injects the remapped target-connector-local ID here; connector reads it.
  *
  * `@entity` is the connector's own entity name (matches Association.targetEntity).
- * Omit `@entity` when the schema already declares the ref target (`{ type: 'ref' }`);
+ * Omit `@entity` when the schema already declares the ref target via `entity` on `FieldDescriptor`;
  * the engine fills in the entity name for writes using the association inference rule.
- * Spec: specs/connector-sdk.md § Ref
  */
 export interface Ref {
   '@id': string;

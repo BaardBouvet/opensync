@@ -3,7 +3,7 @@
  * Spec: specs/connector-sdk.md § SDK Helpers
  */
 import { isRef } from "./types.js";
-import type { EntityDefinition, FieldType } from "./types.js";
+import type { EntityDefinition } from "./types.js";
 
 /**
  * Strip all `Ref` values from a write-payload recursively, replacing each
@@ -46,20 +46,19 @@ function _unwrapValue(value: unknown): unknown {
 /**
  * Wrap FK fields in a raw API response with `Ref` values, guided by the entity schema.
  *
- * For each field in `data` declared as `{ type: 'ref', entity: E }` in `schema`,
- * wraps the value with `{ '@id': value, '@entity': E }`. Null / undefined values
- * are left as-is. Fields not in the schema pass through unchanged.
- *
- * For `{ type: 'array', items: { type: 'ref', entity: E } }` fields, wraps each
- * element in the array.
+ * For each field in `data` where the schema entry declares `entity: 'someName'`,
+ * wraps the string value with `{ '@id': value, '@entity': someName }`. Null / undefined
+ * values are left as-is. Fields not in the schema pass through unchanged.
  *
  * Use this inside `read()` to annotate FK fields without manually constructing Ref objects.
+ * Alternatively, declare `entity` in the schema and return raw API payloads — the engine
+ * auto-synthesizes Ref objects during ingest.
  *
  * @example
  * ```ts
  * const schema: EntityDefinition['schema'] = {
  *   name:      { type: 'string' },
- *   companyId: { type: { type: 'ref', entity: 'company' } },
+ *   companyId: { type: 'string', entity: 'company' },
  * };
  * const data = makeRefs({ name: 'Alice', companyId: 'hs_456' }, schema);
  * // → { name: 'Alice', companyId: { '@id': 'hs_456', '@entity': 'company' } }
@@ -72,28 +71,19 @@ export function makeRefs(
   if (!schema) return { ...data };
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
-    const fieldDesc = schema[key];
-    const fieldType = fieldDesc?.type;
-    result[key] = _wrapValue(value, fieldType);
+    const entityName = schema[key]?.entity;
+    result[key] = _wrapRefValue(value, entityName);
   }
   return result;
 }
 
-function _wrapValue(value: unknown, type: FieldType | undefined): unknown {
-  if (type === undefined || value === null || value === undefined) return value;
-  if (typeof type === 'object') {
-    if (type.type === 'ref') {
-      if (typeof value === 'string' && value !== '') {
-        return { '@id': value, '@entity': type.entity };
-      }
-      return value;
-    }
-    if (type.type === 'array' && type.items && typeof type.items === 'object') {
-      const itemsType = type.items;
-      if (Array.isArray(value)) {
-        return value.map((item) => _wrapValue(item, itemsType));
-      }
-    }
+function _wrapRefValue(value: unknown, entityName: string | undefined): unknown {
+  if (!entityName || value === null || value === undefined) return value;
+  if (typeof value === 'string' && value !== '') {
+    return { '@id': value, '@entity': entityName };
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => _wrapRefValue(item, entityName));
   }
   return value;
 }

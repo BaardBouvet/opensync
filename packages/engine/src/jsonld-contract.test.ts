@@ -192,7 +192,7 @@ describe("JLC3: { type: 'ref' } schema field drives association inference", () =
           schema: {
             name: { type: "string" as const },
             email: { type: "string" as const },
-            companyId: { type: { type: "ref" as const, entity: "companies" } },
+            companyId: { type: "string" as const, entity: "companies" },
           },
           async *read() {
             yield {
@@ -680,8 +680,8 @@ describe("JLC10: readRefs unwraps Ref to plain string; recursively for nested st
 describe("JLC11: makeRefs wraps FK fields per schema", () => {
   const schema = {
     name:      { type: "string" as const },
-    companyId: { type: { type: "ref" as const, entity: "company" } },
-    tagId:     { type: { type: "ref" as const, entity: "tag" } },
+    companyId: { type: "string" as const, entity: "company" },
+    tagId:     { type: "string" as const, entity: "tag" },
   };
 
   it("wraps a declared ref field with Ref object", () => {
@@ -739,7 +739,7 @@ describe("ASYN1: plain string FK field + schema { type: 'ref' } → engine synth
             schema: {
               name: { type: "string" as const },
               email: { type: "string" as const },
-              companyId: { type: { type: "ref" as const, entity: "companies" } },
+              companyId: { type: "string" as const, entity: "companies" },
             },
             async *read() {
               yield {

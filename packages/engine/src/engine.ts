@@ -1367,26 +1367,20 @@ export class SyncEngine {
       handledFields.add(field);
       let targetEntity = (value as Ref)['@entity'];
       if (!targetEntity) {
-        const fieldType = entityDef?.schema?.[field]?.type;
-        if (fieldType && typeof fieldType === 'object' && 'type' in fieldType && (fieldType as { type: string }).type === 'ref') {
-          targetEntity = (fieldType as { type: 'ref'; entity: string }).entity;
-        } else if (entityDef?.associationSchema?.[field]) {
-          targetEntity = entityDef.associationSchema[field]!.targetEntity;
-        }
+        targetEntity = entityDef?.schema?.[field]?.entity ?? entityDef?.associationSchema?.[field]?.targetEntity;
       }
       if (!targetEntity) continue; // opaque — rule 4
       result.push({ predicate: field, targetEntity, targetId: (value as Ref)['@id'] });
     }
-    // Pass 2: schema auto-synthesis — plain string values for { type: 'ref', entity } fields.
+    // Pass 2: schema auto-synthesis — plain string values for fields with `entity` declared.
     // Spec: plans/connectors/PLAN_SCHEMA_REF_AUTOSYNTH.md §3.1
     // Allows connectors to return raw API payloads without constructing Ref objects.
     for (const [field, descriptor] of Object.entries(entityDef?.schema ?? {})) {
       if (handledFields.has(field)) continue;
-      const ft = descriptor.type;
-      if (!ft || typeof ft !== 'object' || (ft as { type: string }).type !== 'ref') continue;
+      if (!descriptor.entity) continue;
       const value = data[field];
       if (!value || typeof value !== 'string') continue; // only non-empty plain strings
-      result.push({ predicate: field, targetEntity: (ft as { type: 'ref'; entity: string }).entity, targetId: value });
+      result.push({ predicate: field, targetEntity: descriptor.entity, targetId: value });
     }
     return result;
   }

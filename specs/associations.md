@@ -35,12 +35,12 @@ remapped Ref values into `InsertRecord.data` / `UpdateRecord.data` at dispatch t
 
 The engine infers which entity a field references, in order of precedence:
 
-1. **Schema auto-synthesis** — field has a plain string value **and** `{ type: 'ref', entity: E }` in
-   the entity's `schema`. The engine wraps the string as a Ref internally during ingest.
-   Connector does not need to construct Ref objects — just declare the schema and return raw
-   API payloads. This is the recommended path for SaaS connectors.
+1. **Schema auto-synthesis** — field has a plain string value **and** `entity: 'E'` on the
+   `FieldDescriptor` in the entity's `schema`. The engine wraps the string as a Ref internally
+   during ingest. Connector does not need to construct Ref objects — just declare `entity` in
+   the schema and return raw API payloads. This is the recommended path for SaaS connectors.
 2. `@entity` on an explicit `Ref` object in `data`
-3. `{ type: 'ref', entity: E }` in `schema` when `@entity` is absent from the Ref
+3. `entity` on the `FieldDescriptor` in `schema` when `@entity` is absent from the Ref
 4. `associationSchema[predicate].targetEntity`
 5. None of the above → opaque; no association derived
 
