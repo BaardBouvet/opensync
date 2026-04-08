@@ -5,7 +5,7 @@
 **Effort:** M  
 **Domain:** Engine API  
 **Scope:** `packages/engine/src/`, `specs/sync-engine.md`, `specs/observability.md`  
-**Depends on:** `plans/engine/PLAN_ENGINE_USABILITY.md` (§ 1 — `bootChannel()`)
+**Depends on:** `plans/engine/PLAN_ENGINE_USABILITY.md` (superseded — §§ 4b.1–4b.2 absorbed here)
 
 ---
 
@@ -344,6 +344,64 @@ want data to flow register nothing.
 
 ---
 
+## § 4b Additional Gaps (absorbed from PLAN_ENGINE_USABILITY.md)
+
+The following two items were catalogued in the usability gap analysis and are not covered
+by §§ 2.1–2.8 above.
+
+### § 4b.1 Global fan-out guard
+
+#### § 4b.1.1 Problem
+
+`_processRecords()` builds the `crossLinked` set by querying ALL canonicals in
+`identity_map`, not just those belonging to the current channel:
+
+```sql
+SELECT DISTINCT connector_id FROM identity_map
+WHERE canonical_id IN (
+  SELECT canonical_id FROM identity_map
+  GROUP BY canonical_id HAVING COUNT(DISTINCT connector_id) > 1)
+```
+
+In a multi-channel setup, once **any** channel has cross-linked records, all connectors
+become "cross-linked in the global map", even for channels that have no linked records yet.
+This can cause premature fan-out before a channel is properly onboarded.
+
+#### § 4b.1.2 Proposed fix
+
+Scope the `crossLinked` query to the current channel's entity/connector pairs, matching
+the pattern already used by `channelStatus()`.  No public API change — internal only.
+
+Add `specs/sync-engine.md` note: the fan-out guard is channel-scoped.
+
+---
+
+### § 4b.2 Implicit channel ordering dependency
+
+#### § 4b.2.1 Problem
+
+When two channels share connectors (e.g. `companies` and `contacts` both use crm/erp/hr),
+onboarding order matters: `contacts` with company associations must be onboarded **after**
+`companies` so `_remapAssociations()` can resolve identity links. Nothing enforces or
+communicates this — wrong YAML order causes deferred associations and one extra poll cycle.
+
+#### § 4b.2.2 Proposed fix
+
+Either:
+
+a. **Topological sort** — detect association entity dependencies at onboarding time and
+   auto-sort channels before the boot loop. Safest for callers; requires the engine to
+   inspect each channel's `identityFields` / `identityGroups` for cross-channel entity
+   references.
+b. **Config validation** — surface ordering violations as a startup error with a clear
+   message, e.g. `"Channel 'contacts' references entity 'companies' but 'companies' channel
+   is listed after 'contacts' in config"`.
+
+Option (a) is preferred; option (b) is an acceptable interim if (a) proves complex.
+`bootChannel()` (§ 2.5) must honour the sorted order when called via `start()`.
+
+---
+
 ## § 5 Spec Changes Planned
 
 | Spec file | Section(s) to add or modify |
@@ -351,4 +409,5 @@ want data to flow register nothing.
 | `specs/sync-engine.md` | § Setup — mark `auth`, `batchIdRef`, `triggerRef` optional on `ConnectorInstance`; mark `conflict` and `readTimeoutMs` optional on `ResolvedConfig` |
 | `specs/sync-engine.md` | § Setup — add `conflict?` to `ChannelConfig`; document channel-level override semantics |
 | `specs/sync-engine.md` | § Public API — add `timeoutMs?` to `ingest()` opts; add `pollChannel()`, `bootChannel()`, `start()`, `stop()`; update `SyncEngine` constructor signature with `SyncEngineOptions` (including `pollIntervalMs`) |
+| `specs/sync-engine.md` | § Ingest Loop — document that `crossLinked` query is scoped to current channel's entity/connector pairs |
 | `specs/observability.md` | New section: § SyncEvent — define the `SyncEvent` type, the `onEvent` callback, `phase` field semantics, and mapping to `RecordSyncResult`; document that the playground and demo CLI use this |

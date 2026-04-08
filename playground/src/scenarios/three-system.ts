@@ -5,18 +5,27 @@ import type { ScenarioDefinition } from "./types.js";
 
 const scenario: ScenarioDefinition = {
   label: "three-system",
-  channels: [
-    {
-      id: "contacts",
-      identityFields: ["email"],
-      members: [
-        { connectorId: "system-a", entity: "contacts" },
-        { connectorId: "system-b", entity: "contacts" },
-        { connectorId: "system-c", entity: "contacts" },
-      ],
-    },
-  ],
-  conflict: { strategy: "lww" },
+  yaml: `
+channels:
+  - id: contacts
+    identityFields: [email]
+
+conflict:
+  strategy: lww
+
+mappings:
+  - connector: system-a
+    entity: contacts
+    channel: contacts
+
+  - connector: system-b
+    entity: contacts
+    channel: contacts
+
+  - connector: system-c
+    entity: contacts
+    channel: contacts
+`,
 };
 
 export default scenario;

@@ -18,17 +18,22 @@ export const FIXED_SEED: EntitySeedMap = {
       {
         id: "c1",
         data: { name: "Alice Liddell", email: "alice@example.com" },
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co1" }],
+        // Alice has two typed company links — the canonical predicate-as-type pattern.
+        // Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md § 3.1
+        associations: [
+          { predicate: "primaryCompanyId",   targetEntity: "companies", targetId: "co1" },
+          { predicate: "secondaryCompanyId", targetEntity: "companies", targetId: "co2" },
+        ],
       },
       {
         id: "c2",
         data: { name: "Bob Martin",   email: "bob@example.com" },
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co2" }],
+        associations: [{ predicate: "primaryCompanyId", targetEntity: "companies", targetId: "co2" }],
       },
       {
         id: "c3",
         data: { name: "Carol White",  email: "carol@example.com" },
-        associations: [{ predicate: "companyId", targetEntity: "companies", targetId: "co3" }],
+        associations: [{ predicate: "primaryCompanyId", targetEntity: "companies", targetId: "co3" }],
       },
     ],
   },

@@ -1,34 +1,27 @@
-# Field-Level Timestamps (`lastModifiedField` + `derive_timestamps`)
+# Per-Field Timestamps — Always-On Shadow Derivation
 
-**Status:** proposed  
-**Date:** 2026-04-07  
-**Effort:** M  
-**Domain:** Engine — field mapping  
-**Scope:** `packages/engine/src/config/schema.ts`, `packages/engine/src/config/loader.ts`, `packages/engine/src/db/queries.ts`, `packages/engine/src/core/conflict.ts`, `packages/engine/src/core/mapping.ts`, `packages/engine/src/engine.ts`, `specs/field-mapping.md`  
-**Depends on:** `PLAN_WRITTEN_STATE` (complete)  
+**Status:** complete  
+**Date:** 2026-04-08  
+**Effort:** S  
+**Domain:** Engine — ingest  
+**Scope:** `packages/engine/src/core/mapping.ts`, `packages/engine/src/db/queries.ts`, `packages/engine/src/core/conflict.ts`, `packages/engine/src/engine.ts`, `specs/field-mapping.md`  
+**Depends on:** `PLAN_WRITTEN_STATE` (complete), `plans/connectors/PLAN_FIELD_TIMESTAMPS.md`  
 
 ---
 
 ## § 1 Problem Statement
 
 `last_modified` (LWW) resolution requires a per-field timestamp to know which source's value is
-the most recently changed. Currently, every field in a record gets the same batch timestamp
-(`ingestTs = Date.now()`), which means:
+the most recently changed. Currently every field in a record gets the flat batch-wide
+`ingestTs = Date.now()`, which means:
 
-1. **Connector-supplied per-field timestamps are silently ignored.** Some APIs attach an
-   independent update time to each field (e.g. an audit log column `email_updated_at`). Even
-   when a connector returns such columns the engine never reads them — every field in the batch
-   gets the same clock time.
+1. **Timestampless sources cannot be ranked by recency.** If a connector reports no per-field
+   modification timestamps, a field that hasn't changed in six months gets the same `ts` as one
+   that changed a minute ago. `last_modified` resolution degenerates to declaration order.
 
-2. **Timestampless sources cannot participate in LWW resolution.** CSV files, legacy REST APIs,
-   flat-file imports, and polling connectors that report no updated-at column look equally "fresh"
-   every cycle. Two sources that both lack timestamps cannot be ranked by recency, so
-   `last_modified` resolution degenerates to declaration order regardless of what actually changed.
-
-Both gaps are documented in `specs/field-mapping.md` — §1.9 (`lastModifiedField` per-field config)
-and §7.2 (`derive_timestamps`) — but neither is implemented. This plan implements both features
-together since they share the same machinery: both produce a `Record<string, number>` of per-field
-timestamps that replace the single flat `ingestTs` at resolution and shadow-write time.
+2. **Connector-supplied per-field timestamps are not consumed.** `ReadRecord.fieldTimestamps`
+   (see `plans/connectors/PLAN_FIELD_TIMESTAMPS.md`) allows connectors to supply authoritative
+   per-field modification times, but the engine has no code to read or use them.
 
 ---
 
@@ -36,149 +29,65 @@ timestamps that replace the single flat `ingestTs` at resolution and shadow-writ
 
 | Spec file | Section | Change |
 |-----------|---------|--------|
-| `specs/field-mapping.md` | §1.9 | Update status from "designed, not yet implemented" to "implemented". Add `last_modified` mapping-level config key (timestamp column for all fields in the mapping). |
-| `specs/field-mapping.md` | §2.2 | Update status note: "config-level `last_modified` key is now wired". |
-| `specs/field-mapping.md` | §7.2 | Update status from "not yet implemented" to "implemented". Add design note: baseline is `shadow_state.val` (not `written_state`), with rationale. |
-| `plans/engine/GAP_OSI_PRIMITIVES.md` | §5 Per-field timestamps, §7 `derive_timestamps` | Update §5 per-field timestamps from 🔶 to ✅; §7.2 from ❌ to ✅. Update summary table counts. |
+| `specs/field-mapping.md` | §1.9 | Replace: config-based `lastModifiedField` is superseded by `ReadRecord.fieldTimestamps` on the connector. Update the section to describe the connector-native approach (see `plans/connectors/PLAN_FIELD_TIMESTAMPS.md`). |
+| `specs/field-mapping.md` | §2.2 | Update note: config-level `last_modified` column is superseded by `ReadRecord.updatedAt`; remove the "not yet wired" notice and replace with a note that the engine now uses `updatedAt` directly. |
+| `specs/field-mapping.md` | §7.2 | Redesign: `derive_timestamps` is no longer an opt-in config flag — shadow derivation is applied unconditionally on every ingest. Add the priority chain (§3.1 below). Update baseline from `written_state` to `shadow_state` with rationale. |
+| `plans/engine/GAP_OSI_PRIMITIVES.md` | §5 Per-field timestamps, §7.2 | Update §5 from 🔶 to ✅; §7.2 from ❌ to ✅. Update summary table counts. |
 
 ---
 
 ## § 3 Design
 
-### § 3.1 Two features, one shared mechanism
+### § 3.1 Always-on shadow derivation
 
-**Feature A — Connector-supplied per-field timestamps** (closes spec §1.9 + §2.2):
-
-- `lastModifiedField: col` on an individual field mapping: use `record["col"]` as the update
-  timestamp for that specific field.
-- `last_modified: col` at the mapping level (already documented in §2.2): use `record["col"]`
-  as the timestamp for **all** fields in the mapping (same semantics as today's implicit
-  `ingestTs`, but sourced from the connector record rather than the wall clock).
-
-**Feature B — Engine-derived timestamps** (closes spec §7.2):
-
-- `derive_timestamps: true` at the mapping level: for each incoming field, compare the incoming
-  value against the stored shadow value. Changed fields get `ingestTs`; unchanged fields carry
-  forward the shadow's stored timestamp. This enables LWW resolution for connectors that report
-  no timestamps at all.
-
-Both features output a `fieldTimestamps: Record<string, number>` map that is threaded through
-resolution (`resolveConflicts`) and shadow writes (`buildFieldData`).
-
-### § 3.2 Priority chain
-
-When multiple mechanisms could supply a timestamp for the same field, the precedence is:
+For every incoming field on every ingest cycle the engine now computes a per-field timestamp
+rather than using a flat `ingestTs`. No configuration is required. The priority chain is:
 
 ```
-per-field lastModifiedField   (highest — most specific, connector-authoritative)
-  ?? mapping-level last_modified
-  ?? derive_timestamps derivation
-  ?? ingestTs                  (default — current behaviour, no config)
+record.fieldTimestamps[field]        (highest — connector-native, per-field authoritative)
+  ?? derive from shadow:
+       changed field  →  record.updatedAt ?? ingestTs
+       unchanged field → shadow[field].ts
+  ?? ingestTs                        (new record, no shadow exists yet)
 ```
 
-### § 3.3 Config additions (schema.ts)
+`record.fieldTimestamps` and `record.updatedAt` are both defined in
+`plans/connectors/PLAN_FIELD_TIMESTAMPS.md` and `plans/connectors/PLAN_READ_RECORD_UPDATED_AT`
+respectively; neither is required and existing connectors continue to work unchanged.
 
-**`FieldMappingEntrySchema`** gains one key:
+### § 3.2 New utility: `computeFieldTimestamps` (core/mapping.ts)
 
-```ts
-lastModifiedField: z.string().optional()
-// Column on the source record carrying this field's update timestamp.
-// Spec: specs/field-mapping.md §1.9
-```
-
-**`MappingEntrySchema`** gains two keys:
-
-```ts
-last_modified: z.string().optional()
-// Column on the source record carrying the update timestamp for all fields.
-// Spec: specs/field-mapping.md §2.2
-
-derive_timestamps: z.boolean().optional()
-// Derive per-field timestamps by comparing incoming values against shadow.
-// Spec: specs/field-mapping.md §7.2
-```
-
-**Validation**: if both `last_modified` and `derive_timestamps` are set on the same mapping
-entry, throw a config-load error (they are mutually exclusive: one sources timestamps from the
-connector record, the other derives them from shadow comparisons).
-
-### § 3.4 Type additions (loader.ts)
-
-**`FieldMapping`** gains:
-
-```ts
-/** Source record column carrying the per-field update timestamp. Accepts epoch ms (number)
- *  or ISO 8601 string. When present and non-null, takes priority over mapping-level
- *  lastModified and deriveTimestamps for this field.
- *  Spec: specs/field-mapping.md §1.9 */
-lastModifiedField?: string;
-```
-
-**`ChannelMember`** gains:
-
-```ts
-/** Column on the source record carrying the update timestamp for all fields in this mapping.
- *  Accepts epoch ms (number) or ISO 8601 string. Overridden per-field by lastModifiedField.
- *  Spec: specs/field-mapping.md §2.2 */
-lastModified?: string;
-
-/** When true, per-field timestamps are derived by comparing incoming values against the
- *  stored shadow. Changed fields get ingestTs; unchanged fields carry forward their prior
- *  shadow timestamp. Enables LWW resolution for connectors that report no timestamps.
- *  Mutually exclusive with lastModified (config-load error if both are set).
- *  Spec: specs/field-mapping.md §7.2 */
-deriveTimestamps?: boolean;
-```
-
-### § 3.5 New utility: `computeFieldTimestamps` (core/mapping.ts)
-
-A pure function placed in `core/mapping.ts` alongside `applyMapping`:
+A pure function added to `core/mapping.ts` alongside `applyMapping`:
 
 ```ts
 /**
  * Compute a per-field timestamp map for one incoming source record.
- * Priority: lastModifiedField > lastModified > deriveTimestamps > ingestTs.
- * Spec: specs/field-mapping.md §1.9, §2.2, §7.2
+ * Spec: specs/field-mapping.md §7.2
  */
 export function computeFieldTimestamps(
-  incoming: Record<string, unknown>,       // canonical (post-mapping) record
-  rawStripped: Record<string, unknown>,    // raw pre-mapping record (for column lookups)
-  existingShadow: FieldData | undefined,   // current shadow for this (connector, entity, externalId)
-  inbound: FieldMappingList | undefined,
-  member: ChannelMember,
+  incoming: Record<string, unknown>,    // canonical (post-mapping) record
+  existingShadow: FieldData | undefined,
+  record: ReadRecord,
   ingestTs: number,
 ): Record<string, number>
 ```
 
-Implementation sketch:
+Implementation:
 
 ```ts
-const mappingTs = member.lastModified !== undefined
-  ? parseTs(rawStripped[member.lastModified])
-  : undefined;
-
+const baseTs = record.updatedAt ? (Date.parse(record.updatedAt) || ingestTs) : ingestTs;
 const result: Record<string, number> = {};
 for (const field of Object.keys(incoming)) {
-  // 1. Per-field lastModifiedField override
-  const fm = inbound?.find((m) => m.target === field);
-  if (fm?.lastModifiedField !== undefined) {
-    const v = parseTs(rawStripped[fm.lastModifiedField]);
-    if (v !== undefined) { result[field] = v; continue; }
+  // 1. Connector-native per-field timestamp
+  const native = parseTs(record.fieldTimestamps?.[field]);
+  if (native !== undefined) { result[field] = native; continue; }
+  // 2. Shadow derivation
+  const entry = existingShadow?.[field];
+  if (entry && JSON.stringify(entry.val) === JSON.stringify(incoming[field])) {
+    result[field] = entry.ts;   // unchanged — carry forward shadow timestamp
+  } else {
+    result[field] = baseTs;     // changed or new field
   }
-  // 2. Mapping-level last_modified
-  if (mappingTs !== undefined) { result[field] = mappingTs; continue; }
-  // 3. derive_timestamps — compare against shadow
-  if (member.deriveTimestamps) {
-    const entry = existingShadow?.[field];
-    if (entry && JSON.stringify(entry.val) === JSON.stringify(incoming[field])) {
-      result[field] = entry.ts;   // unchanged → carry forward shadow timestamp
-    } else {
-      result[field] = ingestTs;   // changed or new field
-    }
-    continue;
-  }
-  // 4. Default: batch timestamp
-  result[field] = ingestTs;
 }
 return result;
 ```
@@ -197,7 +106,7 @@ export function parseTs(v: unknown): number | undefined {
 }
 ```
 
-### § 3.6 `buildFieldData` extension (db/queries.ts)
+### § 3.3 `buildFieldData` extension (db/queries.ts)
 
 Add an optional `fieldTimestamps` parameter (backward-compatible — all existing call sites
 continue working without change):
@@ -210,94 +119,61 @@ export function buildFieldData(
   ts: number,                               // fallback used when fieldTimestamps absent
   assocSentinel: string | undefined,
   fieldTimestamps?: Record<string, number>, // NEW — per-field overrides
-): FieldData {
-  const fd: FieldData = existing ? { ...existing } : {};
-  for (const [k, val] of Object.entries(incoming)) {
-    const prev = fd[k]?.val ?? null;
-    fd[k] = { val, prev, ts: fieldTimestamps?.[k] ?? ts, src };
-  }
-  if (assocSentinel !== undefined) {
-    const prev = fd["__assoc__"]?.val ?? null;
-    fd["__assoc__"] = { val: assocSentinel, prev, ts, src };
-  }
-  return fd;
-}
+): FieldData
 ```
 
-The `__assoc__` sentinel continues to use the flat `ts` (not per-field) because associations
-are not individual fields and have no meaningful per-field timestamp concept.
+Inside the loop: `fd[k] = { val, prev, ts: fieldTimestamps?.[k] ?? ts, src }`.
 
-### § 3.7 `resolveConflicts` extension (conflict.ts)
+The `__assoc__` sentinel continues to use the flat `ts` — associations have no per-field
+timestamp concept.
 
-Add an optional `incomingFieldTimestamps` parameter:
+### § 3.4 `resolveConflicts` extension (conflict.ts)
 
-```ts
-export function resolveConflicts(
-  incoming: Record<string, unknown>,
-  targetShadow: FieldData | undefined,
-  incomingSrc: string,
-  incomingTs: number,
-  config: ConflictConfig,
-  fieldMappings?: FieldMappingList,
-  incomingFieldTimestamps?: Record<string, number>,  // NEW
-): Record<string, unknown>
-```
-
-Inside the body, replace every direct use of `incomingTs` in a timestamp comparison with:
+Add optional `incomingFieldTimestamps?: Record<string, number>` as the last parameter.
+Introduce a per-field accessor inside the body:
 
 ```ts
 const fieldTs = (field: string) => incomingFieldTimestamps?.[field] ?? incomingTs;
 ```
 
-**Affected sites:**
+Replace every direct `incomingTs` timestamp comparison with `fieldTs(field)` at the four
+affected sites:
 
-1. **Group pre-pass** — the group winner is elected by comparing the incoming aggregate
-   timestamp against the existing aggregate timestamp. Replace the per-group `incomingTs` with
-   `max(fieldTs(f) for f in groupFields)`:
-   ```ts
-   let incomingGroupTs = -Infinity;
-   for (const m of groupFields) {
-     const t = incomingFieldTimestamps?.[m.target] ?? incomingTs;
-     if (t > incomingGroupTs) incomingGroupTs = t;
-   }
-   // ... compare incomingGroupTs against existingGroupTs
-   ```
+1. **Group pre-pass** — elect group winner by `max(fieldTs(f) for f in groupFields)`.
+2. **`last_modified` field strategy** — `if (fieldTs(field) >= existing.ts)`.
+3. **Global LWW (default)** — same.
+4. **`coalesce` tie-break** — same.
 
-2. **`last_modified` field strategy** — `if (incomingTs >= existing.ts)` →
-   `if (fieldTs(field) >= existing.ts)`.
+`collect` and `bool_or` strategies are timestamp-independent; no changes.
 
-3. **Global LWW (default)** — same replacement.
+### § 3.5 Engine wiring (engine.ts)
 
-4. **`coalesce` tie-break** — `incomingTs >= existingTs` → `fieldTs(field) >= existingTs`.
-
-The `collect` and `bool_or` strategies are timestamp-independent and need no changes.
-
-### § 3.8 Engine wiring (engine.ts)
-
-In `_processRecords`, **standard flat path**, after `applyMapping` and the existing shadow read:
+In `_processRecords`, after the shadow read, compute field timestamps and thread them through
+the ingest path:
 
 ```ts
-// Spec: specs/field-mapping.md §1.9, §7.2
-const fieldTimestamps = computeFieldTimestamps(
-  canonical, stripped, existingShadow, sourceMember.inbound, sourceMember, ingestTs,
-);
+// Spec: specs/field-mapping.md §7.2
+const fieldTimestamps = computeFieldTimestamps(canonical, existingShadow, record, ingestTs);
 ```
 
 Pass `fieldTimestamps` to:
-- `resolveConflicts(canonical, targetShadow, ..., sourceMember.inbound, fieldTimestamps)`
-- `buildFieldData(existingShadow, canonical, ..., ingestTs, sentinel, fieldTimestamps)`
+- `resolveConflicts(..., sourceMember.inbound, fieldTimestamps)`
+- both `buildFieldData` calls (source shadow write and child outcomes)
 
-The same pattern applies in the **array expansion path** for child records (using
-`childCanonical`, `childStripped`, and the child's own shadow entry).
+Apply the same pattern in the **array expansion path** (child records use their own
+`childCanonical` and child shadow entry) and the **`collectOnly` path** (`buildFieldData` only).
 
-For the **`collectOnly` path**, also compute and pass `fieldTimestamps` to `buildFieldData`.
-Echo detection in `collectOnly` uses the stripped raw record so it remains unaffected.
+### § 3.6 Baseline choice: shadow vs. written_state
 
-### § 3.9 Baseline choice for `derive_timestamps`: shadow vs. written_state
+The comparison is against `shadow_state.val` (last value read from the connector), not
+`written_state` (last value written to a connector).
 
-`PLAN_WRITTEN_STATE §5` originally proposed comparing against `written_state` (what the engine
-last **wrote** to a connector). This plan uses `shadow_state` (what was last **read** from a
-connector) as the comparison baseline.
+- `shadow_state` is always present for source connectors. `written_state` is only populated
+  when the engine has written back to a connector as a target. A read-only connector will never
+  have a `written_state` row.
+- `shadow_state.val` is what the connector reported — the right baseline for detecting whether
+  the connector itself changed a field since the last ingest.
+- `written_state` solves echo prevention after round-trip writes; it is the wrong baseline here.
 
 Rationale:
 
@@ -325,79 +201,34 @@ preventing a normalisation echo from winning resolution inappropriately.
 
 ## § 4 Tests
 
-### § 4.1 Unit tests for `computeFieldTimestamps` (mapping.test.ts)
-
 | ID | Scenario |
 |----|----------|
-| FT1 | No config → all fields get `ingestTs` |
-| FT2 | Mapping-level `lastModified` column → all fields get `record[col]` as ms |
-| FT3 | Mapping-level `lastModified` as ISO string → correctly parsed to epoch ms |
-| FT4 | Per-field `lastModifiedField` overrides mapping-level for that field; other fields still use mapping-level |
-| FT5 | `derive_timestamps: true`, field unchanged (same as shadow) → carries forward shadow `ts` |
-| FT6 | `derive_timestamps: true`, field changed → gets `ingestTs` |
-| FT7 | `derive_timestamps: true`, no shadow (new record) → all fields get `ingestTs` |
-| FT8 | `lastModifiedField` column absent or null in source record → falls back to mapping-level or `ingestTs` |
-| FT9 | Both `lastModified` and `derive_timestamps` set in YAML → config-load throws |
-
-### § 4.2 Integration tests for LWW with per-field timestamps (conflict.test.ts or mapping.test.ts)
-
-| ID | Scenario |
-|----|----------|
-| FT10 | `lastModifiedField`: older source field (lower timestamp) loses LWW even if it arrives in a later ingest cycle |
-| FT11 | `derive_timestamps`: a field that hasn't changed keeps its original timestamp so a more-recently-changed field from the other source wins |
-| FT12 | `derive_timestamps`: a field that did change in this cycle gets `ingestTs` and beats an older competing value |
-| FT13 | Group field atomicity preserved with per-field timestamps: group winner elected by max timestamp across group fields |
+| FT1 | New record (no shadow) → all fields get `ingestTs` |
+| FT2 | New record with `record.updatedAt` → all fields get parsed `updatedAt` |
+| FT3 | `record.fieldTimestamps` present → named fields use per-field ts; unlisted fields use derivation |
+| FT4 | Unchanged field (same value as shadow) → carries forward shadow `ts` |
+| FT5 | Changed field (differs from shadow) → gets `ingestTs` |
+| FT6 | Changed field with `record.updatedAt` → gets parsed `updatedAt`, not `ingestTs` |
+| FT7 | `fieldTimestamps` entry present for field that is also in shadow → `fieldTimestamps` wins |
+| FT8 | `parseTs` with epoch ms number → returns as-is |
+| FT9 | `parseTs` with ISO 8601 string → returns epoch ms |
+| FT10 | `parseTs` with invalid string → returns `undefined` |
+| FT11 | LWW integration: older-ts field loses even if it arrives in a later ingest cycle |
+| FT12 | LWW integration: unchanged field keeps old ts; competing more-recent value wins |
+| FT13 | Group atomicity preserved: group winner elected by max ts across group fields |
 
 ---
 
 ## § 5 Implementation Steps
 
-### Step 1 — Schema additions (schema.ts)
-
-1. Add `lastModifiedField: z.string().optional()` to `FieldMappingEntrySchema`.
-2. Add `last_modified: z.string().optional()` and `derive_timestamps: z.boolean().optional()`
-   to `MappingEntrySchema`.
-
-### Step 2 — Type and loader additions (loader.ts)
-
-1. Add `lastModifiedField?: string` to `FieldMapping`.
-2. Add `lastModified?: string` and `deriveTimestamps?: boolean` to `ChannelMember`.
-3. Wire them in the mapping-entry compilation step (where `ChannelMember` is built from
-   `MappingEntry`): set `member.lastModified`, `member.deriveTimestamps`, and
-   `fm.lastModifiedField` from the parsed YAML values.
-4. Add the mutual-exclusion validation: throw if both `last_modified` and `derive_timestamps`
-   are set on the same mapping entry.
-
-### Step 3 — `buildFieldData` extension (db/queries.ts)
-
-Add optional `fieldTimestamps?: Record<string, number>` parameter. Use
-`fieldTimestamps?.[k] ?? ts` in the `FieldEntry` construction. No existing callers change.
-
-### Step 4 — `computeFieldTimestamps` + `parseTs` (core/mapping.ts)
-
-Add both functions. Export `parseTs` so it can be tested directly.
-
-### Step 5 — `resolveConflicts` extension (conflict.ts)
-
-1. Add optional `incomingFieldTimestamps` parameter.
-2. Introduce a per-field accessor `const fieldTs = (f: string) => incomingFieldTimestamps?.[f] ?? incomingTs`.
-3. Replace `incomingTs` with `fieldTs(field)` at the four timestamp-comparison sites
-   (group pre-pass, `last_modified` strategy, global LWW, `coalesce` tie-break).
-
-### Step 6 — Engine wiring (engine.ts)
-
-1. Import `computeFieldTimestamps` from `core/mapping.ts`.
-2. In `_processRecords` (standard flat path): add `computeFieldTimestamps` call after the
-   shadow read; pass `fieldTimestamps` to `resolveConflicts` and both `buildFieldData` calls
-   (source shadow write and child outcomes).
-3. In `_processRecords` (array expansion path): same for child records using `childStripped`,
-   `childCanonical`, and the child's own shadow entry.
-4. In the `collectOnly` path: same for `buildFieldData`.
-
-### Step 7 — Tests and spec update
-
-1. Write FT1–FT13.
-2. Update `specs/field-mapping.md §1.9` → "implemented".
+1. Add `parseTs` and `computeFieldTimestamps` to `core/mapping.ts`.
+2. Add optional `fieldTimestamps` parameter to `buildFieldData` in `db/queries.ts`.
+3. Add optional `incomingFieldTimestamps` parameter to `resolveConflicts` in `conflict.ts`;
+   introduce `fieldTs(field)` helper; replace timestamp-comparison sites.
+4. Wire `computeFieldTimestamps` in `engine.ts` (`_processRecords`: flat, array expansion,
+   and `collectOnly` paths).
+5. Write FT1–FT13.
+6. Update `specs/field-mapping.md §1.9`, `§2.2`, `§7.2` and `GAP_OSI_PRIMITIVES.md`.
 3. Update `specs/field-mapping.md §2.2` status note.
 4. Update `specs/field-mapping.md §7.2` → "implemented"; add baseline-choice note.
 5. Update `GAP_OSI_PRIMITIVES.md` §5 and §7.2 markers and summary table.

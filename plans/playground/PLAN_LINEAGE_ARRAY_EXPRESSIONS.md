@@ -1,6 +1,6 @@
 # Plan: Lineage for Nested Arrays and Expression Fields
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** Playground, Engine config  

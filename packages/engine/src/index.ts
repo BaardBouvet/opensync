@@ -16,7 +16,7 @@ export type {
   AddConnectorReport,
 } from "./engine.js";
 
-export { loadConfig } from "./config/loader.js";
+export { loadConfig, buildChannelsFromEntries } from "./config/loader.js";
 export type {
   ResolvedConfig,
   ConnectorInstance,
@@ -28,6 +28,9 @@ export type {
   AssocPredicateMapping,
   IdentityGroup,
 } from "./config/loader.js";
+
+export { MappingsFileSchema } from "./config/schema.js";
+export type { MappingEntry, FieldMappingEntry } from "./config/schema.js";
 
 export { openDb } from "./db/index.js";
 export type { Db } from "./db/index.js";

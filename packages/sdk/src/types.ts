@@ -58,9 +58,6 @@ export interface Association {
 
   /** The referenced record's ID — usually the value of data[predicate]. */
   targetId: string;
-
-  /** Optional edge-level properties beyond the reference itself (e.g. { since: '2020-01-01' }). */
-  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -90,6 +87,31 @@ export interface ReadRecord {
    *  delivers it as UpdateRecord.version so connectors can use it for conditional
    *  writes (If-Match / optimistic locking). Connectors that omit it are unaffected. */
   version?: string;
+
+  /** Source-assigned modification timestamp in ISO 8601 format (e.g. '2026-03-15T10:32:00Z').
+   *  When present, the engine uses this as the base LWW timestamp for every field in this
+   *  record, so that conflict resolution reflects actual change ordering in the source rather
+   *  than engine poll timing. Falls back to ingest time when absent.
+   *  Spec: specs/connector-sdk.md § ReadRecord */
+  updatedAt?: string;
+
+  /** Source-assigned creation timestamp in ISO 8601 format.
+   *  Treated as immutable by the engine: once stored in shadow, never overwritten on a
+   *  subsequent ingest. When present, enables `origin_wins` resolution and provides a stable
+   *  LWW tie-breaker (older source wins on equal timestamps).
+   *  Omit for sources that do not expose a creation time.
+   *  Spec: specs/connector-sdk.md § ReadRecord */
+  createdAt?: string;
+
+  /** Per-field modification timestamps, keyed by the same field names used in `data`.
+   *  Values are ISO 8601 strings (e.g. '2024-06-01T12:00:00Z').
+   *  When present, the engine uses these as the LWW timestamp for the named fields,
+   *  taking precedence over shadow derivation and `updatedAt`.
+   *  Fields absent from this map fall back to shadow derivation then `updatedAt`.
+   *  The connector is responsible for keeping timestamp columns out of `data`.
+   *  Omit for connectors that do not expose per-field modification times.
+   *  Spec: specs/field-mapping.md §7.2 */
+  fieldTimestamps?: Record<string, string>;
 }
 
 /**
@@ -248,6 +270,32 @@ export interface ConnectorContext {
   webhookUrl: string;
 }
 
+// ─── Association Schema ───────────────────────────────────────────────────────
+
+/**
+ * Metadata for a single association predicate declared on an entity.
+ * Used by: agents (description), engine (write-side filter, pre-flight warnings).
+ * Spec: specs/connector-sdk.md § Association Schema
+ */
+export interface AssociationDescriptor {
+  /** Entity name (connector's own, as registered in channel config) that this predicate
+   *  points to. Matches Association.targetEntity values emitted by read() or expected in
+   *  insert()/update(). */
+  targetEntity: string;
+
+  /** Human-readable description of the relationship.
+   *  E.g. "The company this contact belongs to." Agents use this for mapping suggestions. */
+  description?: string;
+
+  /** Whether a record is considered incomplete if this association is absent.
+   *  Does not block dispatch — it produces a warning entry in the sync result. */
+  required?: boolean;
+
+  /** Whether a single record can carry multiple associations with this predicate
+   *  (e.g. a task assigned to several owners). Defaults to false (at most one). */
+  multiple?: boolean;
+}
+
 // ─── Entity Definition ────────────────────────────────────────────────────────
 
 /**
@@ -308,6 +356,20 @@ export interface EntityDefinition {
    *  Keys are field names from data. Used by agents (description), engine (required/immutable
    *  enforcement), and tooling (type compatibility warnings at channel setup). */
   schema?: Record<string, FieldDescriptor>;
+
+  /** Association metadata: declares which predicates this entity emits from read() and
+   *  accepts in insert()/update(). Key is the predicate string as it appears in
+   *  Association.predicate — short field name ('companyId') or full URI.
+   *
+   *  The engine uses this as the write-side filter: when dispatching to a target entity
+   *  that declares associationSchema, only predicates declared here are included in
+   *  UpdateRecord.associations and InsertRecord.associations. Predicates absent from the
+   *  schema are dropped silently. Omitting the field leaves behaviour unchanged (pass-through).
+   *
+   *  Also used at channel setup for pre-flight warnings: if a declared targetEntity is not
+   *  registered in the channel, the engine logs a warning.
+   *  Spec: specs/connector-sdk.md § Association Schema */
+  associationSchema?: Record<string, AssociationDescriptor>;
 
   /** OAuth scopes split by role. The engine unions only what the channel actually uses,
    *  so a source-only user is never prompted for write permissions.

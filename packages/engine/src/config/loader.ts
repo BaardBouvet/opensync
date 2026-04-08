@@ -171,10 +171,10 @@ export interface ConnectorInstance {
 }
 
 export interface ConflictConfig {
-  strategy: "lww" | "field_master";
+  strategy: "lww" | "field_master" | "origin_wins";
   fieldMasters?: Record<string, string>;
   connectorPriorities?: Record<string, number>;
-  fieldStrategies?: Record<string, { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" }>;
+  fieldStrategies?: Record<string, { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" | "origin_wins" }>;
 }
 
 export interface ResolvedConfig {
@@ -244,159 +244,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
   }
 
   // 3. Build ChannelConfig list
-  // Each channel gets its members from the mapping entries that reference it
-
-  // Spec: specs/field-mapping.md §3.2 — build a global index of named mappings so
-  // child entries can resolve their parent and inherit connectorId + sourceEntity.
-  const namedMappings = new Map<string, MappingEntry>();
-  for (const entry of allMappingEntries) {
-    if (entry.name) {
-      if (namedMappings.has(entry.name)) {
-        throw new Error(`Duplicate mapping name "${entry.name}": mapping names must be unique across all mapping files`);
-      }
-      namedMappings.set(entry.name, entry);
-    }
-  }
-
-  // Spec: specs/field-mapping.md §3.4 — validate no cycles in parent chains before
-  // any further processing (cycles are not detectable after descriptor exclusion).
-  for (const [name, entry] of namedMappings) {
-    const seen = new Set<string>([name]);
-    let cursor: MappingEntry | undefined = entry;
-    while (cursor?.parent) {
-      if (seen.has(cursor.parent)) {
-        throw new Error(`Cycle detected in parent chain at "${cursor.parent}"`);
-      }
-      seen.add(cursor.parent);
-      cursor = namedMappings.get(cursor.parent);
-    }
-  }
-
-  // Determine which named entries are same-channel source descriptors — i.e. named entries
-  // that are referenced as `parent` by another entry in the SAME channel.
-  // Source descriptors are added to namedMappings only; they are NOT added as channel members.
-  const sameChannelDescriptors = new Set<string>(); // set of `name` values
-  for (const entry of allMappingEntries) {
-    if (entry.parent) {
-      const parentEntry = namedMappings.get(entry.parent);
-      if (parentEntry && parentEntry.channel === entry.channel) {
-        // Same-channel parent: mark as source descriptor
-        sameChannelDescriptors.add(entry.parent);
-      }
-    }
-  }
-
-  const channelMap = new Map<string, ChannelConfig>();
-
-  for (const chDef of allChannelDefs) {
-    channelMap.set(chDef.id, {
-      id: chDef.id,
-      members: [],
-      identityFields: chDef.identityFields,
-      identityGroups: chDef.identityGroups,
-    });
-  }
-
-  for (const entry of allMappingEntries) {
-    // Spec: specs/field-mapping.md §3.2 — skip same-channel source descriptors.
-    // They live in namedMappings for child lookup but are not channel members themselves.
-    if (entry.name && sameChannelDescriptors.has(entry.name)) {
-      continue;
-    }
-
-    if (!channelMap.has(entry.channel)) {
-      // Auto-create channel if not declared in channels.yaml
-      channelMap.set(entry.channel, { id: entry.channel, members: [] });
-    }
-    const ch = channelMap.get(entry.channel)!;
-
-    // Spec: specs/field-mapping.md §3.2/§3.4 — resolve parent mapping for child entries.
-    let resolvedConnectorId = entry.connector;
-    let resolvedSourceEntity: string | undefined;
-    let resolvedEntity = entry.entity ?? "";
-    let expansionChain: ExpansionChainLevel[] | undefined;
-
-    if (entry.parent) {
-      if (!entry.array_path) {
-        throw new Error(`Mapping entry in channel "${entry.channel}" with parent "${entry.parent}" must declare array_path`);
-      }
-      // Spec: specs/field-mapping.md §3.3 — scalar: true and element_key are mutually exclusive
-      if (entry.scalar && entry.element_key) {
-        throw new Error(`Mapping in channel "${entry.channel}" with scalar: true must not declare element_key`);
-      }
-      // Spec: specs/field-mapping.md §6 — ordering methods are mutually exclusive per entry
-      const orderCount = [entry.order_by, entry.order, entry.order_linked_list].filter(Boolean).length;
-      if (orderCount > 1) {
-        throw new Error(`Mapping in channel "${entry.channel}" specifies more than one ordering method (order_by, order, order_linked_list); only one is allowed`);
-      }
-      // Spec: specs/field-mapping.md §3.4 — walk the full parent chain transitively
-      const chainResult = resolveExpansionChain(entry, namedMappings);
-      resolvedConnectorId = entry.connector ?? chainResult.connectorId;
-      if (!resolvedConnectorId) {
-        throw new Error(`Cannot resolve connectorId for child mapping in channel "${entry.channel}" with parent "${entry.parent}"`);
-      }
-      resolvedSourceEntity = chainResult.sourceEntity;
-      resolvedEntity = entry.entity ?? `${chainResult.sourceEntity}/${entry.array_path}`;
-      expansionChain = chainResult.chain;
-    } else {
-      if (!resolvedConnectorId) {
-        throw new Error(`Mapping entry in channel "${entry.channel}" must declare a connector`);
-      }
-      if (!entry.entity) {
-        throw new Error(`Mapping entry for connector "${resolvedConnectorId}" in channel "${entry.channel}" must declare an entity`);
-      }
-    }
-
-    const inbound = entry.fields ? buildInbound(entry.fields) : undefined;
-    const outbound = entry.fields ? buildOutbound(entry.fields) : undefined;
-
-    // Spec: specs/field-mapping.md §3.2/§5 — compile filter expressions once at load time.
-    // Two compilation paths based on context: array expansion members use element-level
-    // bindings (element, parent, index); flat members use record-level binding (record).
-    const isArrayMember = !!(entry.array_path || entry.parent);
-
-    // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.2 — array expansion element filters
-    const elementFilter = isArrayMember && entry.filter
-      ? compileElementFilter(entry.filter, entry.channel)
-      : undefined;
-    const elementReverseFilter = isArrayMember && entry.reverse_filter
-      ? compileElementFilter(entry.reverse_filter, entry.channel)
-      : undefined;
-
-    // Spec: specs/field-mapping.md §5.1/§5.2 — flat member record-level filters
-    const recordFilter = !isArrayMember && entry.filter
-      ? compileRecordFilter(entry.filter, entry.channel)
-      : undefined;
-    const recordReverseFilter = !isArrayMember && entry.reverse_filter
-      ? compileRecordFilter(entry.reverse_filter, entry.channel)
-      : undefined;
-
-    ch.members.push({
-      name: entry.name,
-      connectorId: resolvedConnectorId!,
-      entity: resolvedEntity,
-      sourceEntity: resolvedSourceEntity,
-      inbound,
-      outbound,
-      assocMappings: entry.associations,
-      idField: entry.id_field,
-      // Array expansion fields
-      arrayPath: entry.array_path,
-      parentMappingName: entry.parent,
-      parentFields: entry.parent_fields as Record<string, string | { path?: string; field: string }> | undefined,
-      elementKey: entry.element_key,
-      expansionChain,
-      scalar: entry.scalar,
-      // Ordering (specs/field-mapping.md §6)
-      orderBy: entry.order_by as Array<{ field: string; direction: "asc" | "desc" }> | undefined,
-      crdtOrder: entry.order ?? undefined,
-      crdtLinkedList: entry.order_linked_list ?? undefined,
-      elementFilter,
-      elementReverseFilter,
-      recordFilter,
-      recordReverseFilter,
-    });
-  }
+  const channels = buildChannelsFromEntries(allChannelDefs, allMappingEntries);
 
   // 4. Load connector plugins and resolve env-var interpolation
   const connectorInstances: ConnectorInstance[] = [];
@@ -432,10 +280,159 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 
   return {
     connectors: connectorInstances,
-    channels: Array.from(channelMap.values()),
+    channels,
     conflict: { strategy: "lww" },
     readTimeoutMs: 30_000,
   };
+}
+
+// ─── buildChannelsFromEntries ─────────────────────────────────────────────────
+// Spec: specs/config.md — pure channel builder used by both loadConfig() and
+// the browser playground (which parses YAML directly, without file I/O).
+
+export function buildChannelsFromEntries(
+  channelDefs: Array<{ id: string; identityFields?: string[]; identityGroups?: IdentityGroup[] }>,
+  mappingEntries: MappingEntry[],
+): ChannelConfig[] {
+  // Spec: specs/field-mapping.md §3.2 — build a global index of named mappings so
+  // child entries can resolve their parent and inherit connectorId + sourceEntity.
+  const namedMappings = new Map<string, MappingEntry>();
+  for (const entry of mappingEntries) {
+    if (entry.name) {
+      if (namedMappings.has(entry.name)) {
+        throw new Error(`Duplicate mapping name "${entry.name}": mapping names must be unique across all mapping files`);
+      }
+      namedMappings.set(entry.name, entry);
+    }
+  }
+
+  // Spec: specs/field-mapping.md §3.4 — validate no cycles in parent chains before
+  // any further processing (cycles are not detectable after descriptor exclusion).
+  for (const [name, entry] of namedMappings) {
+    const seen = new Set<string>([name]);
+    let cursor: MappingEntry | undefined = entry;
+    while (cursor?.parent) {
+      if (seen.has(cursor.parent)) {
+        throw new Error(`Cycle detected in parent chain at "${cursor.parent}"`);
+      }
+      seen.add(cursor.parent);
+      cursor = namedMappings.get(cursor.parent);
+    }
+  }
+
+  // Determine which named entries are same-channel source descriptors — i.e. named entries
+  // that are referenced as `parent` by another entry in the SAME channel.
+  // Source descriptors live in namedMappings only; they are NOT added as channel members.
+  const sameChannelDescriptors = new Set<string>();
+  for (const entry of mappingEntries) {
+    if (entry.parent) {
+      const parentEntry = namedMappings.get(entry.parent);
+      if (parentEntry && parentEntry.channel === entry.channel) {
+        sameChannelDescriptors.add(entry.parent);
+      }
+    }
+  }
+
+  const channelMap = new Map<string, ChannelConfig>();
+
+  for (const chDef of channelDefs) {
+    channelMap.set(chDef.id, {
+      id: chDef.id,
+      members: [],
+      identityFields: chDef.identityFields,
+      identityGroups: chDef.identityGroups,
+    });
+  }
+
+  for (const entry of mappingEntries) {
+    // Spec: specs/field-mapping.md §3.2 — skip same-channel source descriptors.
+    if (entry.name && sameChannelDescriptors.has(entry.name)) {
+      continue;
+    }
+
+    if (!channelMap.has(entry.channel)) {
+      channelMap.set(entry.channel, { id: entry.channel, members: [] });
+    }
+    const ch = channelMap.get(entry.channel)!;
+
+    let resolvedConnectorId = entry.connector;
+    let resolvedSourceEntity: string | undefined;
+    let resolvedEntity = entry.entity ?? "";
+    let expansionChain: ExpansionChainLevel[] | undefined;
+
+    if (entry.parent) {
+      if (!entry.array_path) {
+        throw new Error(`Mapping entry in channel "${entry.channel}" with parent "${entry.parent}" must declare array_path`);
+      }
+      if (entry.scalar && entry.element_key) {
+        throw new Error(`Mapping in channel "${entry.channel}" with scalar: true must not declare element_key`);
+      }
+      const orderCount = [entry.order_by, entry.order, entry.order_linked_list].filter(Boolean).length;
+      if (orderCount > 1) {
+        throw new Error(`Mapping in channel "${entry.channel}" specifies more than one ordering method (order_by, order, order_linked_list); only one is allowed`);
+      }
+      const chainResult = resolveExpansionChain(entry, namedMappings);
+      resolvedConnectorId = entry.connector ?? chainResult.connectorId;
+      if (!resolvedConnectorId) {
+        throw new Error(`Cannot resolve connectorId for child mapping in channel "${entry.channel}" with parent "${entry.parent}"`);
+      }
+      resolvedSourceEntity = chainResult.sourceEntity;
+      resolvedEntity = entry.entity ?? `${chainResult.sourceEntity}/${entry.array_path}`;
+      expansionChain = chainResult.chain;
+    } else {
+      if (!resolvedConnectorId) {
+        throw new Error(`Mapping entry in channel "${entry.channel}" must declare a connector`);
+      }
+      if (!entry.entity) {
+        throw new Error(`Mapping entry for connector "${resolvedConnectorId}" in channel "${entry.channel}" must declare an entity`);
+      }
+    }
+
+    const inbound = entry.fields ? buildInbound(entry.fields) : undefined;
+    const outbound = entry.fields ? buildOutbound(entry.fields) : undefined;
+
+    const isArrayMember = !!(entry.array_path || entry.parent);
+
+    const elementFilter = isArrayMember && entry.filter
+      ? compileElementFilter(entry.filter, entry.channel)
+      : undefined;
+    const elementReverseFilter = isArrayMember && entry.reverse_filter
+      ? compileElementFilter(entry.reverse_filter, entry.channel)
+      : undefined;
+
+    const recordFilter = !isArrayMember && entry.filter
+      ? compileRecordFilter(entry.filter, entry.channel)
+      : undefined;
+    const recordReverseFilter = !isArrayMember && entry.reverse_filter
+      ? compileRecordFilter(entry.reverse_filter, entry.channel)
+      : undefined;
+
+    ch.members.push({
+      name: entry.name,
+      connectorId: resolvedConnectorId!,
+      entity: resolvedEntity,
+      sourceEntity: resolvedSourceEntity,
+      inbound,
+      outbound,
+      assocMappings: entry.associations,
+      idField: entry.id_field,
+      arrayPath: entry.array_path,
+      parentMappingName: entry.parent,
+      parentFields: entry.parent_fields as Record<string, string | { path?: string; field: string }> | undefined,
+      elementKey: entry.element_key,
+      expansionChain,
+      scalar: entry.scalar,
+      orderBy: entry.order_by as Array<{ field: string; direction: "asc" | "desc" }> | undefined,
+      crdtOrder: entry.order ?? undefined,
+      crdtLinkedList: entry.order_linked_list ?? undefined,
+      elementFilter,
+      elementReverseFilter,
+      recordFilter,
+      recordReverseFilter,
+    });
+  }
+
+  return Array.from(channelMap.values());
 }
 
 // ─── resolveExpansionChain ───────────────────────────────────────────────────
@@ -498,6 +495,10 @@ function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
     default: f.default,
     group: f.group,
     sources: f.sources,
+    expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
+    reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
+    normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
+    resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
   }));
 }
 
@@ -510,6 +511,10 @@ function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
     reverseRequired: f.reverseRequired,
     group: f.group,
     sources: f.sources,
+    expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
+    reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
+    normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
+    resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
   }));
 }
 
@@ -591,4 +596,74 @@ function compileRecordFilter(
     );
   }
   return (record) => Boolean(fn(record));
+}
+
+// ─── Field expression compilers ───────────────────────────────────────────────
+
+/** Spec: specs/field-mapping.md §1.3
+ * Compile an `expression` string into a typed function.
+ * Binding: `record` — the full incoming source record. */
+function compileExpression(
+  expr: string,
+  target: string,
+): (record: Record<string, unknown>) => unknown {
+  try {
+    // eslint-disable-next-line no-new-func
+    return new Function("record", `return (${expr});`) as (record: Record<string, unknown>) => unknown;
+  } catch (err) {
+    throw new Error(
+      `Field expression for target "${target}" failed to compile: ${String(err)}\n  Expression: ${expr}`,
+    );
+  }
+}
+
+/** Spec: specs/field-mapping.md §1.3
+ * Compile a `reverse_expression` string into a typed function.
+ * Binding: `record` — the full canonical record. */
+function compileReverseExpression(
+  expr: string,
+  target: string,
+): (record: Record<string, unknown>) => unknown {
+  try {
+    // eslint-disable-next-line no-new-func
+    return new Function("record", `return (${expr});`) as (record: Record<string, unknown>) => unknown;
+  } catch (err) {
+    throw new Error(
+      `Field reverse_expression for target "${target}" failed to compile: ${String(err)}\n  Expression: ${expr}`,
+    );
+  }
+}
+
+/** Spec: specs/field-mapping.md §1.4
+ * Compile a `normalize` string into a typed function.
+ * Binding: `v` — the raw field value. */
+function compileNormalize(
+  expr: string,
+  target: string,
+): (v: unknown) => unknown {
+  try {
+    // eslint-disable-next-line no-new-func
+    return new Function("v", `return (${expr});`) as (v: unknown) => unknown;
+  } catch (err) {
+    throw new Error(
+      `Field normalize for target "${target}" failed to compile: ${String(err)}\n  Expression: ${expr}`,
+    );
+  }
+}
+
+/** Spec: specs/field-mapping.md §2.3
+ * Compile a `resolve` string into a typed incremental reducer.
+ * Bindings: `incoming`, `existing`. */
+function compileResolve(
+  expr: string,
+  target: string,
+): (incoming: unknown, existing: unknown | undefined) => unknown {
+  try {
+    // eslint-disable-next-line no-new-func
+    return new Function("incoming", "existing", `return (${expr});`) as (incoming: unknown, existing: unknown | undefined) => unknown;
+  } catch (err) {
+    throw new Error(
+      `Field resolve for target "${target}" failed to compile: ${String(err)}\n  Expression: ${expr}`,
+    );
+  }
 }

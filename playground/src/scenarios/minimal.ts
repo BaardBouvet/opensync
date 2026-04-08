@@ -6,39 +6,29 @@ import type { ScenarioDefinition } from "./types.js";
 
 const scenario: ScenarioDefinition = {
   label: "minimal (crm ↔ erp, companies)",
-  channels: [
-    {
-      id: "companies",
-      identityFields: ["domain"],
-      members: [
-        {
-          connectorId: "crm",
-          entity: "companies",
-          inbound: [
-            { source: "name",   target: "name"   },
-            { source: "domain", target: "domain" },
-          ],
-          outbound: [
-            { source: "name",   target: "name"   },
-            { source: "domain", target: "domain" },
-          ],
-        },
-        {
-          connectorId: "erp",
-          entity: "accounts",
-          inbound: [
-            { source: "accountName", target: "name"   },
-            { source: "website",     target: "domain" },
-          ],
-          outbound: [
-            { source: "accountName", target: "name"   },
-            { source: "website",     target: "domain" },
-          ],
-        },
-      ],
-    },
-  ],
-  conflict: { strategy: "lww" },
+  yaml: `
+channels:
+  - id: companies
+    identityFields: [domain]
+
+conflict:
+  strategy: lww
+
+mappings:
+  - connector: crm
+    entity: companies
+    channel: companies
+    fields:
+      - { source: name,   target: name   }
+      - { source: domain, target: domain }
+
+  - connector: erp
+    entity: accounts
+    channel: companies
+    fields:
+      - { source: accountName, target: name   }
+      - { source: website,     target: domain }
+`,
 };
 
 export default scenario;

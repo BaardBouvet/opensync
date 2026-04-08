@@ -15,7 +15,6 @@ interface Association {
                                         // e.g. 'companyId', 'worksFor', 'https://schema.org/worksFor'
   targetEntity: string;                 // entity name the reference points to (e.g. 'company')
   targetId: string;                     // the referenced ID in the target entity's namespace
-  metadata?: Record<string, unknown>;   // optional edge metadata (e.g. { since: '2020-01-01' })
 }
 ```
 
@@ -84,22 +83,6 @@ thing — `associations` is the pre-extracted, engine-readable form in both case
 If `contact` and `company` fields all live in one source object, the connector returns one
 record with all fields and no associations. The engine handles many-to-many field mapping.
 No splitting required at the connector level.
-
-## Edge Metadata
-
-`metadata` on an association carries edge properties beyond the reference itself — things
-that describe the relationship, not just its endpoint:
-
-```typescript
-associations: [
-  {
-    predicate: 'manages',
-    targetEntity: 'employee',
-    targetId: 'emp-77',
-    metadata: { since: '2022-06-01', title: 'Direct report' }
-  }
-]
-```
 
 ## Storage in Shadow State
 
@@ -257,6 +240,71 @@ maps connector-local predicate names to a canonical (channel-internal) name:
   shadow always stores the connector's own local predicate name.
 - Changing or adding a predicate mapping never invalidates existing shadows. No migration
   is needed when mapping config is updated.
+
+## § 8 Association Schema — Declared Predicates on Entities
+
+An entity may declare `associationSchema` (an optional field on `EntityDefinition`) to list
+the association predicates it supports. This is the machine-readable counterpart to the
+channel-level `associations` predicate mappings in § 7.
+
+```typescript
+// EntityDefinition.associationSchema — optional, keyed by predicate strings
+associationSchema: {
+  companyId: { targetEntity: 'company', description: 'The company this contact belongs to.' },
+}
+```
+
+See `connector-sdk.md § Association Schema` for full type definition and examples.
+
+### § 8.1 Write-Side Filtering
+
+When the engine dispatches to a target entity that declares `associationSchema`, it filters
+`InsertRecord.associations` / `UpdateRecord.associations` to include only predicates present
+in the schema. Predicates absent from the schema are dropped (trace-level log).
+
+Entities **without** `associationSchema` receive all remapped associations unchanged — the
+opt-in nature means no existing connector behaviour changes until `associationSchema` is added.
+
+### § 8.4 Source-Inexpressible Predicate Preservation
+
+When a source connector triggers an UPDATE to a target connector, the source can only express
+a subset of the target's association predicates — specifically, those reachable via the
+source's `assocMappings` chain through a canonical predicate to a target-local predicate.
+
+Predicates that the source **cannot** express (e.g. `secondaryCompanyId` on CRM when the
+source is an ERP that only has `orgId → primaryCompanyRef`) must be **preserved** from the
+target's current association state. The engine merges the remapped source associations with
+the existing target shadow associations as follows:
+
+1. Identify target predicates expressible by the source (via `fromMember → canonical → toMember` chain).
+2. Start with the associations last written to the target (from its shadow).
+3. Clear source-owned predicates (the source owns them — it may set or clear).
+4. Apply the source's remapped associations (from `remap`).
+
+This ensures that, for example, a CRM contact's `secondaryCompanyId` is never dropped when
+ERP (which has no `secondaryRef` mapping) updates the contact's `primaryCompanyId`.
+
+This applies only to UPDATE dispatches. INSERT dispatches have no prior target state to preserve.
+
+### § 8.2 Pre-Flight Warnings
+
+At channel setup (when `addConnector()` wires an entity into a channel), if a declared
+`targetEntity` in `associationSchema` names an entity not registered in that channel, the
+engine logs a `[WARN]` entry. Dispatch is not blocked — the warning is informational.
+
+Format:
+```
+[WARN] <connectorId>:<entity>.associationSchema['<predicate>'] targets entity '<targetEntity>'
+       but no '<targetEntity>' entity is registered in channel '<channelId>'.
+       Associations with this predicate will have unresolvable targets.
+```
+
+### § 8.3 Required-Association Warnings
+
+If an association predicate is marked `required: true` in `associationSchema` and a
+dispatched record arrives without it, the engine appends a `missing_required_association`
+warning to the `RecordSyncResult`. Dispatch is not blocked — `required` on associations
+is advisory (parallel to `FieldDescriptor.required`, which blocks inserts but not updates).
 
 ## Design Rationale
 

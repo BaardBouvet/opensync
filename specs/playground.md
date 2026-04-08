@@ -64,11 +64,13 @@ Poll-tick refreshes do not rebuild the diagram while the `lineage` tab is active
 
 ### § 3.1 Scenario definition
 
-Each scenario is a self-contained object with:
+Each scenario is a `ScenarioDefinition` with two fields:
 - `label` — display name shown in the dropdown
-- `channels` — array of `ChannelConfig` (same shape as the engine config)
-- `conflict` — conflict resolution strategy (`"source-wins"` | `"target-wins"` | …)
-- `seed` — optional override of the default record seed per systemId / entity
+- `yaml` — raw canonical YAML string (the source of truth; `channels:` + `mappings:` + optional `conflict:` sections)
+
+The `yaml` field is passed directly to the engine's config parser at boot time using
+`MappingsFileSchema` + `buildChannelsFromEntries`. There is no serialisation path from parsed
+runtime objects back to YAML — config flows one way only (YAML → engine).
 
 ### § 3.2 Default seed
 
@@ -84,23 +86,33 @@ record edits (`isDirty = true`), a confirmation dialog is shown first.
 
 ### § 3.4 Config hot-reload
 
-The user may edit the YAML in the config editor pane and click "Apply". This validates the
-YAML, parses it into a `ScenarioDefinition`, confirms if dirty, and calls `boot()`. The YAML
-format mirrors the real `opensync.json` / `mappings/` file format:
+The left-side config editor pane shows the scenario's raw `yaml` string directly — no
+serialisation step. On "Save + Reload" the editor:
+1. Reads the current editor text
+2. Validates it with `MappingsFileSchema.parse(parseYaml(raw))` — throws on invalid YAML or
+   unknown keys
+3. Calls `buildChannelsFromEntries` to validate channel/mapping consistency
+4. If validation passes, constructs a new `ScenarioDefinition` `{ label, yaml: raw }` and
+   calls `onConfigReload(next)`, which stops the engine and boots fresh from the new YAML
+
+The YAML format is the same `channels:` + `mappings:` + `conflict:` format used by the
+engine's real config files (see `specs/config.md`):
 
 ```yaml
 channels:
   - id: contacts
-    members:
-      - connectorId: crm
-        entity: contacts
-      - connectorId: erp
-        entity: persons
+    identityFields: [email]
+
 mappings:
-  - channel: contacts
-    rules:
-      - from: name
-        to: fullName
+  - connector: crm
+    entity: contacts
+    channel: contacts
+    fields:
+      - source: email_address
+        target: email
+
+conflict:
+  strategy: lww
 ```
 
 ---

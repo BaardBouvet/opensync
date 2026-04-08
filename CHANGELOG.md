@@ -12,6 +12,25 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Changed
+- **Connector SDK — `Association.metadata` removed** — unused edge-property field dropped from the `Association` interface and spec; no connector ever populated it.
+
+### Fixed
+- **Sync Engine — Association cardinality mismatch on update** — when a source connector that only maps some association predicates (e.g. ERP with `orgId → primaryRef`) triggers an UPDATE to a target with more predicates (e.g. CRM with `primaryCompanyId + secondaryCompanyId`), the target's predicates that the source cannot express are now preserved rather than silently dropped. Also fixed: `collectOnly` ingest now stores the association sentinel in the source shadow so it survives the subsequent `onboard()` shadow rewrite when `lookup()` is unavailable. — `ScenarioDefinition` now holds a raw `yaml: string` instead of parsed `ChannelConfig[]`. The engine boots from the YAML string via `MappingsFileSchema` + `buildChannelsFromEntries`. The config editor pane displays the scenario's raw YAML directly (no lossy serialiser). Editing and saving validates with the engine's own parser — all config keys (`array_path`, `assoc`, `expression`, `reverse_expression`, `normalize`, `resolve`, `conflict`, etc.) now round-trip perfectly.
+- **Sync Engine — `expression`, `reverse_expression`, `normalize`, `resolve` as YAML strings** — all four field-mapping function hooks are now expressible as inline JavaScript expression strings in YAML, compiled at parse time via `new Function()`. `defaultExpression` remains the only TypeScript-only function type (planned for a follow-up).
+- **Sync Engine — `conflict:` block in `MappingsFileSchema`** — the top-level `conflict:` section is now part of the validated schema (`ConflictConfigSchema`), allowing conflict strategy to be specified in YAML config files and playground scenarios.
+- **Connector SDK — `AssociationDescriptor` + `associationSchema`** — entities can now declare which association predicates they support via `associationSchema?: Record<string, AssociationDescriptor>` on `EntityDefinition`. The engine uses this for three things: (1) write-side filter — only declared predicates are included in `InsertRecord`/`UpdateRecord.associations` dispatched to the target; (2) pre-flight warnings at channel setup when a `targetEntity` is not a channel member; (3) advisory `missing_required_association` warnings in `RecordSyncResult` when a predicate marked `required: true` is absent. The SPARQL connector uses this automatically via its `makeRdfEntity` factory. Spec: `specs/associations.md § 8`.
+- **Playground — `assoc-cardinality` scenario** — new scenario demonstrating the CRM many-to-many ↔ ERP single-FK association mismatch using predicate-as-type routing; CRM seed extended with `primaryCompanyId`/`secondaryCompanyId` distinct predicates; `associations-demo` updated to match.
+- **HubSpot Connector — contact company associations** — `contact` entity now fetches company associations via the v4 Associations API on read (batch per page) and writes them back on insert/update. Typed edges use predicate-as-type: `typeId 1` → `primaryCompanyId`, `typeId 279` → `companyId`. Unknown typeIds are silently skipped.
+- **Tripletex Connector — contact entity** — new `contact` entity backed by `/contact`; exposes the embedded `customer` FK as an `orgId` association on read; reconstructs `customer: { id }` from the `orgId` association on write. Webhook subscription registered on `onEnable`.
+- **Connector SDK spec — write-side association guidance** — added note to `specs/connector-sdk.md §Write Records` describing how connectors should translate `InsertRecord.associations` / `UpdateRecord.associations` into target API primitives, and that unknown predicates must be silently skipped.
+- **Connector SDK — `ReadRecord.updatedAt`** — connectors supply an ISO 8601 modification timestamp; engine uses it as the LWW basis for every field in the record, replacing ingest time.
+- **Connector SDK — `ReadRecord.createdAt`** — connectors supply an ISO 8601 creation timestamp; stored once in `shadow_state` (immutable); enables `origin_wins` conflict resolution and stable LWW tie-breaking by source age.
+- **Connector SDK — `ReadRecord.fieldTimestamps`** — connectors supply per-field modification timestamps; engine uses these as the highest-priority LWW source for named fields, ahead of shadow derivation.
+- **Sync Engine — Per-field timestamp derivation (always-on)** — `computeFieldTimestamps` in `mapping.ts` computes a per-field timestamp map on every ingest using the priority chain: `fieldTimestamps` → shadow derivation (`max(shadow.ts, ingestTs)`) → `ingestTs`. No config required.
+- **Sync Engine — `origin_wins` conflict strategy** — new global and per-field strategy; earlier `createdAt` wins; falls back to LWW when `createdAt` is absent.
+- **Sync Engine — `created_at` column in `shadow_state`** — stores the source-reported creation time with set-if-NULL semantics; exposed via `dbGetSourceCreatedAts` for tie-breaking.
+
 ---
 
 ## [0.2.0] — 2026-04-07

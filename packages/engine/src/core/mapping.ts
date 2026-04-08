@@ -1,6 +1,8 @@
 // Spec: specs/field-mapping.md, specs/sync-engine.md § Field Mapping
 // Pure field-mapping helpers.
 
+import type { ReadRecord } from "@opensync/sdk";
+import type { FieldData } from "../db/schema.js";
 import type { FieldMappingList } from "../config/loader.js";
 
 /** Apply inbound (source → canonical) or outbound (canonical → target) rename.
@@ -76,4 +78,58 @@ export function isDispatchBlocked(
     if (val === null || val === undefined) return true;
   }
   return false;
+}
+
+// ─── Per-field timestamp helpers ──────────────────────────────────────────────
+
+/**
+ * Parse a value that may be epoch ms (number), ISO 8601 string, or anything else.
+ * Returns epoch ms on success, undefined on failure or absence.
+ * Spec: specs/field-mapping.md §7.2
+ */
+export function parseTs(v: unknown): number | undefined {
+  if (typeof v === "number" && !Number.isNaN(v)) return v;
+  if (typeof v === "string") {
+    const n = Date.parse(v);
+    return Number.isNaN(n) ? undefined : n;
+  }
+  return undefined;
+}
+
+/**
+ * Compute a per-field timestamp map for one incoming source record.
+ *
+ * Priority chain:
+ *   1. record.fieldTimestamps[field]   — connector-native per-field authority
+ *   2. shadow derivation:
+ *        unchanged field → carry forward shadow[field].ts
+ *        changed field   → record.updatedAt (parsed) ?? ingestTs
+ *   3. ingestTs — new record, no shadow
+ *
+ * Spec: specs/field-mapping.md §7.2
+ */
+export function computeFieldTimestamps(
+  incoming: Record<string, unknown>,
+  existingShadow: FieldData | undefined,
+  record: ReadRecord,
+  ingestTs: number,
+): Record<string, number> {
+  const baseTs = record.updatedAt ? (Date.parse(record.updatedAt) || ingestTs) : ingestTs;
+  const result: Record<string, number> = {};
+  for (const field of Object.keys(incoming)) {
+    // 1. Connector-native per-field timestamp
+    const native = parseTs(record.fieldTimestamps?.[field]);
+    if (native !== undefined) { result[field] = native; continue; }
+    // 2. Shadow derivation
+    const entry = existingShadow?.[field];
+    if (entry !== undefined && JSON.stringify(entry.val) === JSON.stringify(incoming[field])) {
+      // Unchanged field: carry forward the shadow ts but never go below ingestTs.
+      // This ensures that a source-shadow ts from an earlier collectOnly pass does not cause
+      // LWW to lose against a target shadow ts that was written at a later ingestTs.
+      result[field] = Math.max(entry.ts, ingestTs);
+    } else {
+      result[field] = baseTs;     // changed or new field
+    }
+  }
+  return result;
 }

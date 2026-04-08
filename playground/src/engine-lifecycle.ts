@@ -4,9 +4,10 @@
 // The engine and db are entirely in-memory — a config change tears down the running
 // engine, drops the sql.js database, and boots a fresh one from the scenario seed.
 
-import { SyncEngine } from "@opensync/engine";
-import type { ResolvedConfig, ConnectorInstance, ChannelConfig } from "@opensync/engine";
+import { SyncEngine, buildChannelsFromEntries, MappingsFileSchema } from "@opensync/engine";
+import type { ResolvedConfig, ConnectorInstance, ChannelConfig, ConflictConfig } from "@opensync/engine";
 import type { RecordSyncResult, Db } from "@opensync/engine";
+import { parse as parseYaml } from "yaml";
 import { openBrowserDb } from "./db-sqljs.js";
 import { createInMemoryConnector } from "./inmemory.js";
 import type { InMemoryConnector } from "./inmemory.js";
@@ -17,6 +18,8 @@ import { FIXED_SEED, FIXED_SYSTEMS } from "./lib/systems.js";
 
 export interface EngineState {
   scenario: ScenarioDefinition;
+  /** Parsed channel configs derived from scenario.yaml. */
+  channels: ChannelConfig[];
   /** Map of systemId → InMemoryConnector (for UI mutation and snapshot). */
   connectors: Map<string, InMemoryConnector>;
   engine: SyncEngine;
@@ -94,6 +97,15 @@ function hhmm(): string {
   return new Date().toISOString().slice(11, 19);
 }
 
+/** Parse the scenario's YAML string into channels + conflict.
+ *  Spec: specs/playground.md §3.4 */
+function parseScenario(scenario: ScenarioDefinition): { channels: ChannelConfig[]; conflict: ConflictConfig } {
+  const parsed = MappingsFileSchema.parse(parseYaml(scenario.yaml));
+  const channels = buildChannelsFromEntries(parsed.channels ?? [], parsed.mappings ?? []);
+  const conflict: ConflictConfig = parsed.conflict ?? { strategy: "lww" };
+  return { channels, conflict };
+}
+
 function buildConfig(scenario: ScenarioDefinition, connectors: Map<string, InMemoryConnector>): ResolvedConfig {
   const instances: ConnectorInstance[] = FIXED_SYSTEMS.map((id) => ({
     id,
@@ -103,10 +115,11 @@ function buildConfig(scenario: ScenarioDefinition, connectors: Map<string, InMem
     batchIdRef: { current: undefined },
     triggerRef: { current: undefined },
   }));
+  const { channels, conflict } = parseScenario(scenario);
   return {
     connectors: instances,
-    channels: scenario.channels,
-    conflict: scenario.conflict,
+    channels,
+    conflict,
     readTimeoutMs: 30_000,
   };
 }
@@ -178,7 +191,8 @@ export async function startEngine(
 
   // 1b. Let the UI render the seed-only state before onboarding fanout writes.
   // Spec: specs/playground.md § 10
-  onAfterSeed?.(connectors, (chId) => buildSeedClusters(chId, connectors, scenario.channels));
+  const { channels: parsedChannels } = parseScenario(scenario);
+  onAfterSeed?.(connectors, (chId) => buildSeedClusters(chId, connectors, parsedChannels));
 
   // 2. Open a fresh in-memory sql.js database
   const db = await openBrowserDb();
@@ -303,6 +317,7 @@ export async function startEngine(
 
   return {
     scenario,
+    channels: parsedChannels,
     connectors,
     engine,
     get isRealtime() { return !paused; },

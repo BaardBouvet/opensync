@@ -1,6 +1,6 @@
 # PLAN: `ReadRecord.updatedAt` — Source Timestamp for LWW Conflict Resolution
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Effort:** S  
 **Domain:** Connector SDK, Engine  

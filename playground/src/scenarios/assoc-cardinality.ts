@@ -1,11 +1,13 @@
-// Scenario: associations-demo
-// Three systems (crm / erp / hr) × two entities each (companies+contacts /
-// accounts+employees / orgs+people), with field renames and associations.
-// Mirrors demo/examples/associations-demo/.
+// Scenario: assoc-cardinality
+// CRM contacts carry two typed company associations (primaryCompanyId,
+// secondaryCompanyId); ERP employees carry a single orgId FK.
+// The assocMappings whitelist routes only primaryCompanyRef to ERP, so
+// secondaryCompanyId edges are dropped automatically — no engine config needed.
+// Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md
 import type { ScenarioDefinition } from "./types.js";
 
 const scenario: ScenarioDefinition = {
-  label: "associations-demo",
+  label: "assoc-cardinality (crm many-to-many ↔ erp single FK)",
   yaml: `
 channels:
   - id: companies
@@ -32,13 +34,6 @@ mappings:
       - { source: accountName, target: name   }
       - { source: website,     target: domain }
 
-  - connector: hr
-    entity: orgs
-    channel: companies
-    fields:
-      - { source: orgName, target: name   }
-      - { source: site,    target: domain }
-
   # ── Channel: contacts ─────────────────────────────────────────────────────
   - connector: crm
     entity: contacts
@@ -47,7 +42,8 @@ mappings:
       - { source: name,  target: name  }
       - { source: email, target: email }
     associations:
-      - { source: companyId, target: companyRef }
+      - { source: primaryCompanyId,   target: primaryCompanyRef  }
+      - { source: secondaryCompanyId, target: secondaryCompanyRef }
 
   - connector: erp
     entity: employees
@@ -55,17 +51,11 @@ mappings:
     fields:
       - { source: fullName, target: name  }
       - { source: email,    target: email }
+    # ERP only maps primaryCompanyRef → orgId.
+    # secondaryCompanyRef has no entry here, so those edges are dropped
+    # by the assocMappings whitelist — no engine change needed.
     associations:
-      - { source: orgId, target: companyRef }
-
-  - connector: hr
-    entity: people
-    channel: contacts
-    fields:
-      - { source: displayName, target: name  }
-      - { source: email,       target: email }
-    associations:
-      - { source: orgRef, target: companyRef }
+      - { source: orgId, target: primaryCompanyRef }
 `,
 };
 

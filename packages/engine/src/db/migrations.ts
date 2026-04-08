@@ -33,6 +33,7 @@ export function createSchema(db: Db): void {
       canonical_data  TEXT NOT NULL,
       deleted_at      TEXT,
       updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      created_at      TEXT,
       PRIMARY KEY (connector_id, entity_name, external_id)
     )
   `);

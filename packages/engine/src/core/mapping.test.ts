@@ -16,8 +16,10 @@
  * FE9  expression receives full record (can reference multiple fields)
  */
 import { describe, it, expect } from "bun:test";
-import { applyMapping } from "./mapping.js";
+import { applyMapping, parseTs, computeFieldTimestamps } from "./mapping.js";
 import type { FieldMappingList } from "../config/loader.js";
+import type { FieldData } from "../db/schema.js";
+import type { ReadRecord } from "@opensync/sdk";
 
 // ─── FE1: plain rename regression ────────────────────────────────────────────
 
@@ -359,6 +361,123 @@ describe("RR6: no reverseRequired fields → never blocked", () => {
     const mappings: FieldMappingList = [{ source: "name", target: "fullName" }];
     expect(isDispatchBlocked({ name: null }, mappings)).toBe(false);
     expect(isDispatchBlocked({}, mappings)).toBe(false);
+  });
+});
+
+// ─── parseTs ─────────────────────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §7.2
+
+describe("PT1: parseTs — epoch ms number → returns as-is", () => {
+  it("returns the number unchanged", () => {
+    expect(parseTs(1700000000000)).toBe(1700000000000);
+  });
+});
+
+describe("PT2: parseTs — ISO 8601 string → returns epoch ms", () => {
+  it("parses the string to epoch ms", () => {
+    const iso = "2024-01-15T12:00:00.000Z";
+    expect(parseTs(iso)).toBe(Date.parse(iso));
+  });
+});
+
+describe("PT3: parseTs — invalid string → returns undefined", () => {
+  it("returns undefined for non-parseable strings", () => {
+    expect(parseTs("not-a-date")).toBeUndefined();
+  });
+});
+
+describe("PT4: parseTs — null/undefined/object → returns undefined", () => {
+  it("returns undefined for non-string non-number values", () => {
+    expect(parseTs(null)).toBeUndefined();
+    expect(parseTs(undefined)).toBeUndefined();
+    expect(parseTs({ ts: 1 })).toBeUndefined();
+  });
+});
+
+// ─── computeFieldTimestamps ───────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §7.2
+
+function makeRecord(overrides: Partial<ReadRecord> = {}): ReadRecord {
+  return { id: "1", data: {}, ...overrides };
+}
+
+function shadow(fields: Record<string, { val: unknown; ts: number; src: string }>): FieldData {
+  return fields as FieldData;
+}
+
+describe("FT1: no shadow, no updatedAt → all fields get ingestTs", () => {
+  it("returns ingestTs for every field when shadow is absent", () => {
+    const result = computeFieldTimestamps({ email: "a@b.com", name: "Alice" }, undefined, makeRecord(), 5000);
+    expect(result).toEqual({ email: 5000, name: 5000 });
+  });
+});
+
+describe("FT2: record.updatedAt present, new record → all fields get parsed updatedAt", () => {
+  it("uses updatedAt instead of ingestTs for changed/new fields", () => {
+    const ts = "2024-06-01T00:00:00Z";
+    const result = computeFieldTimestamps({ email: "a@b.com" }, undefined, makeRecord({ updatedAt: ts }), 9000);
+    expect(result).toEqual({ email: Date.parse(ts) });
+  });
+});
+
+describe("FT3: unchanged field (same as shadow) → max(shadow ts, ingestTs)", () => {
+  it("returns max of shadow ts and ingestTs when incoming value matches shadow val", () => {
+    const fd = shadow({ email: { val: "a@b.com", ts: 100, src: "crm" } });
+    // shadow ts=100, ingestTs=9999 → returns max=9999
+    const result = computeFieldTimestamps({ email: "a@b.com" }, fd, makeRecord(), 9999);
+    expect(result).toEqual({ email: 9999 });
+  });
+  it("shadow ts is returned when it is higher than ingestTs (connector-native ts case)", () => {
+    const fd = shadow({ email: { val: "a@b.com", ts: 5000, src: "crm" } });
+    // shadow ts=5000 > ingestTs=100 → returns max=5000
+    const result = computeFieldTimestamps({ email: "a@b.com" }, fd, makeRecord(), 100);
+    expect(result).toEqual({ email: 5000 });
+  });
+});
+
+describe("FT4: changed field → gets baseTs (ingestTs when no updatedAt)", () => {
+  it("returns ingestTs for a field whose value changed", () => {
+    const fd = shadow({ email: { val: "old@b.com", ts: 100, src: "crm" } });
+    const result = computeFieldTimestamps({ email: "new@b.com" }, fd, makeRecord(), 5000);
+    expect(result).toEqual({ email: 5000 });
+  });
+});
+
+describe("FT5: changed field with updatedAt → gets parsed updatedAt", () => {
+  it("prefers updatedAt over ingestTs for changed fields", () => {
+    const fd = shadow({ email: { val: "old@b.com", ts: 100, src: "crm" } });
+    const ts = "2025-01-01T00:00:00Z";
+    const result = computeFieldTimestamps({ email: "new@b.com" }, fd, makeRecord({ updatedAt: ts }), 9999);
+    expect(result).toEqual({ email: Date.parse(ts) });
+  });
+});
+
+describe("FT6: record.fieldTimestamps present → named fields use per-field ts", () => {
+  it("uses fieldTimestamps value over shadow derivation", () => {
+    const fd = shadow({ email: { val: "a@b.com", ts: 100, src: "crm" } });
+    // Value unchanged, but fieldTimestamps supplies 300 — should use 300
+    const result = computeFieldTimestamps(
+      { email: "a@b.com" }, fd,
+      makeRecord({ fieldTimestamps: { email: "2024-03-01T00:00:00Z" } }),
+      9999,
+    );
+    expect(result).toEqual({ email: Date.parse("2024-03-01T00:00:00Z") });
+  });
+});
+
+describe("FT7: fieldTimestamps present for subset of fields", () => {
+  it("uses fieldTimestamps for named fields; shadow derivation (max) for the rest", () => {
+    const fd = shadow({
+      email: { val: "a@b.com", ts: 100, src: "crm" },
+      name: { val: "Alice", ts: 200, src: "crm" },
+    });
+    // email gets fieldTimestamps value; name is unchanged → max(shadow.ts=200, ingestTs=9999)=9999
+    const result = computeFieldTimestamps(
+      { email: "a@b.com", name: "Alice" }, fd,
+      makeRecord({ fieldTimestamps: { email: "2024-06-01T00:00:00Z" } }),
+      9999,
+    );
+    expect(result).toEqual({ email: Date.parse("2024-06-01T00:00:00Z"), name: 9999 });
   });
 });
 

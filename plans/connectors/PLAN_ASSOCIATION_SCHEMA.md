@@ -1,6 +1,6 @@
 # PLAN: Association Schema — Declaring Supported Predicates on Entities
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Effort:** M  
 **Domain:** packages/sdk, packages/engine  

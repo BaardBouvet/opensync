@@ -1,9 +1,15 @@
 # Engine Usability — Gap Analysis
 
-**Status:** backlog  
+**Status:** superseded  
 **Date:** 2026-04-05  
 **Domain:** Engine API  
 **Scope:** `packages/engine/src/engine.ts`, browser demo glue code  
+
+> **Superseded by `plans/engine/PLAN_ENGINE_API_ERGONOMICS.md`.**  
+> §§ 3–4 (step 1b associations, channelStatus bug) are fixed.  
+> §§ 5 and 7 (global fan-out guard, implicit channel ordering) have been absorbed into  
+> `PLAN_ENGINE_API_ERGONOMICS.md § 4b` as open implementation items.  
+> This document is retained for historical context.
 
 ---
 

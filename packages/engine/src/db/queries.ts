@@ -230,16 +230,18 @@ export function dbSetShadow(
   externalId: string,
   canonicalId: string,
   fieldData: FieldData,
+  createdAt?: string,
 ): void {
   db.prepare(
-    `INSERT INTO shadow_state (connector_id, entity_name, external_id, canonical_id, canonical_data, deleted_at)
-     VALUES (?, ?, ?, ?, ?, NULL)
+    `INSERT INTO shadow_state (connector_id, entity_name, external_id, canonical_id, canonical_data, deleted_at, created_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?)
      ON CONFLICT (connector_id, entity_name, external_id) DO UPDATE SET
        canonical_id   = excluded.canonical_id,
        canonical_data = excluded.canonical_data,
        deleted_at     = NULL,
-       updated_at     = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-  ).run(connectorId, entityName, externalId, canonicalId, JSON.stringify(fieldData));
+       updated_at     = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+       created_at     = CASE WHEN shadow_state.created_at IS NULL THEN excluded.created_at ELSE shadow_state.created_at END`,
+  ).run(connectorId, entityName, externalId, canonicalId, JSON.stringify(fieldData), createdAt ?? null);
 }
 
 export function dbDeleteShadow(
@@ -251,6 +253,33 @@ export function dbDeleteShadow(
   db.prepare(
     "DELETE FROM shadow_state WHERE connector_id = ? AND entity_name = ? AND external_id = ?",
   ).run(connectorId, entityName, externalId);
+}
+
+/**
+ * Returns a map of { connectorId → epoch ms } for every source that has a non-null
+ * created_at stored in shadow_state for the given canonical entity.
+ * Used by origin_wins resolution and last_modified createdAt tie-breaking.
+ * Spec: specs/field-mapping.md §2.N origin_wins
+ */
+export function dbGetSourceCreatedAts(
+  db: Db,
+  canonicalId: string,
+): Record<string, number> {
+  const rows = db
+    .prepare<{ connector_id: string; created_at: string }>(
+      `SELECT ss.connector_id, ss.created_at
+       FROM shadow_state ss
+       JOIN identity_map im
+         ON im.connector_id = ss.connector_id AND im.external_id = ss.external_id
+       WHERE im.canonical_id = ? AND ss.created_at IS NOT NULL`,
+    )
+    .all(canonicalId);
+  const result: Record<string, number> = {};
+  for (const row of rows) {
+    const n = Date.parse(row.created_at);
+    if (!Number.isNaN(n)) result[row.connector_id] = n;
+  }
+  return result;
 }
 
 export function dbGetAllShadowForEntity(
@@ -310,11 +339,12 @@ export function buildFieldData(
   src: string,
   ts: number,
   assocSentinel: string | undefined,
+  fieldTimestamps?: Record<string, number>,
 ): FieldData {
   const fd: FieldData = existing ? { ...existing } : {};
   for (const [k, val] of Object.entries(incoming)) {
     const prev = fd[k]?.val ?? null;
-    fd[k] = { val, prev, ts, src };
+    fd[k] = { val, prev, ts: fieldTimestamps?.[k] ?? ts, src };
   }
   if (assocSentinel !== undefined) {
     const prev = fd["__assoc__"]?.val ?? null;

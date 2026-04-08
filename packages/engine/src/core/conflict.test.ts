@@ -487,3 +487,167 @@ describe("ER6: resolve runs after normalize guard", () => {
   });
 });
 
+// ─── Per-field timestamps (FT) ────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §7.2
+
+describe("FT1: per-field timestamps — older field loses even in a later batch", () => {
+  it("field with lower per-field ts loses LWW against higher shadow ts", () => {
+    const existing = shadow({ email: { val: "new@example.com", src: "erp", ts: 2000 } });
+    // Incoming has per-field ts of 1000 < shadow ts 2000 — should lose
+    const result = resolveConflicts(
+      { email: "old@example.com" }, existing, "crm", 9999, lww,
+      undefined, { email: 1000 },
+    );
+    expect(result).toEqual({});
+  });
+});
+
+describe("FT2: per-field timestamps — newer field wins LWW", () => {
+  it("field with higher per-field ts wins even when batch ingestTs is lower", () => {
+    const existing = shadow({ email: { val: "old@example.com", src: "erp", ts: 1000 } });
+    const result = resolveConflicts(
+      { email: "new@example.com" }, existing, "crm", 500, lww,
+      undefined, { email: 3000 },
+    );
+    expect(result).toEqual({ email: "new@example.com" });
+  });
+});
+
+describe("FT3: per-field timestamps — fields without entry fall back to flat incomingTs", () => {
+  it("a field missing from fieldTimestamps uses incomingTs", () => {
+    const existing = shadow({
+      email: { val: "a@b.com", src: "erp", ts: 100 },
+      name: { val: "Old Name", src: "erp", ts: 100 },
+    });
+    // email has per-field ts=50 (loses), name has no entry → uses incomingTs=200 (wins)
+    const result = resolveConflicts(
+      { email: "new@b.com", name: "New Name" }, existing, "crm", 200, lww,
+      undefined, { email: 50 },
+    );
+    expect(result).toEqual({ name: "New Name" });
+  });
+});
+
+describe("FT4: group winner elected by max per-field ts across group fields", () => {
+  it("group elected by max per-field ts not flat incomingTs", () => {
+    const fieldMappings: FieldMappingList = [
+      { target: "first", group: "name" },
+      { target: "last", group: "name" },
+    ];
+    const existing = shadow({
+      first: { val: "Alice", src: "erp", ts: 500 },
+      last: { val: "Smith", src: "erp", ts: 500 },
+    });
+    // flat incomingTs=100 < 500 but max(fieldTimestamps)=600 > 500 → incoming wins group
+    const result = resolveConflicts(
+      { first: "Bob", last: "Jones" }, existing, "crm", 100, lww,
+      fieldMappings, { first: 600, last: 200 },
+    );
+    expect(result).toEqual({ first: "Bob", last: "Jones" });
+  });
+});
+
+// ─── LWW tie-breaking with createdAt (TB) ────────────────────────────────────
+// Spec: specs/field-mapping.md §2.2
+
+describe("TB1: equal ts + both have createdAt → older source (shadow) wins", () => {
+  it("shadow wins when its source has an earlier createdAt", () => {
+    const existing = shadow({ email: { val: "shadow@b.com", src: "erp", ts: 1000 } });
+    const createdAtBySrc = { erp: 100, crm: 500 }; // erp is older
+    const result = resolveConflicts(
+      { email: "new@b.com" }, existing, "crm", 1000, lww,
+      undefined, { email: 1000 }, 500, createdAtBySrc,
+    );
+    // erp (shadow source) created earlier than crm (incoming) → shadow wins
+    expect(result).toEqual({});
+  });
+});
+
+describe("TB2: equal ts + incoming source has earlier createdAt → incoming wins", () => {
+  it("incoming wins when it has an earlier createdAt than the shadow source", () => {
+    const existing = shadow({ email: { val: "shadow@b.com", src: "erp", ts: 1000 } });
+    const createdAtBySrc = { erp: 500, crm: 100 }; // crm is older
+    const result = resolveConflicts(
+      { email: "new@b.com" }, existing, "crm", 1000, lww,
+      undefined, { email: 1000 }, 100, createdAtBySrc,
+    );
+    // crm (incoming) created earlier than erp (shadow source) → incoming would normally win
+    // but since erp.createdAt > crm.createdAt, shadow does NOT have exCa < inCa, so incoming wins
+    expect(result).toEqual({ email: "new@b.com" });
+  });
+});
+
+describe("TB3: equal ts + no createdAt for either → incoming wins (>= semantics preserved)", () => {
+  it("incoming wins on equal ts when neither side has createdAt", () => {
+    const existing = shadow({ email: { val: "shadow@b.com", src: "erp", ts: 1000 } });
+    const result = resolveConflicts(
+      { email: "new@b.com" }, existing, "crm", 1000, lww,
+      undefined, { email: 1000 },
+    );
+    // No createdAt for either → original >= semantics: incoming wins
+    expect(result).toEqual({ email: "new@b.com" });
+  });
+});
+
+// ─── origin_wins strategy (OW) ────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §2.N origin_wins
+
+const originWinsConfig: ConflictConfig = { strategy: "origin_wins" };
+
+describe("OW1: origin_wins — incoming has earlier createdAt → incoming wins", () => {
+  it("incoming wins when it has an earlier createdAt than the shadow source", () => {
+    const existing = shadow({ name: { val: "Old Co", src: "erp", ts: 1000 } });
+    const createdAtBySrc = { erp: 500 };
+    const result = resolveConflicts(
+      { name: "New Co" }, existing, "crm", 2000, originWinsConfig,
+      undefined, undefined, 100, createdAtBySrc,
+    );
+    expect(result).toEqual({ name: "New Co" });
+  });
+});
+
+describe("OW2: origin_wins — shadow source has earlier createdAt → shadow wins", () => {
+  it("existing value preserved when shadow source is the origin", () => {
+    const existing = shadow({ name: { val: "Original Co", src: "erp", ts: 1000 } });
+    const createdAtBySrc = { erp: 50 };
+    const result = resolveConflicts(
+      { name: "Overwrite Attempt" }, existing, "crm", 2000, originWinsConfig,
+      undefined, undefined, 500, createdAtBySrc,
+    );
+    expect(result).toEqual({});
+  });
+});
+
+describe("OW3: origin_wins — incoming has createdAt, shadow source does not → incoming wins", () => {
+  it("incoming wins when it has createdAt and shadow source has none", () => {
+    const existing = shadow({ name: { val: "Old", src: "erp", ts: 1000 } });
+    const createdAtBySrc: Record<string, number> = {}; // no createdAt for erp
+    const result = resolveConflicts(
+      { name: "New" }, existing, "crm", 500, originWinsConfig,
+      undefined, undefined, 100, createdAtBySrc,
+    );
+    expect(result).toEqual({ name: "New" });
+  });
+});
+
+describe("OW4: origin_wins — neither has createdAt → falls back to LWW", () => {
+  it("falls back to LWW ordering when no createdAt is available", () => {
+    const existing = shadow({ name: { val: "Old", src: "erp", ts: 2000 } });
+    const result = resolveConflicts(
+      { name: "New" }, existing, "crm", 1000, originWinsConfig,
+    );
+    // incomingTs 1000 < shadow ts 2000 → existing wins
+    expect(result).toEqual({});
+  });
+});
+
+describe("OW5: origin_wins — new record (no shadow) → all fields accepted", () => {
+  it("accepts all fields when there is no shadow", () => {
+    const result = resolveConflicts(
+      { name: "Brand New", email: "a@b.com" }, undefined, "crm", 1000, originWinsConfig,
+      undefined, undefined, 100, {},
+    );
+    expect(result).toEqual({ name: "Brand New", email: "a@b.com" });
+  });
+});
+

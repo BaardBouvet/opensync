@@ -325,6 +325,143 @@ available on a mapping entry:
   fields: [...]
 ```
 
+See `specs/field-mapping.md §3.2` for the full forward-pass and reverse-collapse specification,
+element key derivation, `array_parent_map` semantics, and deep-nesting (`§3.4`).
+
+---
+
+### Scalar array expansion (`scalar`)
+
+When an array column contains bare scalar values (strings, numbers) rather than objects, add
+`scalar: true` to the child mapping entry:
+
+```yaml
+- parent: erp_orders
+  channel: order-tags
+  array_path: tags
+  scalar: true        # each element is a bare string, not an object
+  fields:
+    - { source: _value, target: tag }   # _value is the wrapped scalar
+```
+
+`element_key` is mutually exclusive with `scalar: true` — the element value itself serves as
+the identity. See `specs/field-mapping.md §3.3`.
+
+---
+
+### Element and record filters (`filter`, `reverse_filter`)
+
+Both keys accept a plain JS expression string compiled once at load time via `new Function`.
+
+**On array expansion members** (any entry with `array_path` or `parent`) the bindings are
+`element`, `parent`, `index`:
+
+```yaml
+- parent: erp_orders
+  channel: order-lines
+  array_path: lines
+  filter: "element.type === 'product'"          # forward: skip non-product lines
+  reverse_filter: "element.status !== 'locked'" # reverse: don't patch locked lines
+  element_key: line_no
+  fields: [...]
+```
+
+**On flat members** (no `array_path`) the binding is `record`:
+
+```yaml
+- connector: erp
+  channel: contacts
+  entity: customers
+  filter: "record.active === true"              # forward: skip inactive customers
+  reverse_filter: "record.tier !== 'internal'"  # reverse: don't write internal tiers
+  fields: [...]
+```
+
+A record that previously passed the forward filter but no longer does has its shadow state
+cleared (soft-delete contribution). See `specs/field-mapping.md §5`.
+
+---
+
+### PK injection (`id_field`)
+
+Some connectors omit their primary key from `record.data`. `id_field` injects `record.id`
+into the data map under the given name before field mapping runs:
+
+```yaml
+- connector: erp
+  channel: accounts
+  entity: accounts
+  id_field: erpId           # inject record.id as "erpId"
+  fields:
+    - { source: erpId,  target: erpId }
+    - { source: name,   target: name }
+```
+
+Add `direction: reverse_only` to the injected field if you don't want the PK written back
+as a data field on outbound dispatches. See `specs/field-mapping.md §4.1`.
+
+---
+
+### Array ordering (`order_by`, `order`, `order_linked_list`)
+
+Ordering strategies apply during the **reverse collapse** pass (re-assembling flat records
+back into an embedded array before writing to the source connector). Declare at most one
+strategy per mapping entry.
+
+**Custom sort** — sort elements by one or more fields on write-back:
+
+```yaml
+- parent: erp_orders
+  channel: order-lines
+  array_path: lines
+  order_by:
+    - field: lineNumber
+      direction: asc    # default
+    - field: productCode
+      direction: desc
+  fields: [...]
+```
+
+**CRDT ordinal** — inject a synthetic `_ordinal` field from source position; LWW resolution
+preserves ordering across merges:
+
+```yaml
+  order: true
+```
+
+**Linked-list** — store `_prev` / `_next` adjacency pointers; collapse walks the chain:
+
+```yaml
+  order_linked_list: true
+```
+
+See `specs/field-mapping.md §6` for full semantics.
+
+---
+
+### Field-level keys (complete reference)
+
+All keys are optional unless noted.
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `source` | `string` | Connector-side field name. Omit when `expression` supplies the value. |
+| `target` | `string` | **Required.** Canonical field name. |
+| `direction` | `enum` | `bidirectional` (default) \| `forward_only` \| `reverse_only`. See §above. |
+| `default` | `any` | Static fallback applied when the source field is absent or null. |
+| `reverseRequired` | `boolean` | When `true`, the entire record is excluded from a reverse write if this canonical field is null. Turns null into a skip-dispatch signal. |
+| `group` | `string` | Atomic resolution group label. All fields sharing the same `group` resolve from the same winning source (prevents incoherent mixes). See `specs/field-mapping.md §1.8`. |
+| `sources` | `string[]` | Lineage hint: list of connector-side field names read by an `expression`. No runtime effect; used by the lineage diagram. |
+| `expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full incoming source record). Return value assigned to `target`. When present, `source` is ignored on the forward pass. |
+| `reverse_expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full canonical record). Return a plain object to decompose into multiple source fields; any other value is assigned to `source ?? target`. |
+| `normalize` | `string` | JS expression compiled via `new Function`. Binding: `v` (the raw field value). Applied to both the incoming value and the shadow before the noop diff check — prevents precision-loss connectors from triggering spurious updates. See `specs/field-mapping.md §1.4`. |
+| `resolve` | `string` | JS expression compiled via `new Function`. Bindings: `incoming`, `existing` (prior canonical value, `undefined` on first ingest). Returns the new canonical value. Takes precedence over `fieldStrategies` when both are set. See `specs/field-mapping.md §2.3`. |
+
+**TypeScript-only field functions** — `defaultExpression` is available only in the TypeScript
+embedded API (receives the partial canonical record; cannot be expressed as a simple expression
+string without context). All other function-typed fields (`expression`, `reverse_expression`,
+`normalize`, `resolve`) are available as JS expression strings in YAML.
+
 ---
 
 ```

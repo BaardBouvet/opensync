@@ -1,6 +1,6 @@
 # PLAN: `ReadRecord.createdAt` — Record Origin Timestamp + `origin_wins` Resolution
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** Connector SDK, Engine  

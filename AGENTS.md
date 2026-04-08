@@ -133,6 +133,15 @@ bun test packages/sdk/
 - **No database migration infrastructure before the first public release.** The schema is
   append-only pre-release: modify `packages/engine/src/db/migrations.ts` directly
   (`CREATE TABLE IF NOT EXISTS`). See `plans/engine/PLAN_DB_MIGRATIONS.md` for the post-release plan.
+- **Every engine mapping feature must be reachable from YAML config.** If a feature only exists as
+  a TypeScript function type (e.g. `defaultExpression`) it is treated as incomplete until it
+  also has a string-expression form in `MappingEntrySchema` or `FieldMappingEntrySchema` (compiled
+  via `new Function` at parse time) and is documented in `specs/config.md`. Code review must confirm
+  that any new key added to the Zod schema has a corresponding entry in `specs/config.md`.
+- **Config flows one way.** Write YAML (or the programmatic TypeScript API) → engine parses and
+  builds from it. There is no supported path from parsed config back to config text. Any tool that
+  needs to display or edit a config must hold the **raw source string** as its own state and
+  re-parse on change — never attempt to re-serialise from the parsed form.
 - **No backward compatibility before the first public release.** Interfaces, config shapes,
   and internal contracts can be changed freely. Do not add fallback paths or shims to
   preserve compatibility with pre-release callers — remove the old shape and fix all call
@@ -241,3 +250,5 @@ CHANGELOG.md        — all notable changes
 - [ ] Test covers both success and failure paths
 - [ ] `CHANGELOG.md` updated for any feature or fix
 - [ ] `ROADMAP.md` exit criteria updated if a milestone checkbox was just completed
+- [ ] New mapping/channel Zod schema keys are documented in `specs/config.md`
+- [ ] New TypeScript-only field functions are noted as such in `specs/config.md` with a plan for the YAML string-expression form

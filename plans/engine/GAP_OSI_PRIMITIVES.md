@@ -233,7 +233,7 @@ An `expression` field that references other target entities (via `FROM`/`JOIN`).
 ### Per-field timestamps
 Override the mapping-level `last_modified` timestamp for a specific field. Useful when different fields in the same source have independent update timestamps.
 
-**Foundation: 🔶** Shadow state tracks per-field provenance. Whether the mapping config can specify a different timestamp column per field is not currently designed.
+**Foundation: ✅** Implemented via `ReadRecord.fieldTimestamps` (connector-native) and always-on shadow derivation in `computeFieldTimestamps` (`packages/engine/src/core/mapping.ts`). Priority chain: `fieldTimestamps[field]` → updatedAt → shadow derivation (max of shadow.ts and ingestTs) → ingestTs. Per-field timestamps stored in shadow state and used by `resolveConflicts`. Plans complete: `plans/connectors/PLAN_FIELD_TIMESTAMPS.md`, `plans/engine/PLAN_FIELD_TIMESTAMPS.md`. Spec: `specs/field-mapping.md §1.9`, `§7.2`.
 
 ---
 
@@ -300,7 +300,7 @@ After source-level change detection flags a change, a second comparison checks w
 ### `derive_timestamps`
 When source data lacks per-field timestamps (e.g. CSV imports), derive them by comparing current source values against previously written values. Changed fields get the current write timestamp; unchanged fields carry forward their prior timestamp.
 
-**Foundation: ❌** `written_state` (the dependency) is now available. The derive-timestamps logic — comparing incoming fields against `written_state` rows and synthesising per-field timestamps — is designed (`specs/field-mapping.md §7.2`) but not yet implemented. The design requires `written_state` to be available at the **source** connector level, which is a different access pattern from the current target-centric write path.
+**Foundation: ✅** Always-on shadow derivation implemented in `computeFieldTimestamps` (`packages/engine/src/core/mapping.ts`). Changed fields receive `max(record.updatedAt, ingestTs)`; unchanged fields carry forward `max(shadow[field].ts, ingestTs)` — baseline is `shadow_state` (always available for source connectors). `written_state` is not required. Plan complete: `plans/engine/PLAN_FIELD_TIMESTAMPS.md`. Spec: `specs/field-mapping.md §7.2`.
 
 ---
 
@@ -411,14 +411,14 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 | Identity & linking | 5 | 1 | 1 | 3 |
 | Nesting & structure | 6 | 2 | 4 | 0 |
 | References & FKs | 5 | 0 | 3 | 2 |
-| Field-level controls | 8 | 6 | 1 | 1 |
+| Field-level controls | 8 | 7 | 0 | 1 |
 | Deletion & tombstones | 4 | 1 | 3 | 0 |
-| Change detection & noop | 4 | 2 | 1 | 1 |
+| Change detection & noop | 4 | 3 | 1 | 0 |
 | Ordering | 3 | 3 | 0 | 0 |
 | Routing & partitioning | 3 | 0 | 1 | 2 |
 | Mapping config & metadata | 4 | 1 | 2 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **22** | **16** | **12** |
+| **Total** | **50** | **24** | **15** | **11** |
 
 ---
 

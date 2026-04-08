@@ -92,6 +92,9 @@ injections, computed fields the connector provides itself, or schema-asymmetric 
 
 ### 1.3 Field expressions
 
+`expression` and `reverse_expression` are JS expression strings compiled once at load time via
+`new Function`. Both are available in YAML config files and in the TypeScript embedded API.
+
 ```yaml
 fields:
   - source: firstName
@@ -99,30 +102,36 @@ fields:
   - source: lastName
     target: lastName
   - target: fullName
-    direction: bidirectional
-    expression: (record) => `${record.firstName} ${record.lastName}`
-    reverseExpression: (record) => ({
-      firstName: record.fullName.split(' ')[0],
-      lastName:  record.fullName.split(' ').slice(1).join(' '),
-    })
+    sources: [firstName, lastName]   # lineage hint (optional)
+    expression: "`${record.firstName} ${record.lastName}`"
+    reverse_expression: "({ firstName: record.fullName.split(' ')[0], lastName: record.fullName.split(' ').slice(1).join(' ') })"
 ```
 
-`expression` is a TypeScript arrow function applied during the **inbound** pass (source → canonical). `reverseExpression` is applied during the **outbound** pass (canonical → source). Both have access to the full record, not just one field.
+The YAML key is **`expression`** (forward) and **`reverse_expression`** (reverse). Bindings:
+- `expression`: `record` — the full incoming source record; return value assigned to `target`.
+- `reverse_expression`: `record` — the full canonical record; return a plain object to decompose
+  into multiple source fields, or any other value to assign to `source ?? target`.
 
-A `reverseExpression` that returns a plain object decomposes into multiple source fields (one-to-many). Any other return type is assigned to `source ?? target`.
-
-The `direction` guard applies before expressions: `forward_only` entries are skipped on inbound (expression never runs); `reverse_only` entries are skipped on outbound (reverseExpression never runs).
-
-When `expression` is present, the `source` field is not used on the inbound pass — the expression synthesises the value from any fields in the record.
-
-**`sources` — lineage hint for expressions.** When `expression` is present, the optional `sources` array names the connector-side fields that the expression reads. This is a declaration for tooling (lineage diagram, static analysis) and has no effect at runtime. When `sources` is absent and `expression` is present, the lineage diagram shows an `(expression)` placeholder instead of per-field fan-in arrows.
+In the TypeScript embedded API the same fields accept typed function values:
 
 ```ts
 { target: "fullName", sources: ["firstName", "lastName"],
-  expression: (r) => `${r.firstName} ${r.lastName}` }
+  expression: (r) => `${r.firstName} ${r.lastName}`,
+  reverseExpression: (r) => ({ firstName: r.fullName.split(' ')[0], lastName: r.fullName.split(' ').slice(1).join(' ') }) }
 ```
 
-**Status: implemented (OSI-mapping §5 "Field expressions"). `sources` implemented.**
+Note: the TypeScript API uses camelCase (`reverseExpression`); the YAML key uses snake_case
+(`reverse_expression`). Both compile to the same `FieldMapping.reverseExpression` function.
+
+The `direction` guard applies before expressions: `forward_only` entries are skipped on inbound
+(expression never runs); `reverse_only` entries are skipped on outbound (reverseExpression never runs).
+
+When `expression` is present, `source` is ignored on the inbound pass.
+
+**`sources` — lineage hint.** Names the connector-side fields the expression reads. Declaration
+only — no runtime effect. Without it, the lineage diagram shows an `(expression)` placeholder.
+
+**Status: implemented (OSI-mapping §5 "Field expressions"). YAML `expression`/`reverse_expression` implemented. `sources` implemented.**
 
 ---
 
@@ -137,14 +146,17 @@ every cycle, causing an infinite update loop.
 the noop diff check. It does not alter the value written to the canonical model or to the target —
 it is purely a diff-time comparator.
 
+`normalize` is a JS expression string compiled via `new Function`. Available in both YAML and
+the TypeScript embedded API. Binding: `v` — the raw field value.
+
 ```yaml
 fields:
   - source: phone
     target: phone
-    normalize: (v) => String(v).replace(/\D/g, '')   # strip all non-digits before comparing
+    normalize: "String(v).replace(/\\D/g, '')"   # strip all non-digits before comparing
   - source: score
     target: score
-    normalize: (v) => Number(v).toFixed(2)           # normalize float precision
+    normalize: "Number(v).toFixed(2)"           # normalize float precision
 ```
 
 If `normalize(incoming) === normalize(shadow)`, the field is classified as noop even if the raw
@@ -257,21 +269,34 @@ provides all non-null group fields together.
 
 ### 1.9 Per-field timestamps
 
-```yaml
-fields:
-  - source: email
-    target: email
-    lastModifiedField: email_updated_at   # column on the source record carrying timestamp for this field
+Connectors that expose per-field modification timestamps (e.g. Salesforce field history, HubSpot
+property-level timestamps) surface them via `ReadRecord.fieldTimestamps`:
+
+```typescript
+{
+  id: contact.id,
+  updatedAt: contact.updatedAt,
+  fieldTimestamps: {
+    email: contact.properties.email_last_updated,   // ISO 8601
+    phone: contact.properties.phone_last_updated,
+  },
+  data: {
+    email: contact.properties.email,
+    phone: contact.properties.phone,
+  },
+}
 ```
 
-Overrides the mapping-level `last_modified` timestamp for a specific field. Useful when different
-fields in the same source record carry independent update timestamps (e.g. an audit log table that
-records per-column change time).
+The connector excludes timestamp columns from `data` so they never pollute the canonical record.
+The engine picks them up from `fieldTimestamps` automatically — no mapping configuration needed.
 
-The specified `lastModifiedField` is consumed by the `last_modified` resolution strategy for that
-field only. It does not need to appear in the `fields` whitelist.
+Priority chain used by the engine for each field:
+1. `record.fieldTimestamps[field]` — connector-native per-field authority
+2. Shadow derivation: unchanged field → `max(shadow.ts, ingestTs)`; changed field → `record.updatedAt ?? ingestTs`
+3. `ingestTs` — new record with no shadow
 
-**Status: designed, not yet implemented (OSI-mapping §5 "Per-field timestamps").**
+**Status: implemented. See `specs/connector-sdk.md § ReadRecord` and
+`packages/engine/src/core/mapping.ts` (`computeFieldTimestamps`).**
 
 ---
 
@@ -316,7 +341,14 @@ When timestamps are null, falls back to declaration order.
 Shadow state stores per-source per-field timestamps. `last_modified` resolution is the natural
 result of comparing those timestamps across contributing sources.
 
-**Status: implemented in engine; config-level `last_modified` key not yet wired.**
+The `last_modified` config key for pulling a timestamp column into the engine is superseded by
+`ReadRecord.updatedAt` — the connector should populate that field directly. No config is needed.
+
+Stable tie-breaking: when two fields have equal timestamps and both sources supply `createdAt`,
+the source whose `createdAt` is **later** (younger) loses — the older source is treated as the
+origin that should not be overwritten by a downstream copy with the same modification time.
+
+**Status: implemented.**
 
 ---
 
@@ -325,25 +357,34 @@ result of comparing those timestamps across contributing sources.
 Custom incremental aggregation function for computing a canonical field from multiple sources.
 Called during conflict resolution instead of `fieldStrategies[field]` and the global LWW strategy.
 
-```typescript
-// TypeScript embedded API only — not serialisable to YAML
+`resolve` is a JS expression string compiled via `new Function`. Available in both YAML and the
+TypeScript embedded API. Bindings: `incoming` (value from the current source), `existing` (prior
+canonical value, `undefined` on first ingest).
+
+```yaml
+fields:
+  - source: score
+    target: score
+    resolve: "Math.max(Number(incoming) || 0, Number(existing) || 0)"
+```
+
+TypeScript embedded API (same field, function value instead of string):
+
+```ts
 {
   target: "score",
-  resolve: (incoming: unknown, existing: unknown | undefined) => {
-    return Math.max(Number(incoming) || 0, Number(existing) || 0);
-  }
+  resolve: (incoming: unknown, existing: unknown | undefined) =>
+    Math.max(Number(incoming) || 0, Number(existing) || 0)
 }
 ```
 
-The incremental reducer receives `(incoming, existing)` where `existing` is the prior canonical
-value (or `undefined` on first ingest). It runs after the group pre-pass and normalize
-precision-loss guard. Takes precedence over `fieldStrategies[field]` when both are declared.
+The reducer runs after the group pre-pass and normalize precision-loss guard. Takes precedence
+over `fieldStrategies[field]` when both are declared.
 
-This form covers the practical OSI-mapping expression cases (max, min, sum, concat) without
-requiring a full multi-source snapshot. A multi-snapshot resolver (collecting all
-`{ value, sourceId, timestamp }` items) is a future follow-on.
+A multi-snapshot resolver (collecting all `{ value, sourceId, timestamp }` items) is a future
+follow-on.
 
-**Status: implemented (OSI-mapping §1 "Expression"). Tests: `packages/engine/src/core/conflict.test.ts` ER1–ER6.**
+**Status: implemented (OSI-mapping §1 "Expression"). YAML `resolve` string form implemented. Tests: `packages/engine/src/core/conflict.test.ts` ER1–ER6.**
 
 ---
 
@@ -973,18 +1014,31 @@ fails, no `written_state` row is written or modified.
 
 ---
 
-### 7.2 Derived timestamps (`derive_timestamps`)
+### 7.2 Per-field timestamp derivation (always-on)
 
-For sources that do not provide per-field update timestamps (CSV files, legacy systems), derive
-timestamps by comparing current source values against previously written values:
+For every incoming record on every ingest cycle the engine computes a per-field timestamp map
+rather than using a flat batch-wide `ingestTs`. No configuration is required.
 
-- Changed fields get the current cycle timestamp.
-- Unchanged fields carry forward their prior timestamp from `written_state`.
+Priority chain (highest to lowest):
+1. `record.fieldTimestamps[field]` — connector-native (see §1.9)
+2. `record.updatedAt` (parsed to epoch ms) — applies to all fields not in `fieldTimestamps`
+3. Shadow derivation:
+   - **Unchanged field** (`incoming[field] == shadow[field].val`): `max(shadow[field].ts, ingestTs)`
+   - **Changed field** or new field: `record.updatedAt ?? ingestTs`
+4. `ingestTs` — fallback for new records with no shadow
 
-This enables `last_modified` resolution for sources that lack native change timestamps.
+Baseline for shadow derivation is `shadow_state` (last value *read* from the connector), not
+`written_state`. Rationale: `shadow_state` is always present for source connectors; `written_state`
+is only populated for connectors the engine has written to. A read-only connector will never have
+a `written_state` row. The `max(shadow.ts, ingestTs)` floor prevents a source-shadow timestamp
+from a prior `collectOnly` pass from causing LWW to lose against a target shadow written at a
+later `ingestTs`.
 
-**Status: not yet implemented. Depends on §7.1 (`written_state`) being available at the source
-connector level. See `plans/engine/PLAN_WRITTEN_STATE.md §5` for the design.**
+The computed map is passed to both `resolveConflicts` and `buildFieldData`, so shadow state stores
+accurate per-field modification times even for connectors that report no timestamps at all.
+
+**Status: implemented. See `packages/engine/src/core/mapping.ts` (`computeFieldTimestamps`,
+`parseTs`) and `packages/engine/src/engine.ts` (`_processRecords`).**
 
 ---
 
@@ -1129,50 +1183,50 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | `identity` (field-value matching) | §1 | ✅ implemented — see [identity.md](identity.md) |
 | `coalesce` resolution | §1 | ✅ implemented |
 | `last_modified` resolution | §1 | ✅ implemented (config key not yet wired) |
-| `expression` resolver | §1 | 🔶 TypeScript resolvers designed, not wired to config |
-| `collect` resolver | §1 | 🔶 data available in shadow state; resolver not built |
-| `bool_or` resolver | §1 | 🔶 implementable as collect variant; not built |
+| `expression` resolver | §1 | ✅ implemented — YAML `expression`/`reverse_expression` + TypeScript function form |
+| `collect` resolver | §1 | ✅ implemented — `resolve: collect` in fieldStrategies |
+| `bool_or` resolver | §1 | ✅ implemented — `strategy: bool_or` in fieldStrategies |
 | Composite keys (`link_group`) | §2 | ✅ `identityGroups` (AND-within-group, OR-across-groups); tests T-LG-1–T-LG-4 |
-| Transitive closure | §2 | ❌ pairwise only; union-find layer not designed |
+| Transitive closure | §2 | ✅ union-find (connected-components) algorithm; see `specs/identity.md` |
 | External link tables | §2 | ❌ no third-party linkage feed |
 | Cluster members writeback | §2 | ❌ no feedback table after inserts |
 | Cluster field on source record | §2 | ❌ no contract for this in connector SDK |
 | Embedded objects (flat `parent`) | §3 | 🔶 conceptually supported; `parent:` syntax not implemented |
-| Nested arrays (`array` / `array_path`) | §3 | ❌ requires forward-expand + reverse-aggregate pipeline |
-| Deep nesting | §3 | ❌ depends on nested arrays |
-| Scalar arrays (`scalar: true`) | §3 | ❌ depends on nested arrays |
+| Nested arrays (`array` / `array_path`) | §3 | ✅ implemented — forward expand + reverse collapse; same-channel + cross-channel |
+| Deep nesting | §3 | ✅ implemented — `expansionChain`, multi-hop `array_parent_map`, cross-join |
+| Scalar arrays (`scalar: true`) | §3 | ✅ forward pass implemented; reverse (collapse) planned |
 | `source_path` extraction | §3 | 🔶 doable as expression; inline syntax not implemented |
 | Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
 | FK reverse resolution | §4 | ✅ `direction: reverse_only` excludes injected PK from outbound dispatch |
-| Reference preservation after merge | §4 | 🔶 entity_links preserve original IDs; pipeline not wired |
+| Reference preservation after merge | §4 | ✅ identity_map preserves all connector IDs; association predicate remapping implemented |
 | `references_field` | §4 | ❌ no alternate-representation FK |
 | Vocabulary targets | §4 | ❌ no vocabulary entity concept |
-| Field groups (`group`) | §5 | ❌ per-field independent resolution only |
-| `filter` source filter | §5 | ❌ not in config or pipeline |
-| `reverse_filter` | §5 | ❌ not in config or pipeline |
-| `default` / `defaultExpression` | §5 | 🔶 doable as expression; dedicated key not implemented |
+| Field groups (`group`) | §5 | ✅ implemented — `group` key on field entries; atomic resolution |
+| `filter` source filter | §5 | ✅ implemented — JS expression string, record or element binding by context |
+| `reverse_filter` | §5 | ✅ implemented — JS expression string, record or element binding by context |
+| `default` / `defaultExpression` | §5 | ✅ `default` implemented; `defaultExpression` TypeScript API only |
 | Per-field `direction` | §5 | ✅ implemented |
-| Field `expression` / `reverseExpression` | §5 | ✅ implemented |
+| Field `expression` / `reverseExpression` | §5 | ✅ implemented — YAML string form + TypeScript function form |
 | Enriched cross-entity expressions | §5 | ❌ no cross-entity reference in resolution pass |
-| Per-field timestamps (`lastModifiedField`) | §5 | 🔶 shadow state has per-field data; config key not implemented |
-| `normalize` (precision-loss noop) | §5 | ❌ raw value diff only; normalization layer not designed |
+| Per-field timestamps (`lastModifiedField`) | §5 | ✅ `record.fieldTimestamps` + per-field derivation; no config key needed |
+| `normalize` (precision-loss noop) | §5 | ✅ implemented — YAML `normalize` string form + TypeScript function form |
 | Soft-delete field inspection | §6 | 🔶 connector handles; engine-level `soft_delete:` config not built |
-| Hard delete / `derive_tombstones` | §6 | ❌ entity-absence detection not designed |
-| Element hard delete (array) | §6 | ❌ depends on nested arrays + `written_state` |
-| `reverse_required` | §6 | ❌ no per-field exclude-if-null in dispatch |
+| Hard delete / `derive_tombstones` | §6 | 🔶 proposed — `full_snapshot: true` entity-absence detection; not yet implemented |
+| Element hard delete (array) | §6 | 🔶 proposed — element-absence detection after collapse; not yet implemented |
+| `reverse_required` | §6 | ✅ implemented — `reverseRequired: true` / `reverse_required: true` |
 | Source-level noop (`_base` / shadow diff) | §7 | ✅ implemented — see [safety.md](safety.md) |
 | Target-centric noop (`written_state`) | §7 | ✅ implemented — `written_state` table + `_dispatchToTarget` guard |
-| `derive_timestamps` | §7 | ❌ depends on `written_state` at source level (§7.2 design) |
+| `derive_timestamps` | §7 | ✅ per-field timestamp derivation always-on (§7.2); no config key needed |
 | Concurrent edit detection | §7 | 🔶 data is in shadow state; detection signal not wired |
-| Custom sort (array ordering) | §8 | ❌ depends on nested arrays |
-| CRDT ordinal ordering | §8 | ❌ depends on nested arrays |
-| CRDT linked-list ordering | §8 | ❌ depends on nested arrays |
-| Discriminator routing | §9 | ❌ depends on `filter` |
-| Route combined (routing + merging) | §9 | ❌ depends on `filter` + transitive closure |
-| Element-set resolution | §9 | ❌ depends on nested arrays |
+| Custom sort (array ordering) | §8 | ✅ implemented — `order_by` on mapping entries |
+| CRDT ordinal ordering | §8 | ✅ implemented — `order: true` (`_ordinal` injection) |
+| CRDT linked-list ordering | §8 | ✅ implemented — `order_linked_list: true` (`_prev`/`_next`) |
+| Discriminator routing | §9 | ✅ implemented — per-member `filter` with distinct channel entries (§5.3) |
+| Route combined (routing + merging) | §9 | 🔶 filter + transitive identity available; combined pattern not validated |
+| Element-set resolution | §9 | 🔶 element filters available; cross-member set logic not designed |
 | Multi-entity mapping files | §10 | ✅ implemented |
-| `sources:` / `primary_key` metadata | §10 | 🔶 connectors declare entity schema; explicit `sources:` not in config |
+| `sources:` / `primary_key` metadata | §10 | ✅ `sources:` in field entries (lineage hint); entity schema from `getEntities()` |
 | Mapping-level priority / `last_modified` | §10 | 🔶 field-level works; mapping-level default not in config |
 | `passthrough` config | §10 | ❌ not in config spec |
 | Inline test cases | §11 | ❌ no inline testing infrastructure |
@@ -1188,25 +1242,30 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | References & FKs | 5 | 2 | 1 | 2 |
 | Field-level controls | 8 | 1 | 3 | 4 |
 | Deletion & tombstones | 4 | 0 | 1 | 3 |
-| Change detection & noop | 4 | 1 | 1 | 2 |
-| Ordering | 3 | 0 | 0 | 3 |
-| Routing & partitioning | 3 | 0 | 0 | 3 |
-| Mapping config & metadata | 4 | 1 | 2 | 1 |
+| Change detection & noop | 4 | 3 | 1 | 0 |
+| Ordering | 3 | 3 | 0 | 0 |
+| Routing & partitioning | 3 | 1 | 2 | 0 |
+| Mapping config & metadata | 4 | 2 | 1 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **8** | **14** | **28** |
+| **Total** | **50** | **30** | **10** | **10** |
 
-### Highest-priority foundation work
+### Open gaps (as of 2026-04-08)
 
-The gaps cluster into three interconnected areas; unblocking them unlocks the most other primitives:
+Most OSI-mapping primitives are now implemented. Remaining gaps:
 
-1. **Transitive closure identity** — union-find layer for `identityFields` / `identityGroups`. ✅ Implemented.
-   Unblocks composite keys, external-link tables, FK resolution, multi-source merge, and N-way sync correctness.
-
-2. **Nested array pipeline** — forward expand + reverse aggregate. Unblocks embedded-object nesting,
-   scalar arrays, element-level deletion, CRDT ordering, and element routing.
-
-3. **Filter and routing** — engine-level `filter` / `reverse_filter`. Unblocks discriminator
-   routing, route-combined, `reverse_required`, and soft-delete propagation control.
-
-4. **`written_state` table** — last-written snapshot per target. ✅ Implemented (§7.1).
-   Foundation for derived timestamps (§7.2) and element tombstoning in nested array reassembly.
+- **External link tables, cluster member writeback, cluster field on source** (§2) — no third-party
+  linkage feed mechanism; not yet designed.
+- **Embedded objects** (`parent:` flat syntax, §3.1) — child entity from columns on the same row;
+  distinct from array expansion. Designed, not yet implemented.
+- **`source_path`** (§3) — dotted JSON path extraction inline in config. Workaround: use
+  `expression`.
+- **`passthrough` config** (§3) — named passthrough columns forwarded to delta output.
+- **`references_field`** (§4) — alternate-representation FK (e.g. ISO code instead of UUID).
+- **Vocabulary targets** (§4) — read-only seeded lookup tables for FK translation.
+- **`defaultExpression`** (§5) — dynamic fallback; TypeScript API only.
+- **Enriched cross-entity expressions** (§5) — expressions that reference fields from a related
+  entity during resolution.
+- **Soft-delete field inspection** (`soft_delete:` config key, §6).
+- **Hard delete / element absence detection** (§6, `full_snapshot: true`).
+- **Route-combined** (§9) — cross-source merge after discriminator split.
+- **Inline test cases** (§11).

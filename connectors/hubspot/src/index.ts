@@ -1,4 +1,5 @@
 import type {
+  Association,
   Connector,
   ConnectorContext,
   EntityDefinition,
@@ -225,14 +226,132 @@ const companyEntity = makeCrmEntity({
   },
 });
 
-const contactEntity = makeCrmEntity({
+// ─── Contact entity (custom — needs association support) ─────────────────────
+
+/**
+ * HubSpot-defined association type IDs for the contact→company direction.
+ * Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md § 4.1
+ */
+const COMPANY_TYPE_ID_TO_PREDICATE: Record<number, string> = {
+  1:   "primaryCompanyId",  // Contact to primary company
+  279: "companyId",         // Contact to company (unlabeled default)
+};
+
+const PREDICATE_TO_COMPANY_TYPE_ID: Record<string, number> = {
+  primaryCompanyId: 1,
+  companyId:        279,
+};
+
+/**
+ * Fetch company associations for a batch of contact IDs via the v4 Associations API.
+ * Each edge may carry multiple associationTypes; each known typeId becomes a separate
+ * Association entry with a distinct predicate (predicate-as-type pattern).
+ */
+async function fetchContactCompanyAssocs(
+  contactIds: string[],
+  ctx: ConnectorContext
+): Promise<Map<string, Association[]>> {
+  if (contactIds.length === 0) return new Map();
+
+  const res = await ctx.http(
+    `${BASE}/crm/associations/2026-03/contacts/companies/batch/read`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: contactIds.map((id) => ({ id })) }),
+    }
+  );
+  if (!res.ok) throwForStatus(res, "batch/read contact→company associations");
+
+  const body = (await res.json()) as {
+    results: Array<{
+      from: { id: string };
+      to: Array<{
+        toObjectId: number;
+        associationTypes: Array<{
+          category: string;
+          typeId: number;
+          label: string | null;
+        }>;
+      }>;
+    }>;
+  };
+
+  const map = new Map<string, Association[]>();
+  for (const result of body.results) {
+    const assocs: Association[] = [];
+    const seen = new Set<string>();
+    for (const toEntry of result.to) {
+      for (const assocType of toEntry.associationTypes) {
+        const predicate = COMPANY_TYPE_ID_TO_PREDICATE[assocType.typeId];
+        if (!predicate) continue;
+        const key = `${predicate}:${toEntry.toObjectId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        assocs.push({
+          predicate,
+          targetEntity: "company",
+          targetId: String(toEntry.toObjectId),
+        });
+      }
+    }
+    if (assocs.length > 0) map.set(result.from.id, assocs);
+  }
+  return map;
+}
+
+/**
+ * Write contact→company associations. Only predicates in PREDICATE_TO_COMPANY_TYPE_ID
+ * are forwarded; others are silently skipped.
+ * Spec: specs/connector-sdk.md § Write Records
+ */
+async function writeContactCompanyAssocs(
+  pairs: Array<{ contactId: string; associations: Association[] }>,
+  ctx: ConnectorContext
+): Promise<void> {
+  type AssocInput = {
+    from: { id: string };
+    to: { id: string };
+    types: Array<{ associationCategory: string; associationTypeId: number }>;
+  };
+
+  const allInputs: AssocInput[] = [];
+  for (const { contactId, associations } of pairs) {
+    for (const assoc of associations) {
+      const typeId = PREDICATE_TO_COMPANY_TYPE_ID[assoc.predicate];
+      if (typeId === undefined) continue;
+      allInputs.push({
+        from: { id: contactId },
+        to:   { id: assoc.targetId },
+        types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: typeId }],
+      });
+    }
+  }
+  if (allInputs.length === 0) return;
+
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < allInputs.length; i += BATCH_SIZE) {
+    const batch = allInputs.slice(i, i + BATCH_SIZE);
+    const res = await ctx.http(
+      `${BASE}/crm/associations/2026-03/contacts/companies/batch/create`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inputs: batch }),
+      }
+    );
+    if (!res.ok) throwForStatus(res, "batch/create contact→company associations");
+  }
+}
+
+const _contactEntityBase = makeCrmEntity({
   name: "contact",
   path: "/crm/v3/objects/contacts",
   schema: {
     firstname: { description: "First name", type: "string" },
-    lastname: { description: "Last name", type: "string" },
-    email: { description: "Email address", type: "string" },
-    phone: { description: "Phone number", type: "string" },
+    lastname:  { description: "Last name",  type: "string" },
+    email:     { description: "Email address", type: "string" },
+    phone:     { description: "Phone number",  type: "string" },
     hs_lastmodifieddate: {
       description: "Last modified timestamp (ISO 8601). Used as the sync watermark.",
       type: "string",
@@ -240,11 +359,111 @@ const contactEntity = makeCrmEntity({
     },
   },
   scopes: {
-    read: ["crm.objects.contacts.read"],
+    read:  ["crm.objects.contacts.read"],
     write: ["crm.objects.contacts.write"],
   },
   dependsOn: ["company"],
 });
+
+/** Contact entity with full company association support (read + write). */
+const contactEntity: EntityDefinition = {
+  ..._contactEntityBase,
+
+  async *read(
+    ctx: ConnectorContext,
+    since?: string
+  ): AsyncIterable<ReadBatch> {
+    for await (const page of paginate(ctx, "/crm/v3/objects/contacts", since)) {
+      const ids = page.results.map((r) => r.id);
+      const assocMap = await fetchContactCompanyAssocs(ids, ctx);
+
+      const maxUpdated = page.results.reduce<string | undefined>(
+        (max, r) => {
+          const u = r.properties["hs_lastmodifieddate"] as string | undefined;
+          return u && (!max || u > max) ? u : max;
+        },
+        undefined
+      );
+
+      yield {
+        records: page.results.map((r) => ({
+          id: r.id,
+          data: r.properties,
+          associations: assocMap.get(r.id),
+        })),
+        since: maxUpdated ?? since,
+      };
+    }
+  },
+
+  async *insert(
+    records: AsyncIterable<InsertRecord>,
+    ctx: ConnectorContext
+  ): AsyncIterable<InsertResult> {
+    for await (const batch of chunk(records, 100)) {
+      const res = await ctx.http(`${BASE}/crm/v3/objects/contacts/batch/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inputs: batch.map((r) => ({ properties: r.data })),
+        }),
+      });
+      if (!res.ok) throwForStatus(res, "batch/create contact");
+
+      const body = (await res.json()) as {
+        results: Array<{ id: string; properties: Record<string, unknown> }>;
+      };
+
+      // Write associations using positional correlation (spec: results in same order as inputs).
+      const assocPairs: Array<{ contactId: string; associations: Association[] }> = [];
+      for (let i = 0; i < batch.length; i++) {
+        const assocs = batch[i].associations;
+        const resultId = body.results[i]?.id;
+        if (assocs && assocs.length > 0 && resultId) {
+          assocPairs.push({ contactId: resultId, associations: assocs });
+        }
+      }
+      if (assocPairs.length > 0) await writeContactCompanyAssocs(assocPairs, ctx);
+
+      for (const item of body.results) {
+        yield { id: item.id, data: item.properties };
+      }
+    }
+  },
+
+  async *update(
+    records: AsyncIterable<UpdateRecord>,
+    ctx: ConnectorContext
+  ): AsyncIterable<UpdateResult> {
+    for await (const batch of chunk(records, 100)) {
+      const res = await ctx.http(`${BASE}/crm/v3/objects/contacts/batch/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inputs: batch.map((r) => ({ id: r.id, properties: r.data })),
+        }),
+      });
+      if (!res.ok) throwForStatus(res, "batch/update contact");
+
+      const body = (await res.json()) as {
+        results: Array<{ id: string; properties: Record<string, unknown> }>;
+      };
+
+      // Write associations — id is already known on update, no matching needed.
+      const assocPairs: Array<{ contactId: string; associations: Association[] }> = [];
+      for (const r of batch) {
+        if (r.associations && r.associations.length > 0) {
+          assocPairs.push({ contactId: r.id, associations: r.associations });
+        }
+      }
+      if (assocPairs.length > 0) await writeContactCompanyAssocs(assocPairs, ctx);
+
+      for (const item of body.results) {
+        yield { id: item.id, data: item.properties };
+      }
+    }
+  },
+};
 
 const dealEntity = makeCrmEntity({
   name: "deal",

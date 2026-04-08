@@ -136,6 +136,7 @@ async function* paginate<T>(
 
 /** Wildcard event patterns to subscribe to, one per entity. */
 const ENTITY_SUBSCRIPTION_EVENT: Record<string, string> = {
+  contact: "contact.*",
   customer: "customer.*",
   invoice: "invoice.*",
 };
@@ -397,6 +398,164 @@ const invoiceEntity: EntityDefinition = {
   },
 };
 
+// ─── Contact entity ────────────────────────────────────────────────────────────
+
+/**
+ * Contact entity — people associated with a Tripletex customer account.
+ *
+ * The Tripletex API embeds the company reference as a `customer` object on
+ * each contact record.  The connector surfaces this as an explicit association
+ * so the engine can resolve the relationship across connectors:
+ *
+ *   { predicate: "orgId", targetEntity: "customer", targetId: "<customerId>" }
+ *
+ * On the write path the association is mapped back to the `customer: { id }`
+ * field that the Tripletex API expects.  Unknown associations are ignored.
+ *
+ * Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md § 4.2
+ */
+const contactEntity: EntityDefinition = {
+  name: "contact",
+
+  schema: {
+    id: {
+      description: "Tripletex internal contact ID.",
+      type: "number",
+      immutable: true,
+    },
+    firstName:         { description: "First name.",             type: "string", required: true },
+    lastName:          { description: "Last name.",              type: "string", required: true },
+    email:             { description: "Email address.",          type: "string" },
+    phoneNumberMobile: { description: "Mobile phone number.",    type: "string" },
+    customer: {
+      description: "Customer account this contact belongs to. Surfaced as the orgId association.",
+      type: { type: "object" },
+    },
+    changedDate: {
+      description: "Timestamp of last modification (ISO 8601). Used as the sync watermark.",
+      type: "string",
+      immutable: true,
+    },
+  },
+
+  dependsOn: ["customer"],
+
+  async onEnable(ctx: ConnectorContext): Promise<void> {
+    await registerSubscription("contact", ctx);
+  },
+
+  async onDisable(ctx: ConnectorContext): Promise<void> {
+    await deregisterSubscription("contact", ctx);
+  },
+
+  async *read(ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
+    const params: Record<string, string> = {};
+    if (since) params["changedSince"] = since;
+
+    let maxChanged: string | undefined;
+    for await (const page of paginate<Record<string, unknown>>(ctx, "/contact", params)) {
+      for (const item of page) {
+        const changed = item["changedDate"] as string | undefined;
+        if (changed && (!maxChanged || changed > maxChanged)) maxChanged = changed;
+      }
+      yield {
+        records: page.map((item) => {
+          const customer = item["customer"] as { id: number } | null | undefined;
+          return {
+            id: String(item["id"]),
+            data: item,
+            associations: customer
+              ? [{ predicate: "orgId", targetEntity: "customer", targetId: String(customer.id) }]
+              : undefined,
+          };
+        }),
+        since: maxChanged ?? since,
+      };
+    }
+  },
+
+  async lookup(ids: string[], ctx: ConnectorContext): Promise<ReadRecord[]> {
+    const base = ctx.config["baseUrl"] as string;
+    const results: ReadRecord[] = [];
+    for (const id of ids) {
+      const res = await ctx.http(`${base}/contact/${id}`);
+      if (res.status === 404) continue;
+      if (!res.ok) throwForStatus(res, `GET /contact/${id}`);
+      const body = (await res.json()) as { value: Record<string, unknown> };
+      const item = body.value;
+      const customer = item["customer"] as { id: number } | null | undefined;
+      results.push({
+        id,
+        data: item,
+        associations: customer
+          ? [{ predicate: "orgId", targetEntity: "customer", targetId: String(customer.id) }]
+          : undefined,
+      });
+    }
+    return results;
+  },
+
+  async *insert(
+    records: AsyncIterable<InsertRecord>,
+    ctx: ConnectorContext
+  ): AsyncIterable<InsertResult> {
+    const base = ctx.config["baseUrl"] as string;
+    for await (const record of records) {
+      const orgAssoc = record.associations?.find((a) => a.predicate === "orgId");
+      const body: Record<string, unknown> = { ...record.data };
+      if (orgAssoc) body["customer"] = { id: Number(orgAssoc.targetId) };
+      const res = await ctx.http(`${base}/contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throwForStatus(res, "POST /contact");
+      const resp = (await res.json()) as { value: { id: number } & Record<string, unknown> };
+      yield { id: String(resp.value.id), data: resp.value as Record<string, unknown> };
+    }
+  },
+
+  async *update(
+    records: AsyncIterable<UpdateRecord>,
+    ctx: ConnectorContext
+  ): AsyncIterable<UpdateResult> {
+    const base = ctx.config["baseUrl"] as string;
+    for await (const record of records) {
+      const orgAssoc = record.associations?.find((a) => a.predicate === "orgId");
+      const body: Record<string, unknown> = { id: Number(record.id), ...record.data };
+      if (orgAssoc) body["customer"] = { id: Number(orgAssoc.targetId) };
+      const res = await ctx.http(`${base}/contact/${record.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 404) {
+        yield { id: record.id, notFound: true as const };
+        continue;
+      }
+      if (!res.ok) throwForStatus(res, `PUT /contact/${record.id}`);
+      const resp = (await res.json()) as { value: Record<string, unknown> };
+      yield { id: record.id, data: resp.value };
+    }
+  },
+
+  async *delete(
+    ids: AsyncIterable<string>,
+    ctx: ConnectorContext
+  ): AsyncIterable<DeleteResult> {
+    const base = ctx.config["baseUrl"] as string;
+    for await (const id of ids) {
+      const res = await ctx.http(`${base}/contact/${id}`, { method: "DELETE" });
+      if (res.status === 404) {
+        yield { id, notFound: true as const };
+        continue;
+      }
+      if (!res.ok) throwForStatus(res, `DELETE /contact/${id}`);
+      yield { id };
+    }
+  },
+};
+
 // ─── Connector ────────────────────────────────────────────────────────────────
 
 const connector: Connector = {
@@ -448,7 +607,7 @@ const connector: Connector = {
   },
 
   getEntities(): EntityDefinition[] {
-    return [customerEntity, invoiceEntity];
+    return [customerEntity, contactEntity, invoiceEntity];
   },
 
   /**
@@ -492,6 +651,7 @@ const connector: Connector = {
     // Tripletex marks a subscription `active: false` when it considers it unhealthy
     // (e.g. repeated delivery failures to the target URL).
     const subscriptionKeys: Record<string, string> = {
+      contact: "webhookSubscription_contact",
       customer: "webhookSubscription_customer",
       invoice: "webhookSubscription_invoice",
     };

@@ -3,7 +3,10 @@
 import { scenarios, defaultScenarioKey } from "./scenarios/index.js";
 import type { ScenarioDefinition } from "./scenarios/index.js";
 import { startEngine } from "./engine-lifecycle.js";
-import type { EngineState } from "./engine-lifecycle.js";
+import type { EngineState, ChannelCluster } from "./engine-lifecycle.js";
+import { buildChannelsFromEntries, MappingsFileSchema } from "@opensync/engine";
+import type { ChannelConfig } from "@opensync/engine";
+import { parse as parseYaml } from "yaml";
 import { buildEditorPane } from "./ui/editor-pane.js";
 import { createSystemsPane } from "./ui/systems-pane.js";
 import { createDevTools } from "./ui/devtools.js";
@@ -36,9 +39,9 @@ function setStatus(text: string, running: boolean): void {
 }
 
 function buildClusters() {
-  if (!engineState) return new Map();
+  if (!engineState) return new Map<string, ChannelCluster[]>();
   return new Map(
-    engineState.scenario.channels.map((ch) => [ch.id, engineState!.getClusters(ch.id)]),
+    engineState.channels.map((ch) => [ch.id, engineState!.getClusters(ch.id)]),
   );
 }
 
@@ -61,7 +64,7 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
       scenario,
       (ev) => devTools?.appendEvent(ev),
       () => {
-        systemsPane?.refresh(engineState!.scenario.channels, engineState!.connectors, buildClusters());
+        systemsPane?.refresh(engineState!.channels, engineState!.connectors, buildClusters());
         editorPane?.update(engineState!.scenario);
         devTools?.refreshDbState();
         // After each poll, if auto-mode is on and no notification is pending,
@@ -83,10 +86,13 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
       // 800ms schedulePoll fires the fanout records (prevWm === undefined) flash in.
       // Spec: specs/playground.md § 10
       (seedConnectors, preClusters) => {
+        // Parse channels from scenario YAML for the pre-onboard render (engineState not yet available).
+        const parsed = MappingsFileSchema.parse(parseYaml(scenario.yaml));
+        const bootChannels: ChannelConfig[] = buildChannelsFromEntries(parsed.channels ?? [], parsed.mappings ?? []);
         const seedClusterMap = new Map(
-          scenario.channels.map((ch) => [ch.id, preClusters(ch.id)]),
+          bootChannels.map((ch) => [ch.id, preClusters(ch.id)]),
         );
-        systemsPane?.refresh(scenario.channels, seedConnectors, seedClusterMap);
+        systemsPane?.refresh(bootChannels, seedConnectors, seedClusterMap);
       },
     );
   } catch (err) {
@@ -113,7 +119,7 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
   if (autoOn) {
     schedulePoll(BOOT_NOTIFY_MS);
   } else {
-    systemsPane?.refresh(engineState.scenario.channels, engineState.connectors, buildClusters());
+    systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters());
   }
 }
 
@@ -294,7 +300,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function refreshUI(): void {
   if (!engineState) return;
-  systemsPane?.refresh(engineState.scenario.channels, engineState.connectors, buildClusters());
+  systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters());
   devTools?.refreshDbState();
 }
 

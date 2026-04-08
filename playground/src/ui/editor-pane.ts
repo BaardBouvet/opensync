@@ -1,15 +1,16 @@
 // Editor pane — left side, config-only CodeMirror YAML editor.
-// The config editor shows channels + mappings as annotated YAML.
-// Saving triggers a full engine reload. The conflict strategy is not exposed
-// here — it always inherits from the scenario (LWW by default).
+// The config editor shows the scenario's canonical YAML (channels: + mappings: + conflict:).
+// Saving triggers a full engine reload.
+// Spec: specs/playground.md §3.4
 import { EditorView, keymap } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
 import { defaultKeymap } from "@codemirror/commands";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { parse as parseYaml } from "yaml";
+import { MappingsFileSchema, buildChannelsFromEntries } from "@opensync/engine";
+import type { ChannelConfig, ConflictConfig } from "@opensync/engine";
 import type { ScenarioDefinition } from "../scenarios/index.js";
-import type { ChannelConfig } from "@opensync/engine";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,70 +22,14 @@ export interface EditorPaneOptions {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Serialise the scenario as the canonical channels + mappings YAML format,
- * matching the layout used by the engine's own config files (e.g. mappings/companies.yaml).
- * Inline comments explain only the non-obvious keys.
- */
-function scenarioToConfigYaml(scenario: ScenarioDefinition): string {
-  const lines: string[] = [];
-
-  lines.push("channels:");
-  for (const ch of scenario.channels) {
-    const idFields = (ch.identityFields ?? []).join(", ");
-    lines.push(`  - id: ${ch.id}`);
-    lines.push(`    identityFields: [${idFields}]  # canonical fields used to match records`);
-  }
-
-  lines.push("");
-  lines.push("# connector + entity → channel, with field rename rules");
-  lines.push("# fields apply both ways: source = connector field, target = canonical field");
-  lines.push("mappings:");
-  for (const ch of scenario.channels) {
-    for (const m of ch.members) {
-      lines.push(`  - connector: ${m.connectorId}`);
-      lines.push(`    entity: ${m.entity}`);
-      lines.push(`    channel: ${ch.id}`);
-      if (m.inbound && m.inbound.length > 0) {
-        lines.push(`    fields:`);
-        for (const f of m.inbound) {
-          lines.push(`      - { source: ${f.source ?? f.target}, target: ${f.target} }`);
-        }
-      }
-    }
-  }
-
-  return lines.join("\n") + "\n";
-}
-
-interface YamlChannelDef { id: string; identityFields?: string[] }
-interface YamlMappingEntry {
-  connector: string;
-  entity: string;
-  channel: string;
-  fields?: Array<{ source: string; target: string }>;
-}
-
-function mergeConfigYaml(
-  existing: ScenarioDefinition,
-  raw: string,
-): ScenarioDefinition {
-  const parsed = parseYaml(raw) as { channels?: YamlChannelDef[]; mappings?: YamlMappingEntry[] };
-  if (!parsed || typeof parsed !== "object") throw new Error("YAML must be a mapping");
-
-  const channelMap = new Map<string, ChannelConfig>();
-  for (const ch of (parsed.channels ?? [])) {
-    channelMap.set(ch.id, { id: ch.id, identityFields: ch.identityFields, members: [] });
-  }
-  for (const m of (parsed.mappings ?? [])) {
-    if (!channelMap.has(m.channel)) {
-      channelMap.set(m.channel, { id: m.channel, members: [] });
-    }
-    const ch = channelMap.get(m.channel)!;
-    const fieldMaps = m.fields?.map((f) => ({ source: f.source, target: f.target }));
-    ch.members.push({ connectorId: m.connector, entity: m.entity, inbound: fieldMaps, outbound: fieldMaps });
-  }
-  return { ...existing, channels: Array.from(channelMap.values()) };
+/** Parse a raw YAML string into channels + conflict ready for engine boot.
+ *  Throws on invalid YAML or schema violations — caller should catch and display.
+ *  Spec: specs/playground.md §3.4 */
+function parseScenarioYaml(raw: string): { channels: ChannelConfig[]; conflict: ConflictConfig } {
+  const parsed = MappingsFileSchema.parse(parseYaml(raw));
+  const channels = buildChannelsFromEntries(parsed.channels ?? [], parsed.mappings ?? []);
+  const conflict: ConflictConfig = parsed.conflict ?? { strategy: "lww" };
+  return { channels, conflict };
 }
 
 
@@ -120,14 +65,14 @@ export function buildEditorPane(opts: EditorPaneOptions): {
     hint.textContent = "Ctrl/Cmd + Enter to save";
     container.appendChild(hint);
 
-    // Editor
+    // Editor — initialised directly from scenario.yaml (no serialisation step)
     const mount = document.createElement("div");
     mount.className = "editor-mount-full";
     container.appendChild(mount);
 
     view = new EditorView({
       state: EditorState.create({
-        doc: scenarioToConfigYaml(scenario),
+        doc: scenario.yaml.trimStart(),
         extensions: [
           yamlLang(),
           oneDark,
@@ -149,13 +94,16 @@ export function buildEditorPane(opts: EditorPaneOptions): {
 
   function doSave(): void {
     if (!view) return;
-    let next: ScenarioDefinition;
+    const raw = view.state.doc.toString();
     try {
-      next = mergeConfigYaml(currentScenario, view.state.doc.toString());
+      // Validate + parse — throws on any YAML or schema error
+      parseScenarioYaml(raw);
     } catch (e) {
       alert(`Invalid YAML in config editor:\n${String(e)}`);
       return;
     }
+    // Store the validated raw YAML string as the new scenario source of truth
+    const next: ScenarioDefinition = { ...currentScenario, yaml: raw };
     void onConfigReload(next);
   }
 
@@ -171,4 +119,4 @@ export function buildEditorPane(opts: EditorPaneOptions): {
   };
 }
 
-// One editor for the config (channels + mappings JSON), then one per (system × entity).
+// One editor for the config (channels + mappings YAML), then one per (system × entity).

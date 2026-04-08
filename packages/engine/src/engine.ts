@@ -45,8 +45,9 @@ import {
   dbGetWrittenState,
   dbUpsertArrayParentMap,
   dbGetArrayParentMap,
+  dbGetSourceCreatedAts,
 } from "./db/queries.js";
-import { applyMapping, isDispatchBlocked } from "./core/mapping.js";
+import { applyMapping, isDispatchBlocked, computeFieldTimestamps } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
 import { buildNormalizers } from "./core/diff.js";
 import { CircuitBreaker } from "./safety/circuit-breaker.js";
@@ -92,6 +93,8 @@ export interface RecordSyncResult {
   afterAssociations?: Association[];
   /** UPDATE: associations stored in the target shadow before the write. */
   beforeAssociations?: Association[];
+  /** Advisory warnings that did not block dispatch (e.g. missing_required_association). */
+  warnings?: string[];
 }
 
 export interface IngestResult {
@@ -212,6 +215,27 @@ export class SyncEngine {
     this.breakers = new Map();
     for (const ch of config.channels) {
       this.breakers.set(ch.id, new CircuitBreaker(ch.id, db));
+    }
+
+    // Spec: specs/associations.md § 8.2 — pre-flight: warn when associationSchema declares
+    // a targetEntity that is not registered in the same channel.
+    for (const ch of config.channels) {
+      const channelEntityNames = new Set(ch.members.map((m) => m.entity));
+      for (const member of ch.members) {
+        const wiredMember = this.wired.get(member.connectorId);
+        if (!wiredMember) continue;
+        const entityDef = wiredMember.entities.find((e) => e.name === member.entity);
+        if (!entityDef?.associationSchema) continue;
+        for (const [predicate, descriptor] of Object.entries(entityDef.associationSchema)) {
+          if (!channelEntityNames.has(descriptor.targetEntity)) {
+            console.warn(
+              `[WARN] ${member.connectorId}:${member.entity}.associationSchema['${predicate}'] targets entity '${descriptor.targetEntity}' ` +
+              `but no '${descriptor.targetEntity}' entity is registered in channel '${ch.id}'. ` +
+              `Associations with this predicate will have unresolvable targets.`
+            );
+          }
+        }
+      }
     }
   }
 
@@ -366,9 +390,19 @@ export class SyncEngine {
                 continue;
               }
               const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
+              // Store the association sentinel so the onboard phase can preserve it
+              // (the shadow is rewritten by onboard but falls back to this if lookup is absent).
+              const assocSentinel = record.associations === undefined
+                ? undefined
+                : (() => {
+                    const filtered = this._filterInboundAssociations(record.associations, sourceMember);
+                    return filtered.length
+                      ? JSON.stringify([...filtered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+                      : undefined;
+                  })();
               const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
               const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
-              const fd = buildFieldData(existing, canonical, connectorId, ts, undefined);
+              const fd = buildFieldData(existing, canonical, connectorId, ts, assocSentinel);
               dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
             }
           }
@@ -679,7 +713,11 @@ export class SyncEngine {
           const sideAssocSentinel = sideAssocFiltered.length
             ? JSON.stringify([...sideAssocFiltered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
             : undefined;
-          const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, sideAssocSentinel);
+          // When lookup() is unavailable (sideAssocSentinel undefined), fall back to the
+          // assoc sentinel stored during the collect phase so it isn't silently dropped.
+          const existingFd = dbGetShadow(this.db, side.connectorId, sideEntity, side.externalId);
+          const effectiveSentinel = sideAssocSentinel ?? (existingFd?.["__assoc__"]?.val as string | undefined);
+          const fd = buildFieldData(undefined, match.canonicalData, side.connectorId, ts, effectiveSentinel);
           dbSetShadow(this.db, side.connectorId, sideEntity, side.externalId, winnerId!, fd);
           linked++;
           shadowsSeeded++;
@@ -1283,6 +1321,47 @@ export class SyncEngine {
     if (!member.assocMappings) return [];
     return associations.filter((a) => member.assocMappings!.some((m) => m.source === a.predicate));
   }
+
+  /** Merge outbound associations for an UPDATE dispatch.
+   *
+   * The source connector can only express a subset of the target's association predicates
+   * (those reachable via fromMember.assocMappings → canonical → toMember.assocMappings).
+   * Predicates the source cannot express must be preserved from the target's existing shadow
+   * so they are not silently dropped when the source triggers a field-only update.
+   *
+   * Example: ERP has `orgId → primaryRef`, CRM has `primaryCompanyId → primaryRef` and
+   * `secondaryCompanyId → secondaryRef`.  When ERP changes a field and the engine writes to
+   * CRM, only `primaryCompanyId` is in `remap`; `secondaryCompanyId` must be kept from
+   * `existingTargetAssoc`.
+   *
+   * Algorithm:
+   *   1. Build the set of target predicates the source can express (via the canonical chain).
+   *   2. Start with existing target associations.
+   *   3. Remove expressible predicates (the source "owns" these — it may set or clear them).
+   *   4. Add what the source actually provided via `remap`.
+   */
+  private _mergeOutboundAssociations(
+    remap: Association[],
+    existingTargetAssoc: Association[] | undefined,
+    fromMember: ChannelMember,
+    toMember: ChannelMember,
+  ): Association[] {
+    // Build target predicates expressible by the source through the canonical chain
+    const expressible = new Set<string>();
+    if (fromMember.assocMappings && toMember.assocMappings) {
+      for (const fromMap of fromMember.assocMappings) {
+        const toMap = toMember.assocMappings.find((m) => m.target === fromMap.target);
+        if (toMap) expressible.add(toMap.source);
+      }
+    }
+    // Merge: keep existing target assoc except where source takes ownership
+    const byPredicate = new Map<string, Association>();
+    for (const a of (existingTargetAssoc ?? [])) byPredicate.set(a.predicate, a);
+    for (const pred of expressible) byPredicate.delete(pred); // clear source-owned slots
+    for (const a of remap) byPredicate.set(a.predicate, a);   // set source's actual values
+    return [...byPredicate.values()];
+  }
+
   // Like _remapAssociations but never returns null. Entries whose target is not yet in the
   // identity map are silently dropped rather than blocking the whole record. Returns { error }
   // only for unknown targetEntity — that is always a config mistake, not a timing issue.
@@ -1400,12 +1479,32 @@ export class SyncEngine {
     sourceMember: ChannelMember,
     sourceId: string,
   ): Promise<
-    | { type: "ok"; action: "insert" | "update"; targetId: string; localData: Record<string, unknown>; newFieldData: FieldData; after: Record<string, unknown>; afterAssociations?: Association[] }
+    | { type: "ok"; action: "insert" | "update"; targetId: string; localData: Record<string, unknown>; newFieldData: FieldData; after: Record<string, unknown>; afterAssociations?: Association[]; warnings?: string[] }
     | { type: "error"; error: string }
     | { type: "skip" }
   > {
     const targetEntityDef = targetWired.entities.find((e) => e.name === targetMember.entity);
     if (!targetEntityDef?.insert || !targetEntityDef?.update) return { type: "skip" };
+
+    // Spec: specs/associations.md § 8.1 — write-side association filter.
+    // When the target entity declares associationSchema, only pass through predicates
+    // that are listed. Unlisted predicates are dropped silently.
+    let filteredAssociations = associations;
+    if (associations?.length && targetEntityDef.associationSchema) {
+      filteredAssociations = associations.filter((a) => a.predicate in targetEntityDef.associationSchema!);
+    }
+
+    // Spec: specs/associations.md § 8.3 — required-association warnings.
+    // Advisory: does not block dispatch.
+    const dispatchWarnings: string[] = [];
+    if (targetEntityDef.associationSchema) {
+      const presentPredicates = new Set((filteredAssociations ?? []).map((a) => a.predicate));
+      for (const [predicate, descriptor] of Object.entries(targetEntityDef.associationSchema)) {
+        if (descriptor.required && !presentPredicates.has(predicate)) {
+          dispatchWarnings.push(`missing_required_association: predicate '${predicate}' (targetEntity '${descriptor.targetEntity}') is absent`);
+        }
+      }
+    }
 
     const localData = applyMapping(resolvedCanonical, targetMember.outbound, "outbound");
 
@@ -1423,8 +1522,8 @@ export class SyncEngine {
     // Build an association sentinel (same serialisation pattern as shadow_state).
     // Included in the noop check and stored in written_state so association-only
     // changes (e.g. deferred-retry updates) are never incorrectly suppressed.
-    const assocSentinel = associations?.length
-      ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+    const assocSentinel = filteredAssociations?.length
+      ? JSON.stringify([...filteredAssociations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
       : undefined;
 
     // Spec: specs/field-mapping.md §7.1 — target-centric noop suppression.
@@ -1461,7 +1560,7 @@ export class SyncEngine {
         let newId: string | undefined;
         let err: string | undefined;
         for await (const result of targetEntityDef.insert!(
-          (async function* (): AsyncIterable<InsertRecord> { yield { data: localData, associations }; })(),
+          (async function* (): AsyncIterable<InsertRecord> { yield { data: localData, associations: filteredAssociations }; })(),
           targetWired.ctx,
         )) { if (result.error) err = result.error; else newId = result.id; }
         if (err) return { type: "error", error: err };
@@ -1471,7 +1570,7 @@ export class SyncEngine {
         let notFound = false;
         for await (const result of targetEntityDef.update!(
           (async function* (): AsyncIterable<UpdateRecord> {
-            yield { id: existingTargetId!, data: localData, associations, version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
+            yield { id: existingTargetId!, data: localData, associations: filteredAssociations, version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
           })(),
           targetWired.ctx,
         )) {
@@ -1515,8 +1614,8 @@ export class SyncEngine {
 
     // Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md — store remapped assoc sentinel
     // so _resolvedMatchesTargetShadow can compare it on the next poll.
-    const remappedSentinel = associations?.length
-      ? JSON.stringify([...associations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+    const remappedSentinel = filteredAssociations?.length
+      ? JSON.stringify([...filteredAssociations].sort((a, b) => a.predicate.localeCompare(b.predicate)))
       : undefined;
     const newFieldData = buildFieldData(targetShadow, resolvedCanonical, targetMember.connectorId, ingestTs, remappedSentinel);
     // Store localData with the association sentinel so future noop checks include association changes.
@@ -1524,7 +1623,8 @@ export class SyncEngine {
       ? { ...localData, __assoc__: assocSentinel }
       : { ...localData };
     return { type: "ok", action: writeResult.action, targetId: writeResult.targetId, localData: writtenData,
-      newFieldData, after: resolvedCanonical, afterAssociations: associations?.length ? associations : undefined };
+      newFieldData, after: resolvedCanonical, afterAssociations: filteredAssociations?.length ? filteredAssociations : undefined,
+      warnings: dispatchWarnings.length ? dispatchWarnings : undefined };
   }
 
   // Spec: specs/sync-engine.md § Pipeline Steps
@@ -1652,7 +1752,7 @@ export class SyncEngine {
               ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId)
               : undefined;
 
-            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound);
+            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound, undefined, undefined, undefined);
             if (!Object.keys(resolved).length && existingTargetId !== undefined) {
               results.push({ entity: sourceMember.entity, action: "skip", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
               continue;
@@ -1673,7 +1773,7 @@ export class SyncEngine {
 
             const beforeData = targetShadow ? fieldDataToRecord(targetShadow) : undefined;
             childOutcomes.push({
-              result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, after: dispatchResult.after },
+              result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, after: dispatchResult.after, warnings: dispatchResult.warnings },
               localData: dispatchResult.localData,
               shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId: childCanonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
               txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: childCanonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
@@ -1772,6 +1872,13 @@ export class SyncEngine {
 
       const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields, channel);
 
+      // Spec: specs/field-mapping.md §7.2 — per-field timestamps (always-on shadow derivation)
+      const fieldTimestamps = computeFieldTimestamps(canonical, existingShadow, record, ingestTs);
+      // Spec: specs/field-mapping.md §2.N origin_wins / last_modified tie-breaking
+      const incomingCreatedAt = record.createdAt ? (Date.parse(record.createdAt) || undefined) : undefined;
+      const needsCreatedAts = this.conflictConfig.strategy === "origin_wins" || this.conflictConfig.strategy === "lww";
+      const createdAtBySrc = needsCreatedAts ? dbGetSourceCreatedAts(this.db, canonId) : undefined;
+
       type Outcome = { result: RecordSyncResult; localData: Record<string, unknown>; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
       const outcomes: Outcome[] = [];
       let droppedAssociation = false; // Spec: PLAN_EAGER_ASSOCIATION_MODE.md §3.4
@@ -1807,7 +1914,7 @@ export class SyncEngine {
         const existingTargetId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
         const targetShadow = existingTargetId ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId) : undefined;
 
-        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound);
+        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound, fieldTimestamps, incomingCreatedAt, createdAtBySrc);
         // Zero-key guard: suppress dispatch only when updating an *existing* target record
         // with no field changes.  When existingTargetId is undefined this is a brand-new
         // INSERT — dispatch must run even for empty canonical data so the record is created
@@ -1817,11 +1924,20 @@ export class SyncEngine {
           continue;
         }
 
+        // Merge outbound associations: for UPDATE dispatches, preserve target associations
+        // that the source cannot express (e.g. secondaryCompanyId when source only has orgId).
+        // For INSERTs (existingTargetId === undefined) there is no prior state to preserve.
+        // Spec: specs/associations.md § 8
+        const existingTargetAssoc = existingTargetId !== undefined
+          ? parseSentinelAssociations(targetShadow)
+          : undefined;
+        const mergedAssoc = this._mergeOutboundAssociations(remap, existingTargetAssoc, sourceMember, targetMember);
+
         // Spec: plans/engine/PLAN_NOOP_UPDATE_SUPPRESSION.md
         // Suppress dispatch when resolved values already match the target shadow.
         // Echo detection handles the source side; this guard handles the target side
         // for cases where the source shadow is absent (resurrection / cleared shadow).
-        const remappedForCheck = remap.length ? remap : undefined;
+        const remappedForCheck = mergedAssoc.length ? mergedAssoc : undefined;
         if (
           targetShadow !== undefined &&
           this._resolvedMatchesTargetShadow(resolved, targetShadow, remappedForCheck)
@@ -1831,7 +1947,7 @@ export class SyncEngine {
         }
 
         const dispatchResult = await this._dispatchToTarget(
-          targetMember, tw, resolved, remap.length ? remap : undefined,
+          targetMember, tw, resolved, mergedAssoc.length ? mergedAssoc : undefined,
           existingTargetId, targetShadow, canonId, ingestTs, batchId, sourceMember, record.id,
         );
 
@@ -1846,7 +1962,7 @@ export class SyncEngine {
         const beforeData = targetShadow ? fieldDataToRecord(targetShadow) : undefined;
         const beforeAssoc = targetShadow ? parseSentinelAssociations(targetShadow) : undefined;
         outcomes.push({
-          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, beforeAssociations: beforeAssoc, after: dispatchResult.after, afterAssociations: dispatchResult.afterAssociations },
+          result: { entity: sourceMember.entity, action: dispatchResult.action, sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: dispatchResult.targetId, before: beforeData, beforeAssociations: beforeAssoc, after: dispatchResult.after, afterAssociations: dispatchResult.afterAssociations, warnings: dispatchResult.warnings },
           localData: dispatchResult.localData,
           shadowData: { connectorId: targetMember.connectorId, entity: targetMember.entity, externalId: dispatchResult.targetId, canonId, fd: dispatchResult.newFieldData, action: dispatchResult.action },
           txEntry: { batchId, connectorId: targetMember.connectorId, entityName: targetMember.entity, externalId: dispatchResult.targetId, canonicalId: canonId, action: dispatchResult.action, dataBefore: targetShadow, dataAfter: dispatchResult.newFieldData },
@@ -1861,8 +1977,8 @@ export class SyncEngine {
       // perspective).
       const srcAssocSentinel = droppedAssociation ? undefined : assocSentinel;
       this.db.transaction(() => {
-        const srcFd = buildFieldData(existingShadow, canonical, sourceMember.connectorId, ingestTs, srcAssocSentinel);
-        dbSetShadow(this.db, sourceMember.connectorId, sourceMember.entity, record.id, canonId, srcFd);
+        const srcFd = buildFieldData(existingShadow, canonical, sourceMember.connectorId, ingestTs, srcAssocSentinel, fieldTimestamps);
+        dbSetShadow(this.db, sourceMember.connectorId, sourceMember.entity, record.id, canonId, srcFd, record.createdAt);
         for (const o of outcomes) {
           if (o.shadowData.action === "insert") dbLinkIdentity(this.db, o.shadowData.canonId, o.shadowData.connectorId, o.shadowData.externalId);
           dbSetShadow(this.db, o.shadowData.connectorId, o.shadowData.entity, o.shadowData.externalId, o.shadowData.canonId, o.shadowData.fd);

@@ -25,7 +25,17 @@ export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>;
 
 // ─── mappings/*.yaml — channel definitions ────────────────────────────────────
 
-export const ConflictStrategySchema = z.enum(["lww", "field_master"]);
+export const ConflictStrategySchema = z.enum(["lww", "field_master", "origin_wins"]);
+
+export const ConflictConfigSchema = z.object({
+  strategy: ConflictStrategySchema,
+  fieldMasters: z.record(z.string(), z.string()).optional(),
+  connectorPriorities: z.record(z.string(), z.number()).optional(),
+  fieldStrategies: z.record(
+    z.string(),
+    z.object({ strategy: z.enum(["coalesce", "last_modified", "collect", "bool_or", "origin_wins"]) }),
+  ).optional(),
+});
 
 export const IdentityGroupSchema = z.object({
   fields: z.array(z.string()).min(1),
@@ -61,6 +71,21 @@ export const FieldMappingEntrySchema = z.object({
   /** Spec: specs/field-mapping.md §1.3 — connector-side fields read by expression.
    *  Declared for lineage; without this the diagram shows (expression) placeholder. */
   sources: z.array(z.string()).optional(),
+  /** Spec: specs/field-mapping.md §1.3 — JS expression string compiled via new Function.
+   *  Receives `record` (full incoming record); return value assigned to `target`.
+   *  When present, `source` is ignored on the forward pass. */
+  expression: z.string().optional(),
+  /** Spec: specs/field-mapping.md §1.3 — JS expression string compiled via new Function.
+   *  Receives `record` (full canonical record); return value assigned to `source ?? target`,
+   *  or if an object is returned, keys are spread into multiple source fields. */
+  reverse_expression: z.string().optional(),
+  /** Spec: specs/field-mapping.md §1.4 — JS expression string compiled via new Function.
+   *  Receives `v` (the field value); return value is the normalized form used only for diff. */
+  normalize: z.string().optional(),
+  /** Spec: specs/field-mapping.md §2.3 — JS expression string compiled via new Function.
+   *  Receives `incoming` and `existing`; returns the new canonical value.
+   *  Takes precedence over fieldStrategies / global strategy. */
+  resolve: z.string().optional(),
 });
 
 export const AssocPredicateMappingSchema = z.object({
@@ -105,9 +130,11 @@ export const MappingEntrySchema = z.object({
 export const MappingsFileSchema = z.object({
   mappings: z.array(MappingEntrySchema).optional(),
   channels: z.array(ChannelDefSchema).optional(),
+  conflict: ConflictConfigSchema.optional(),
 });
 
 export type MappingEntry = z.infer<typeof MappingEntrySchema>;
 export type FieldMappingEntry = z.infer<typeof FieldMappingEntrySchema>;
 export type AssocPredicateMappingEntry = z.infer<typeof AssocPredicateMappingSchema>;
 export type ParentFieldRef = z.infer<typeof ParentFieldRefSchema>;
+// Note: ConflictConfig interface lives in loader.ts; ConflictConfigSchema is the Zod validator.

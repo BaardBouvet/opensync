@@ -40,6 +40,7 @@ interface EntityDefinition {
   update?(records: AsyncIterable<UpdateRecord>, ctx: ConnectorContext): AsyncIterable<UpdateResult>;
   delete?(ids: AsyncIterable<string>, ctx: ConnectorContext): AsyncIterable<DeleteResult>;
   schema?: Record<string, FieldDescriptor>;    // field metadata (e.g. { "fnavn": { description: "First name" }, "amount": { description: "Value in NOK", type: "number" } })
+  associationSchema?: Record<string, AssociationDescriptor>; // association predicate metadata (see § Association Schema)
   scopes?: { read?: string[]; write?: string[]; always?: string[] }; // OAuth scopes by role; 'always' is requested whenever the entity is enabled
   dependsOn?: string[];                        // e.g. ['company'] — sync companies before contacts (entity names)
   onEnable?(ctx: ConnectorContext): Promise<void>;  // register webhook subscription for this entity's events
@@ -142,6 +143,45 @@ interface FieldDescriptor {
 
 // EntityCapabilities removed — insert/update/delete presence on EntityDefinition is the capability declaration.
 ```
+
+### § Association Schema
+
+`associationSchema` on an entity declares which association predicates it emits from `read()` and accepts in `insert()`/`update()`. Key is the predicate string exactly as it appears in `Association.predicate` — a short field name (`companyId`) or a full URI (`https://schema.org/worksFor`).
+
+```typescript
+interface AssociationDescriptor {
+  targetEntity: string;   // entity name the predicate points to (connector's own name)
+  description?: string;   // human-readable description; agents use for mapping suggestions
+  required?: boolean;     // advisory: warn if a dispatched record is missing this predicate
+  multiple?: boolean;     // true if a record may carry > 1 association for this predicate (default: false)
+}
+```
+
+Example — HubSpot contact:
+```typescript
+associationSchema: {
+  companyId: { targetEntity: 'company', description: 'The company this contact belongs to.' },
+  ownerId:   { targetEntity: 'owner',   description: 'HubSpot user who owns this contact.' },
+},
+```
+
+Example — SPARQL person with URI predicates:
+```typescript
+associationSchema: {
+  'https://schema.org/worksFor':  { targetEntity: 'organization', description: 'Organisation the person works for.' },
+  'https://schema.org/memberOf':  { targetEntity: 'organization', description: 'Organisation the person is a member of.', multiple: true },
+},
+```
+
+**Engine behaviour:**
+
+1. **Write-side filter (§ B)** — When dispatching to a target entity that declares `associationSchema`, the engine only includes association predicates listed in the schema in `InsertRecord.associations` / `UpdateRecord.associations`. Predicates not in the schema are dropped silently (trace-level log). Entities without `associationSchema` receive all associations unchanged (current pass-through behaviour).
+
+2. **Pre-flight warning (§ A)** — At channel setup, if a declared `targetEntity` is not registered as a channel member, the engine logs a warning. Dispatch still proceeds — the warning is informational.
+
+3. **Required-association warning (§ C)** — When a dispatched record is missing an association predicate marked `required: true`, the engine appends a `missing_required_association` warning to the `RecordSyncResult`. This is advisory; dispatch is not blocked.
+
+`associationSchema` is optional on every entity. Omitting it leaves all existing behaviour unchanged.
 
 ### Config Schema
 
@@ -261,11 +301,24 @@ Records returned by `read()` and `lookup()`. Also the record type inside `ReadBa
 
 ```typescript
 interface ReadRecord {
-  id: string;                                // this record's ID in the source system (uniqueness scope defined below)
-  data: Record<string, unknown | unknown[]>; // raw JSON blob — values may be single or multi-valued
-  version?: string;                          // opaque concurrency token (e.g. ETag) — passed back in UpdateRecord.version
-  deleted?: boolean;                         // connector's intent to remove this record from the target (see ReadRecord — Deletion below)
-  associations?: Association[];              // pre-extracted reference fields (see Associations)
+  id: string;                                    // this record's ID in the source system (uniqueness scope defined below)
+  data: Record<string, unknown | unknown[]>;     // raw JSON blob — values may be single or multi-valued
+  version?: string;                              // opaque concurrency token (e.g. ETag) — passed back in UpdateRecord.version
+  deleted?: boolean;                             // connector's intent to remove this record from the target (see ReadRecord — Deletion below)
+  associations?: Association[];                  // pre-extracted reference fields (see Associations)
+  updatedAt?: string;                            // source-assigned modification timestamp, ISO 8601 (e.g. '2026-03-15T10:32:00Z').
+                                                 // Engine uses this as the base LWW timestamp for every field in this record.
+                                                 // Omit for sources that have no modification timestamp.
+  createdAt?: string;                            // source-assigned creation timestamp, ISO 8601.
+                                                 // Immutable: stored in shadow once on first ingest; subsequent ingests with a
+                                                 // different value are silently ignored.
+                                                 // Enables origin_wins resolution and stable LWW tie-breaking.
+                                                 // Omit for sources that do not expose a creation time.
+  fieldTimestamps?: Record<string, string>;      // per-field modification timestamps, keyed by field names used in `data`.
+                                                 // Values are ISO 8601 strings. When present, engine uses these as the LWW
+                                                 // timestamp for the named fields, taking precedence over shadow derivation
+                                                 // and updatedAt. Connector is responsible for keeping timestamp columns out
+                                                 // of data. Omit for connectors without per-field modification times.
 }
 
 interface Association {
@@ -314,6 +367,27 @@ associations: [{ predicate: 'companyId', targetEntity: 'company', targetId: 'hs_
 engine resolves the edge using the identity map. Pending associations (target not yet seen)
 are stored and resolved once the target record arrives.
 
+### Composite Primary Keys
+
+Some sources have no single-column primary key — rows are identified by a tuple of values (e.g. `(country_code, product_id)` in a join table, `(order_id, line_no)` in an order-lines table).
+
+**The connector contract remains `id: string`.** The connector is responsible for serialising the tuple into a single opaque string before yielding the record, and for decoding it back when `update()` or `delete()` returns the same string:
+
+```typescript
+// read(): encode
+yield { records: [{ id: `${row.country_code}:${row.product_id}`, data: { ...row } }] };
+
+// update(): decode
+const [countryCode, productId] = record.id.split(':');
+await db.query('UPDATE ... WHERE country_code = $1 AND product_id = $2', [countryCode, productId]);
+```
+
+**Separator choice**: pick a character that cannot appear in the key values, or URL-encode the components before joining. A common safe choice is `\0` (null byte) since it is never valid in SQL identifiers or typical API IDs.
+
+This keeps the engine contract simple — `id` is always an opaque string — and avoids any engine-side knowledge of composite key structure. The engine never needs to decompose the ID; it always passes it back verbatim.
+
+**When the composite fields are canonical domain fields** (e.g. `orderId` + `lineNo` are both meaningful in the canonical model), consider also mapping them as ordinary fields and declaring `identityGroups: [{ fields: [orderId, lineNo] }]` on the channel in addition to the serialised `id`. This enables cross-connector matching by field value, not just by engine-assigned ID. See [identity.md](identity.md) §Compound Identity Groups.
+
 ## Write Records
 
 The engine constructs typed records for each write operation. All fields are engine-owned and read-only from the connector's perspective.
@@ -338,6 +412,13 @@ interface UpdateRecord {
 All fields are engine-owned and read-only from the connector's perspective.
 
 The engine, not the connector, is responsible for maintaining `id`. Connectors must not mutate it.
+
+**Writing associations**: when `InsertRecord.associations` or `UpdateRecord.associations` is
+present, the connector is responsible for translating those entries into whatever API primitives
+the target system uses — a separate associations endpoint, an embedded FK field on the main
+record, a join-table upsert, etc. Association entries with predicates the connector does not
+recognise should be silently skipped; they may belong to another entity pair managed by a
+different channel member.
 
 ## Write Results
 

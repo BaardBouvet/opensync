@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "bun test src/inmemory.test.ts"
+    "test": "bun test src/inmemory.test.ts src/scenarios/scenarios.test.ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",

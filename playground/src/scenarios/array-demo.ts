@@ -11,97 +11,71 @@ import type { ScenarioDefinition } from "./types.js";
 
 const scenario: ScenarioDefinition = {
   label: "array-demo (webshop nested lines → erp flat orderLines)",
-  channels: [
-    // ── Channel 1: orders ────────────────────────────────────────────────────
-    {
-      id: "orders",
-      identityFields: ["ref"],
-      members: [
-        {
-          connectorId: "erp",
-          entity: "orders",
-          inbound: [
-            { source: "orderRef", target: "ref" },
-            { source: "total",    target: "total" },
-            { source: "status",   target: "status" },
-            { source: "date",     target: "date" },
-          ],
-          outbound: [
-            { source: "orderRef", target: "ref" },
-            { source: "total",    target: "total" },
-            { source: "status",   target: "status" },
-            { source: "date",     target: "date" },
-          ],
-        },
-        {
-          connectorId: "webshop",
-          entity: "purchases",
-          inbound: [
-            { source: "purchaseRef",   target: "ref" },
-            { source: "amount",        target: "total" },
-            { source: "state",         target: "status" },
-          ],
-          outbound: [
-            { source: "purchaseRef",   target: "ref" },
-            { source: "amount",        target: "total" },
-            { source: "state",         target: "status" },
-          ],
-        },
-      ],
-    },
+  yaml: `
+channels:
+  - id: orders
+    identityFields: [ref]
+  - id: order-lines
+    # Compound group: both orderRef AND lineNo must match to link records.
+    identityGroups:
+      - fields: [orderRef, lineNo]
 
-    // ── Channel 2: order-lines (array expansion) ──────────────────────────────
-    // webshop member FIRST — ensures array_parent_map is populated before erp ingest.
-    {
-      id: "order-lines",
-      // Compound group: both orderRef AND lineNo must match to link records.
-      identityGroups: [{ fields: ["orderRef", "lineNo"] }],
-      members: [
-        {
-          connectorId: "webshop",
-          entity: "order_lines",       // logical entity name (shadow state / watermarks)
-          sourceEntity: "purchases",   // connector.read() is called with this name
-          arrayPath: "lines",
-          elementKey: "lineNo",
-          parentFields: {
-            // bring purchaseRef from the parent purchases record into each element
-            purchaseRef: "purchaseRef",
-          },
-          inbound: [
-            { source: "lineNo",      target: "lineNo" },
-            { source: "sku",         target: "sku" },
-            { source: "quantity",    target: "qty" },
-            { source: "linePrice",   target: "unitPrice" },
-            { source: "purchaseRef", target: "orderRef" },
-          ],
-          outbound: [
-            { source: "sku",         target: "sku" },
-            { source: "quantity",    target: "qty" },
-            { source: "linePrice",   target: "unitPrice" },
-            { source: "purchaseRef", target: "orderRef" },
-          ],
-        },
-        {
-          connectorId: "erp",
-          entity: "orderLines",
-          inbound: [
-            { source: "lineNo",    target: "lineNo" },
-            { source: "sku",       target: "sku" },
-            { source: "qty",       target: "qty" },
-            { source: "unitPrice", target: "unitPrice" },
-            { source: "orderRef",  target: "orderRef" },
-          ],
-          outbound: [
-            { source: "sku",       target: "sku" },
-            { source: "qty",       target: "qty" },
-            { source: "unitPrice", target: "unitPrice" },
-            { source: "orderRef",  target: "orderRef" },
-          ],
-        },
-      ],
-    },
-  ],
-  conflict: { strategy: "lww" },
+conflict:
+  strategy: lww
+
+mappings:
+  # ── Channel 1: orders ──────────────────────────────────────────────────────
+  - connector: erp
+    entity: orders
+    channel: orders
+    fields:
+      - { source: orderRef, target: ref    }
+      - { source: total,    target: total  }
+      - { source: status,   target: status }
+      - { source: date,     target: date   }
+
+  - connector: webshop
+    entity: purchases
+    channel: orders
+    fields:
+      - { source: purchaseRef, target: ref    }
+      - { source: amount,      target: total  }
+      - { source: state,       target: status }
+
+  # ── Channel 2: order-lines (array expansion) ───────────────────────────────
+  # Webshop member FIRST — ensures array_parent_map is populated before erp ingest.
+
+  # Parent source descriptor — defines the read source for the child
+  - name: webshop_purchases_src
+    connector: webshop
+    entity: purchases
+    channel: order-lines
+
+  # Child member — expands lines array from parent purchases records
+  - parent: webshop_purchases_src
+    entity: order_lines
+    channel: order-lines
+    array_path: lines
+    element_key: lineNo
+    parent_fields:
+      purchaseRef: purchaseRef
+    fields:
+      - { source: lineNo,      target: lineNo    }
+      - { source: sku,         target: sku       }
+      - { source: quantity,    target: qty       }
+      - { source: linePrice,   target: unitPrice }
+      - { source: purchaseRef, target: orderRef  }
+
+  - connector: erp
+    entity: orderLines
+    channel: order-lines
+    fields:
+      - { source: lineNo,    target: lineNo    }
+      - { source: sku,       target: sku       }
+      - { source: qty,       target: qty       }
+      - { source: unitPrice, target: unitPrice }
+      - { source: orderRef,  target: orderRef  }
+`,
 };
 
 export default scenario;

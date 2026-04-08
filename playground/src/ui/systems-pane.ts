@@ -523,7 +523,7 @@ export function createSystemsPane(
               ? (el as Record<string, unknown>)
               : { _value: el };
             const keyVal = m.elementKey
-              ? String(elObj[m.elementKey] ?? idx)
+              ? String((elObj as Record<string, unknown>)[m.elementKey] ?? idx)
               : String(idx);
             const syntheticId = `${parentRec.id}#${m.arrayPath}[${keyVal}]`;
 
