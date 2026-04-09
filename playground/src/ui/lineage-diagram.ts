@@ -557,9 +557,19 @@ function buildEntityGroup(
           node.className = "ld-field-node ld-field-node-unmapped";
           if (fp.isFK) node.classList.add("ld-field-node-fk");
           node.dataset.unmapped = "true";
-          const t = buildFieldTitle(fp);
-          if (t) node.title = t;
-          node.textContent = fp.name;
+          const nameSpan = document.createElement("span");
+          nameSpan.textContent = fp.name;
+          node.appendChild(nameSpan);
+          const metaParts: string[] = [];
+          if (fp.description) metaParts.push(fp.description);
+          if (fp.type)        metaParts.push(fp.type);
+          if (fp.example != null) metaParts.push(`e.g. ${String(fp.example)}`);
+          if (metaParts.length > 0) {
+            const meta = document.createElement("span");
+            meta.className = "ld-field-node-meta";
+            meta.textContent = metaParts.join(" · ");
+            node.appendChild(meta);
+          }
           fieldsList.appendChild(node);
         }
       }
@@ -885,13 +895,24 @@ export function renderLineageDiagram(
           const fieldsList = document.createElement("div");
           fieldsList.className = "ld-pool-fields-list ld-hidden";
           for (const fp of fields) {
-            const pill = document.createElement("span");
-            pill.className = "ld-pool-field";
-            if (fp.isFK) pill.classList.add("ld-pool-field-fk");
-            pill.textContent = fp.name;
-            const t = buildFieldTitle(fp);
-            if (t) pill.title = t;
-            fieldsList.appendChild(pill);
+            const row = document.createElement("div");
+            row.className = "ld-pool-field-row";
+            if (fp.isFK) row.classList.add("ld-pool-field-fk");
+            const nameEl = document.createElement("span");
+            nameEl.className = "ld-pool-field-name";
+            nameEl.textContent = fp.name;
+            row.appendChild(nameEl);
+            const metaParts: string[] = [];
+            if (fp.description) metaParts.push(fp.description);
+            if (fp.type)        metaParts.push(fp.type);
+            if (fp.example != null) metaParts.push(`e.g. ${String(fp.example)}`);
+            if (metaParts.length > 0) {
+              const meta = document.createElement("span");
+              meta.className = "ld-pool-field-meta";
+              meta.textContent = metaParts.join(" · ");
+              row.appendChild(meta);
+            }
+            fieldsList.appendChild(row);
           }
           group.appendChild(header);
           group.appendChild(fieldsList);
