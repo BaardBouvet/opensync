@@ -220,20 +220,27 @@ export class SyncEngine {
     }
 
     // Spec: specs/associations.md § 8.2 — pre-flight: warn when schema[field].entity declares
-    // a targetEntity that is not registered in the same channel.
+    // a targetEntity that is not registered in any channel for that connector.
+    // Cross-channel FK resolution is by design (§7); warn only when the entity literally
+    // does not exist anywhere in the config for the given connector.
     for (const ch of config.channels) {
-      const channelEntityNames = new Set(ch.members.map((m) => m.entity));
       for (const member of ch.members) {
         const wiredMember = this.wired.get(member.connectorId);
         if (!wiredMember) continue;
         const entityDef = wiredMember.entities.find((e) => e.name === member.entity);
         if (!entityDef?.schema) continue;
+        // All entity names registered for this connector across every channel.
+        const connectorEntityNames = new Set(
+          config.channels.flatMap((c) =>
+            c.members.filter((m) => m.connectorId === member.connectorId).map((m) => m.entity)
+          )
+        );
         for (const [predicate, fieldDef] of Object.entries(entityDef.schema)) {
           if (!fieldDef.entity) continue;
-          if (!channelEntityNames.has(fieldDef.entity)) {
+          if (!connectorEntityNames.has(fieldDef.entity)) {
             console.warn(
               `[WARN] ${member.connectorId}:${member.entity}.schema['${predicate}'].entity targets entity '${fieldDef.entity}' ` +
-              `but no '${fieldDef.entity}' entity is registered in channel '${ch.id}'. ` +
+              `but no '${fieldDef.entity}' entity is registered for connector '${member.connectorId}' in any channel. ` +
               `Associations with this predicate will have unresolvable targets.`
             );
           }

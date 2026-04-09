@@ -604,13 +604,6 @@ function invoiceToRecord(inv: WaveInvoice): ReadRecord {
       createdAt: inv.createdAt,
       modifiedAt: inv.modifiedAt,
     },
-    associations: [
-      {
-        predicate: "customer.id",
-        targetEntity: "customer",
-        targetId: inv.customer.id,
-      },
-    ],
   };
 }
 
@@ -628,6 +621,7 @@ const invoiceEntity: EntityDefinition = {
     "customer.id": {
       description: "ID of the Wave customer this invoice belongs to",
       type: "string",
+      entity: "customer",
       required: true,
     },
     "customer.name": {
