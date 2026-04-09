@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+
+const { version } = JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf-8")) as { version: string };
 
 // Copy the sql.js WASM files to public/ so Vite serves them in dev and includes them in dist.
 // The browser entry (sql-wasm-browser.js) requests "sql-wasm-browser.wasm"; the Node entry
@@ -33,6 +35,10 @@ copySqlWasmFiles();
 export default defineConfig({
   root: ".",
   base: "./",
+  define: {
+    // Spec: specs/playground.md § 2.5
+    __APP_VERSION__: JSON.stringify(version),
+  },
   resolve: {
     alias: {
       // Stub native-only DB drivers — they are dead code in the browser

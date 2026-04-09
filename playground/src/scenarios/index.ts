@@ -5,6 +5,7 @@ import associationsDemo from "./associations-demo.js";
 import assocCardinality from "./assoc-cardinality.js";
 import arrayDemo from "./array-demo.js";
 import minimal from "./minimal.js";
+import empty from "./empty.js";
 
 export type { ScenarioDefinition };
 
@@ -13,6 +14,7 @@ export const scenarios: Record<string, ScenarioDefinition> = {
   "assoc-cardinality": assocCardinality,
   "array-demo": arrayDemo,
   "minimal": minimal,
+  "empty": empty,
 };
 
 export const defaultScenarioKey = "associations-demo";

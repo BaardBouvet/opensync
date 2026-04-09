@@ -20,6 +20,9 @@ export interface SystemsPaneCallbacks {
   onSave: (systemId: string, entity: string, id: string | null, data: Record<string, unknown>, explicitId?: string) => void;
   onSoftDelete: (systemId: string, entity: string, id: string) => void;
   onRestore:    (systemId: string, entity: string, id: string) => void;
+  /** Called whenever the active tab changes (channel id, "__unmapped__", or "__lineage__").
+   *  Used by main.ts to keep the URL hash in sync. Spec: specs/playground.md § 12.2 */
+  onTabChange?: (tab: string) => void;
 }
 
 // ─── Modal editor (module-level singleton) ────────────────────────────────────
@@ -286,6 +289,8 @@ export function createSystemsPane(
     systems: Map<string, InMemoryConnector>,
     clustersByChannel: Map<string, ChannelCluster[]>,
   ) => void;
+  /** Set the active tab without pushing a history entry (used for hash restore). */
+  setActiveTab: (tab: string) => void;
 } {
   container.innerHTML = "";
 
@@ -302,6 +307,9 @@ export function createSystemsPane(
   let lastWatermarks = new Map<string, number>();
   let hasRefreshed = false;
   let lastChangedChannels = new Set<string>();
+  // Fingerprint of the last channels array — used to detect config changes so the
+  // lineage diagram is rebuilt when Apply is clicked. Spec: specs/playground.md § 11
+  let lastChannelsKey = "";
 
   let cachedChannels: ChannelConfig[] = [];
   let cachedSystems: Map<string, InMemoryConnector> = new Map();
@@ -481,9 +489,13 @@ export function createSystemsPane(
       return;
     }
     if (activeChannel === "__lineage__") {
-      // Only mount once — poll refreshes must not rebuild the diagram (that would destroy state)
-      if (!channelArea.querySelector(".ld-map-host")) {
-        renderLineageContent(channels);
+      // Only mount once per config — poll refreshes must not rebuild the diagram (that
+      // would destroy interactive state), but a config change (Apply) must force a rebuild.
+      // Spec: specs/playground.md § 11
+      const channelsKey = channels.map((c) => c.id + ":" + c.members.map((m) => m.connectorId + "/" + m.entity).join(",")).join("|");
+      if (!channelArea.querySelector(".ld-map-host") || channelsKey !== lastChannelsKey) {
+        lastChannelsKey = channelsKey;
+        renderLineageContent(channels, systems);
       }
       return;
     }
@@ -709,6 +721,7 @@ export function createSystemsPane(
         renderTabs(cachedChannels);
         renderContent(cachedChannels, cachedSystems, cachedClusters, false);
         updateWatermarks(cachedSystems);
+        callbacks.onTabChange?.(ch.id);
       });
       tabBar.appendChild(btn);
     }
@@ -729,6 +742,7 @@ export function createSystemsPane(
       renderTabs(cachedChannels);
       renderContent(cachedChannels, cachedSystems, cachedClusters, false);
       updateWatermarks(cachedSystems);
+      callbacks.onTabChange?.("__unmapped__");
     });
     tabBar.appendChild(unmappedBtn);
 
@@ -742,16 +756,23 @@ export function createSystemsPane(
       activeChannel = "__lineage__";
       renderTabs(cachedChannels);
       renderContent(cachedChannels, cachedSystems, cachedClusters, false);
+      callbacks.onTabChange?.("__lineage__");
     });
     tabBar.appendChild(lineageBtn);
   }
 
-  function renderLineageContent(channels: ChannelConfig[]): void {
+  function renderLineageContent(channels: ChannelConfig[], systems: Map<string, InMemoryConnector>): void {
     channelArea.innerHTML = "";
     const container = document.createElement("div");
     container.className = "ld-map-host";
     channelArea.appendChild(container);
-    renderLineageDiagram(container, channels);
+    // Build allEntities: connectorId → entity names from snapshot keys.
+    // Spec: specs/playground.md § 11.14
+    const allEntities = new Map<string, string[]>();
+    for (const [sysId, conn] of systems) {
+      allEntities.set(sysId, Object.keys(conn.snapshot()));
+    }
+    renderLineageDiagram(container, channels, allEntities);
   }
 
   function updateWatermarks(systems: Map<string, InMemoryConnector>): void {
@@ -775,6 +796,7 @@ export function createSystemsPane(
 
     if (activeChannel === null && channels.length > 0) {
       activeChannel = channels[0]!.id;
+      callbacks.onTabChange?.(activeChannel);
     } else if (
       activeChannel !== "__unmapped__" &&
       activeChannel !== "__lineage__" &&
@@ -801,5 +823,13 @@ export function createSystemsPane(
     updateWatermarks(systems);
   }
 
-  return { refresh };
+  return {
+    refresh,
+    /** Set the active tab without firing onTabChange (used for hash restore on load/popstate). */
+    setActiveTab(tab: string): void {
+      activeChannel = tab;
+      renderTabs(cachedChannels);
+      renderContent(cachedChannels, cachedSystems, cachedClusters, false);
+    },
+  };
 }

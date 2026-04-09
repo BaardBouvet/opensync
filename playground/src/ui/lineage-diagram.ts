@@ -779,12 +779,51 @@ function buildChannelSection(
 export function renderLineageDiagram(
   container: HTMLElement,
   channels: ChannelConfig[],
+  allEntities?: Map<string, string[]>,
 ): void {
   container.innerHTML = "";
 
   for (const channel of channels) {
     const lineage = buildChannelLineage(channel);
     container.appendChild(buildChannelSection(channel, lineage));
+  }
+
+  // Spec: specs/playground.md § 11.14 — unmapped entity pool
+  if (allEntities) {
+    const mapped = new Set<string>();
+    for (const ch of channels) {
+      for (const m of ch.members) {
+        // array-source members expose their sourceEntity to the pool
+        const entityName = (m as { sourceEntity?: string }).sourceEntity ?? m.entity;
+        mapped.add(`${m.connectorId}/${entityName}`);
+      }
+    }
+    const pool: { connectorId: string; entity: string }[] = [];
+    for (const [connectorId, entities] of allEntities) {
+      for (const entity of entities) {
+        if (!mapped.has(`${connectorId}/${entity}`)) {
+          pool.push({ connectorId, entity });
+        }
+      }
+    }
+    if (pool.length > 0) {
+      const poolEl = document.createElement("div");
+      poolEl.className = "ld-unassigned-pool";
+      const label = document.createElement("span");
+      label.className = "ld-pool-label";
+      label.textContent = "unassigned";
+      poolEl.appendChild(label);
+      const pills = document.createElement("div");
+      pills.className = "ld-pool-pills";
+      for (const { connectorId, entity } of pool) {
+        const pill = document.createElement("span");
+        pill.className = "ld-pool-entity";
+        pill.textContent = `${connectorId} / ${entity}`;
+        pills.appendChild(pill);
+      }
+      poolEl.appendChild(pills);
+      container.appendChild(poolEl);
+    }
   }
 }
 

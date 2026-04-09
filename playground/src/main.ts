@@ -23,6 +23,36 @@ const NOTIFY_MS = 800;
 // fanout; raise (e.g. 5_000) to let the user observe the seed-only state first.
 const BOOT_NOTIFY_MS = 0;
 
+// GitHub repo used for update checks. Spec: specs/playground.md § 2.5
+const GITHUB_REPO = "BaardBouvet/opensync";
+
+// ─── URL hash helpers ─────────────────────────────────────────────────────────
+// Spec: specs/playground.md § 12
+
+interface PlaygroundHash { scenario: string | null; tab: string | null; }
+
+function parseHash(): PlaygroundHash {
+  const raw = location.hash.slice(1);
+  const params = new URLSearchParams(raw);
+  return { scenario: params.get("scenario"), tab: params.get("tab") };
+}
+
+function buildHash(scenario: string, tab: string | null): string {
+  const params = new URLSearchParams({ scenario });
+  if (tab) params.set("tab", tab);
+  return "#" + params.toString();
+}
+
+/** Parse semver strings and return true when `latest` is strictly newer than `current`. */
+function isNewerVersion(latest: string, current: string): boolean {
+  const parse = (v: string): number[] => v.replace(/^v/, "").split(".").map(Number);
+  const [la = 0, lb = 0, lc = 0] = parse(latest);
+  const [ca = 0, cb = 0, cc = 0] = parse(current);
+  if (la !== ca) return la > ca;
+  if (lb !== cb) return lb > cb;
+  return lc > cc;
+}
+
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 let engineState: EngineState | null = null;
@@ -130,7 +160,33 @@ let devTools: ReturnType<typeof createDevTools> | null = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   statusEl = document.getElementById("status")!;
+  // ── Version badge (Spec: specs/playground.md § 2.5) ──────────────────────────────
+  const versionEl = document.getElementById("app-version");
+  if (versionEl) versionEl.textContent = `v${__APP_VERSION__}`;
 
+  // ── Update check (fire-and-forget, Spec: specs/playground.md § 2.5) ───────────
+  fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
+    .then((r) => r.json())
+    .then((data: unknown) => {
+      const d = data as { tag_name?: string; html_url?: string };
+      if (!d.tag_name || !d.html_url) return;
+      if (!isNewerVersion(d.tag_name, __APP_VERSION__)) return;
+      const dismissedKey = `opensync-update-dismissed-${d.tag_name}`;
+      if (sessionStorage.getItem(dismissedKey)) return;
+      const notif = document.getElementById("update-notification") as HTMLAnchorElement | null;
+      const textEl = document.getElementById("update-notification-text");
+      if (!notif || !textEl) return;
+      textEl.textContent = `${d.tag_name} available`;
+      notif.href = d.html_url;
+      notif.removeAttribute("hidden");
+      document.getElementById("dismiss-update")?.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        sessionStorage.setItem(dismissedKey, "1");
+        notif.setAttribute("hidden", "");
+      });
+    })
+    .catch(() => { /* network errors are silently ignored */ });
   // ── Scenario dropdown ────────────────────────────────────────────────────
   const dropdown = document.getElementById("scenario-select") as HTMLSelectElement;
   for (const key of Object.keys(scenarios)) {
@@ -151,6 +207,8 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       return;
     }
+    // Spec: specs/playground.md § 12.2 — scenario switch pushes a history entry
+    history.pushState(null, "", buildHash(dropdown.value, null));
     void boot(s);
   });
 
@@ -227,6 +285,10 @@ document.addEventListener("DOMContentLoaded", () => {
       if (engineState?.isRealtime) schedulePoll();
       else refreshUI();
     },
+    // Spec: specs/playground.md § 12.2 — tab switches replace the history entry
+    onTabChange(tab: string) {
+      history.replaceState(null, "", buildHash(dropdown.value, tab));
+    },
   });
 
   // ── Dev tools ─────────────────────────────────────────────────────────────
@@ -246,6 +308,8 @@ document.addEventListener("DOMContentLoaded", () => {
     onConfigReload: async (newScenario: ScenarioDefinition) => {
       if (isDirty && !confirm("Reloading config will discard all record changes. Continue?")) return;
       await boot(newScenario);
+      // Spec: specs/playground.md § 12.2 — config reload replaces (same scenario, different config)
+      history.replaceState(null, "", buildHash(dropdown.value, null));
     },
   });
 
@@ -293,7 +357,38 @@ document.addEventListener("DOMContentLoaded", () => {
     window.addEventListener("mouseup", onUp);
   });
 
-  void boot(currentScenario);
+  // ── Initial load from URL hash (Spec: specs/playground.md § 12.3) ──────────────
+  const initHash = parseHash();
+  const initScenarioKey = (initHash.scenario && scenarios[initHash.scenario])
+    ? initHash.scenario
+    : defaultScenarioKey;
+  if (initScenarioKey !== defaultScenarioKey) {
+    for (const opt of Array.from(dropdown.options)) opt.selected = opt.value === initScenarioKey;
+  }
+  const initScenario = scenarios[initScenarioKey]!;
+
+  void boot(initScenario).then(() => {
+    if (initHash.tab) systemsPane?.setActiveTab(initHash.tab);
+    // Normalise the URL without adding a history entry (hash may be absent or partial)
+    history.replaceState(null, "", buildHash(initScenarioKey, initHash.tab));
+  });
+
+  // ── popstate (back/forward navigation) ─────────────────────────
+  // Spec: specs/playground.md § 12.4
+  window.addEventListener("popstate", () => {
+    const h = parseHash();
+    const key = (h.scenario && scenarios[h.scenario]) ? h.scenario : defaultScenarioKey;
+    const prevKey = dropdown.value;
+    for (const opt of Array.from(dropdown.options)) opt.selected = opt.value === key;
+    if (isDirty && !confirm("You have unsaved changes that will be lost. Navigate away?")) {
+      for (const opt of Array.from(dropdown.options)) opt.selected = opt.value === prevKey;
+      history.pushState(null, "", buildHash(prevKey, null));
+      return;
+    }
+    void boot(scenarios[key]!).then(() => {
+      if (h.tab) systemsPane?.setActiveTab(h.tab);
+    });
+  });
 });
 
 // ─── UI refresh (no engine ingest) ───────────────────────────────────────────

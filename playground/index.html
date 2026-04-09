@@ -43,6 +43,28 @@
       accent-color: #4ec94e; width: 13px; height: 13px; cursor: pointer;
     }
 
+    /* ── Version badge ───────────────────────────────────────────────────── */
+    /* Spec: specs/playground.md § 2.5 */
+    .version-badge {
+      font-size: 11px; color: #3a3a3a; font-family: monospace;
+      margin-left: -8px; /* tuck closer to brand */
+    }
+
+    /* ── Update notification ─────────────────────────────────────────────── */
+    /* Spec: specs/playground.md § 2.5 */
+    .update-notification {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; background: #0f1e2a; color: #5aafdf;
+      border: 1px solid #1e4a6a; border-radius: 4px;
+      padding: 2px 8px; text-decoration: none; white-space: nowrap;
+    }
+    .update-notification:hover { background: #142435; color: #7ec8f0; }
+    .update-notification-dismiss {
+      color: #2a5a70; cursor: pointer; font-size: 10px; line-height: 1;
+      padding: 0 2px; user-select: none;
+    }
+    .update-notification-dismiss:hover { color: #5a90a8; }
+
     /* ── Poll countdown bar (inline pill next to auto toggle) ────────────── */
     /* Spec: specs/playground.md § 10 */
     #poll-countdown {
@@ -636,6 +658,28 @@
     .ld-line-passthrough { stroke-dasharray: 4 3; }
     .ld-line-focused { stroke: #a78bfa; stroke-width: 2; opacity: 1; }
     .ld-line-dimmed { opacity: 0.08; }
+
+    /* ── Unmapped entity pool — Spec: specs/playground.md § 11.14 ───────── */
+    .ld-unassigned-pool {
+      border-top: 1px solid #1e1e2e;
+      padding: 16px 24px 24px;
+      display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
+      opacity: 0.65;
+    }
+    .ld-pool-label {
+      font-size: 10px; color: #4a4a6a; font-family: monospace;
+      text-transform: uppercase; letter-spacing: 0.8px;
+      padding-top: 3px; flex-shrink: 0; white-space: nowrap;
+    }
+    .ld-pool-pills {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .ld-pool-entity {
+      background: #151520; border: 1px solid #252535;
+      border-radius: 4px; padding: 3px 10px;
+      font-size: 10px; font-family: monospace; color: #5a5a80;
+      white-space: nowrap; font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -643,6 +687,7 @@
 <!-- Top bar -->
 <div id="topbar">
   <span class="brand">OpenSync Playground</span>
+  <span id="app-version" class="version-badge"></span>
   <label for="scenario-select">Scenario:</label>
   <select id="scenario-select"></select>
   <span id="status" class="status loading">starting…</span>
@@ -657,6 +702,11 @@
   <span id="poll-hint" class="poll-hint"></span>
   <button id="btn-sync" disabled title="Disable auto-sync to use manual sync">Sync</button>
   <button id="btn-reset">Reset</button>
+  <!-- Update notification: shown when a newer GitHub release exists. Spec: specs/playground.md § 2.5 -->
+  <a id="update-notification" class="update-notification" hidden target="_blank" rel="noopener noreferrer">
+    <span id="update-notification-text"></span>
+    <span class="update-notification-dismiss" id="dismiss-update" title="Dismiss">&#x2715;</span>
+  </a>
 </div>
 
 <!-- Main layout -->

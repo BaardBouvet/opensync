@@ -31,10 +31,12 @@ describe("playground scenarios", () => {
       });
 
       // SC2 — at least one channel is produced so the engine has something to boot
+      //       (exempted when the scenario deliberately declares channels: [] — e.g. "empty")
       it("SC2 — produces at least one channel", () => {
         const p = MappingsFileSchema.parse(parseYaml(scenario.yaml));
         const channels = buildChannelsFromEntries(p.channels ?? [], p.mappings ?? []);
-        expect(channels.length).toBeGreaterThan(0);
+        const allowEmpty = (p.channels ?? []).length === 0;
+        expect(channels.length).toBeGreaterThanOrEqual(allowEmpty ? 0 : 1);
       });
 
       // SC3 — label is non-empty
