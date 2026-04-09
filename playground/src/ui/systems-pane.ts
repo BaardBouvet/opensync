@@ -492,7 +492,14 @@ export function createSystemsPane(
       // Only mount once per config — poll refreshes must not rebuild the diagram (that
       // would destroy interactive state), but a config change (Apply) must force a rebuild.
       // Spec: specs/playground.md § 11
-      const channelsKey = channels.map((c) => c.id + ":" + c.members.map((m) => m.connectorId + "/" + m.entity).join(",")).join("|");
+      const channelsKey = channels.map((c) =>
+        c.id + ":" +
+        c.members.map((m) => {
+          const inFields = m.inbound?.map((f) => `${f.source ?? f.target}>${f.target}`).join("+") ?? "*";
+          const outFields = m.outbound?.map((f) => `${f.source ?? f.target}>${f.target}`).join("+") ?? "*";
+          return `${m.connectorId}/${m.entity}[${inFields}|${outFields}]`;
+        }).join(",")
+      ).join("|");
       if (!channelArea.querySelector(".ld-map-host") || channelsKey !== lastChannelsKey) {
         lastChannelsKey = channelsKey;
         renderLineageContent(channels, systems);
