@@ -76,37 +76,51 @@ The connector never decides whether to split or combine — that's the engine's 
 
 See [discovery.md](discovery.md) for how existing records across systems are matched and linked during onboarding.
 
-## Field-Value-Based Matching (`identityFields` and `identityGroups`)
+## Field-Value-Based Matching (`identity`)
 
 Beyond tracking IDs that the engine itself inserts, the engine can match records across connectors using shared field values — for example, recognising that a HubSpot contact and a Fiken customer with the same email address are the same real-world person.
 
-This is configured per channel with the `identityFields` list:
+This is configured per channel with the `identity` key, which accepts two forms:
+
+**Shorthand (string list)** — each field is its own OR group:
 
 ```yaml
 channels:
   - id: contacts
-    identityFields:
+    identity:
       - email
 ```
 
-When `identityFields` is set on a channel, the engine queries `shadow_state` for any existing row in another connector whose stored canonical values for those fields match the incoming record, before allocating a new canonical UUID. If a match is found, the incoming record is linked to the existing entity rather than creating a duplicate.
+**Compound form (object list)** — AND-within-group, OR-across-groups:
+
+```yaml
+channels:
+  - id: contacts
+    identity:
+      - fields: [email]
+      - fields: [firstName, lastName, dob]
+```
+
+A mixed array (some strings, some objects) is a parse-time error. Use one form or the other.
+
+When `identity` is set on a channel, the engine queries `shadow_state` for any existing row in another connector whose stored canonical values for those fields match the incoming record, before allocating a new canonical UUID. If a match is found, the incoming record is linked to the existing entity rather than creating a duplicate.
 
 The search spans all entity names used by the channel's other members, not only the source member's entity name. This ensures that records are correctly linked when channel members use different entity names (e.g. webshop `order_lines` vs. ERP `orderLines` in an array-expansion channel).
 
-`identityFields` is also the primary mechanism for linking records during initial onboarding (when running `opensync match` and `opensync link`). After onboarding, the engine relies on identity map lookups by external ID and only falls back to field matching if a record arrives that has never been seen before.
+`identity` is also the primary mechanism for linking records during initial onboarding (when running `opensync match` and `opensync link`). After onboarding, the engine relies on identity map lookups by external ID and only falls back to field matching if a record arrives that has never been seen before.
 
 **Trade-offs:**
 - Fields used for matching must be stable and trustworthy across systems. Email is a good candidate; names and phone numbers are not (formatting differences cause false misses).
-- Multi-field identity (`email` + `organizationId`) reduces false positives but means both fields must match — see `identityGroups` below for AND-within-group, OR-across-groups semantics.
+- Multi-field identity (`email` + `organizationId`) reduces false positives but means both fields must match — see § Compound Identity Groups below for AND-within-group, OR-across-groups semantics.
 - Transitive closure is supported: A matches B via email, B matches C via tax ID → A = B = C. See § Transitive Closure below.
 
 ### Transitive Closure
 
 Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
 
-Identity fields are matched using a **union-find (connected-components)** algorithm, not a composite key. Each `identityField` (or `identityGroup`) is processed independently. Records that share a value on ANY identity field or group are unioned into the same component, even if they share no OTHER field values.
+Identity fields are matched using a **union-find (connected-components)** algorithm, not a composite key. Each group in `identity` is processed independently. Records that share a value on ANY group are unioned into the same component, even if they share no OTHER field values.
 
-Example — three systems A, B, C with `identityFields: [email, taxId]`:
+Example — three systems A, B, C with `identity: [email, taxId]`:
 
 | Record | email               | taxId |
 |--------|---------------------|-------|
@@ -120,22 +134,22 @@ A and B share `email` → unioned. B and C share `taxId` → unioned. Therefore 
 
 **Ambiguity rule**: if two records from the _same_ connector end up in the same component (intra-connector duplicates bridged via an identity field to a record in another connector), the engine cannot determine which record to link. The entire component is placed in `uniquePerSide` with a console warning. This avoids silently creating incorrect links.
 
-### Compound Identity Groups (`identityGroups`)
+### Compound Identity Groups
 
 Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
 
-For AND-semantics — requiring ALL fields in a tuple to match — use `identityGroups`:
+For AND-semantics — requiring ALL fields in a tuple to match — use the object form of `identity`:
 
 ```yaml
 channels:
   - id: contacts
     # Group 1: email alone (OR-able with group 2)
     # Group 2: all three of firstName + lastName + dob must match together
-    identityGroups:
+    identity:
       - fields: [email]
       - fields: [firstName, lastName, dob]
 ```
 
 A record satisfies a group only when **all** fields in that group are present and non-empty. Groups are OR-ed across: satisfying ANY group links the records. Within each group the AND-semantics prevents false positives from partial field matches.
 
-`identityGroups` takes precedence over `identityFields` when both are present (a warning is emitted). Internally, `identityFields` is expanded to one single-field group per field before matching — so `identityFields: [email, taxId]` is equivalent to `identityGroups: [{ fields: [email] }, { fields: [taxId] }]`.
+Internally, the shorthand string form `identity: [email, taxId]` is equivalent to the compound form `identity: [{fields: [email]}, {fields: [taxId]}]` — each string becomes a single-field group.

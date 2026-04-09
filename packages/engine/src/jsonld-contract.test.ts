@@ -131,7 +131,7 @@ describe("JLC1: connector Ref value → engine extracts association → dispatch
             { connectorId: "src", entity: "companies" },
             { connectorId: "tgt", entity: "companies" },
           ],
-          identityFields: ["domain"],
+          identity: ["domain"],
         },
         {
           id: "contacts",
@@ -139,10 +139,10 @@ describe("JLC1: connector Ref value → engine extracts association → dispatch
             { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
             { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
-          identityFields: ["email"],
+          identity: ["email"],
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -257,17 +257,17 @@ describe("JLC3: { type: 'ref' } schema field drives association inference", () =
         { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
       channels: [
-        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identityFields: ["domain"] },
+        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identity: ["domain"] },
         {
           id: "contacts",
           members: [
             { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
             { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
-          identityFields: ["email"],
+          identity: ["email"],
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -369,17 +369,17 @@ describe("JLC4: schema[field].entity drives association inference when @entity a
         { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
       channels: [
-        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identityFields: ["domain"] },
+        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identity: ["domain"] },
         {
           id: "contacts",
           members: [
             { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
             { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
-          identityFields: ["email"],
+          identity: ["email"],
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -466,9 +466,9 @@ describe("JLC5: Ref-shaped value treated as opaque when no inference rule applie
           { connectorId: "src", entity: "contacts" },
           { connectorId: "tgt", entity: "contacts" },
         ],
-        identityFields: ["email"],
+        identity: ["email"],
       }],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -598,8 +598,8 @@ describe("JLC7: inexpressible predicates preserved as Ref values in data on upda
         { id: "crm", connector: crmConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
         { id: "erp", connector: erpConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
-      channels: [{ id: "contacts", members, identityFields: ["email"] }],
-      conflict: { strategy: "lww" },
+      channels: [{ id: "contacts", members, identity: ["email"] }],
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -703,7 +703,7 @@ describe("ASYN1: plain string FK field + schema { type: 'ref' } → engine synth
             { connectorId: "src", entity: "companies" },
             { connectorId: "tgt", entity: "companies" },
           ],
-          identityFields: ["domain"],
+          identity: ["domain"],
         },
         {
           id: "contacts",
@@ -711,10 +711,10 @@ describe("ASYN1: plain string FK field + schema { type: 'ref' } → engine synth
             { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
             { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
-          identityFields: ["email"],
+          identity: ["email"],
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -806,7 +806,7 @@ describe("ASYN2: plain string + no schema ref declaration → not synthesized (o
         {
           id: "companies",
           members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }],
-          identityFields: ["domain"],
+          identity: ["domain"],
         },
         {
           id: "contacts",
@@ -814,10 +814,10 @@ describe("ASYN2: plain string + no schema ref declaration → not synthesized (o
             { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
             { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
           ],
-          identityFields: ["email"],
+          identity: ["email"],
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 

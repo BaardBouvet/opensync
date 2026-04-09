@@ -81,10 +81,10 @@ function makeConfig(crmUrl: string, erpUrl: string): ResolvedConfig {
           { connectorId: "crm", entity: "contacts" },
           { connectorId: "erp", entity: "employees" },
         ],
-        identityFields: ["email"],
+        identity: ["email"],
       },
     ],
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 10_000,
   };
 }
@@ -640,5 +640,59 @@ describe("T10: RecordSyncResult payload fields", () => {
 
     const result = await engine.onboard("contacts", report, { dryRun: true });
     expect(result.inserts).toEqual([]);
+  });
+});
+
+// ─── T49: splitCluster — linked cluster breaks apart ─────────────────────────
+
+describe("T49: splitCluster breaks a linked cluster into individual records", () => {
+  it("removes the shared canonical_id so identity_map has two independent rows", async () => {
+    // Seed matching records so onboarding links them into one cluster.
+    crm.seed([{ id: "c1", name: "Alice Liddell", email: "alice@example.com" }]);
+    erp.seed([{ id: "e1", name: "Alice Liddell", email: "alice@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await runOnboarding(engine);
+
+    // Confirm one linked cluster exists and extract its canonical id.
+    const identityMap = engine.getChannelIdentityMap("contacts");
+    expect(identityMap.size).toBe(1);
+    const [canonicalId, members] = [...identityMap.entries()][0]!;
+    expect(members.size).toBe(2);
+    expect(members.get("crm")).toBe("c1");
+    expect(members.get("erp")).toBe("e1");
+
+    // Split the cluster.
+    engine.splitCluster(canonicalId);
+
+    // Now identity_map should show two independent clusters (each with one member).
+    const after = engine.getChannelIdentityMap("contacts");
+    expect(after.size).toBe(2);
+    for (const [newId, newMembers] of after) {
+      expect(newId).not.toBe(canonicalId);
+      expect(newMembers.size).toBe(1);
+    }
+    // Each original external ID must still be present under some canonical_id.
+    const allExternalIds = [...after.values()].flatMap((m) => [...m.values()]);
+    expect(allExternalIds.sort()).toEqual(["c1", "e1"]);
+  });
+
+  it("is a no-op when the cluster has only one member", async () => {
+    crm.seed([{ id: "c1", name: "Solo", email: "solo@example.com" }]);
+
+    const db = makeTempDb();
+    const engine = new SyncEngine(makeConfig(crm.baseUrl, erp.baseUrl), db);
+    await engine.ingest("contacts", "crm", { collectOnly: true });
+    // Do NOT ingest erp — crm has a provisional self-only cluster.
+
+    const before = engine.getChannelIdentityMap("contacts");
+    const [[canonicalId]] = [...before.entries()];
+    engine.splitCluster(canonicalId!);
+
+    // Identity map must be unchanged.
+    const after = engine.getChannelIdentityMap("contacts");
+    expect(after.size).toBe(before.size);
+    expect([...after.keys()][0]).toBe(canonicalId);
   });
 });

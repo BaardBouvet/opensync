@@ -50,8 +50,8 @@ function makeConfig(
       { id: "src", connector: src, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       { id: "tgt", connector: tgt, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
     ],
-    channels: [{ id: "ch", members, identityFields: ["email"] }],
-    conflict: { strategy: "lww" },
+    channels: [{ id: "ch", members, identity: ["email"] }],
+    conflict: {},
     readTimeoutMs: 10_000,
   };
 }
@@ -499,8 +499,8 @@ describe("AS-7: target-local associations not expressible by source are preserve
         { id: "crm", connector: crmConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
         { id: "erp", connector: erpConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
-      channels: [{ id: "contacts", members: members7, identityFields: ["email"] }],
-      conflict: { strategy: "lww" },
+      channels: [{ id: "contacts", members: members7, identity: ["email"] }],
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 

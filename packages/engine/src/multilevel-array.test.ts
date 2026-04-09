@@ -561,10 +561,10 @@ function makeTwoLevelConfig(erpConnector: Connector, warehouseConnector: Connect
             ],
           },
         ],
-        identityFields: ["compNo"],
+        identity: ["compNo"],
       },
     ],
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 30_000,
   };
 }
@@ -721,9 +721,9 @@ describe("ML10: single-level member works unchanged", () => {
             outbound: [{ source: "lineNo", target: "lineNo" }, { source: "sku", target: "sku" }, { source: "qty", target: "qty" }],
           },
         ],
-        identityFields: ["lineNo"],
+        identity: ["lineNo"],
       }],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 30_000,
     };
     const engine = new SyncEngine(config, db);
@@ -760,9 +760,9 @@ function makeSingleLevelConfig(erpConn: Connector, shopConn: Connector): Resolve
           outbound: [{ source: "lineNo", target: "lineNo" }, { source: "sku", target: "sku" }, { source: "qty", target: "quantity" }, { source: "price", target: "unitPrice" }],
         },
       ],
-      identityFields: ["lineNo"],
+      identity: ["lineNo"],
     }],
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 30_000,
   };
 }
@@ -1000,9 +1000,9 @@ describe("EF1: elementFilter skips elements that do not match", () => {
             outbound: [{ source: "lineNo", target: "lineNo" }, { source: "sku", target: "sku" }, { source: "qty", target: "qty" }],
           },
         ],
-        identityFields: ["lineNo"],
+        identity: ["lineNo"],
       }],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 30_000,
     };
 
@@ -1056,9 +1056,9 @@ describe("EF2: elementReverseFilter blocks patches when it returns false", () =>
             outbound: [{ source: "lineNo", target: "lineNo" }, { source: "qty", target: "quantity" }],
           },
         ],
-        identityFields: ["lineNo"],
+        identity: ["lineNo"],
       }],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 30_000,
     };
 

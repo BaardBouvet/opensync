@@ -25,10 +25,10 @@ export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>;
 
 // ─── mappings/*.yaml — channel definitions ────────────────────────────────────
 
-export const ConflictStrategySchema = z.enum(["lww", "field_master", "origin_wins"]);
+export const ConflictStrategySchema = z.enum(["field_master", "origin_wins"]);
 
 export const ConflictConfigSchema = z.object({
-  strategy: ConflictStrategySchema,
+  strategy: ConflictStrategySchema.optional(),
   fieldMasters: z.record(z.string(), z.string()).optional(),
   connectorPriorities: z.record(z.string(), z.number()).optional(),
   fieldStrategies: z.record(
@@ -41,11 +41,18 @@ export const IdentityGroupSchema = z.object({
   fields: z.array(z.string()).min(1),
 });
 
+// Spec: specs/agent-assistance.md §4.2 — one polymorphic key rather than two keys with a
+// precedence rule. `string[]` is the shorthand (each string becomes its own OR group);
+// `IdentityGroup[]` is the compound form (AND-within-group, OR-across-groups).
+// A mixed array (some strings, some objects) is a schema error caught at parse time.
+export const IdentitySchema = z.union([
+  z.array(z.string()),
+  z.array(IdentityGroupSchema),
+]);
+
 export const ChannelDefSchema = z.object({
   id: z.string(),
-  identityFields: z.array(z.string()).optional(),
-  identityGroups: z.array(IdentityGroupSchema).optional(),
-  conflict_resolution: ConflictStrategySchema.optional(),
+  identity: IdentitySchema.optional(),
 });
 
 export type IdentityGroup = z.infer<typeof IdentityGroupSchema>;

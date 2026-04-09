@@ -1,6 +1,6 @@
 channels:
   - id: companies
-    identityFields:
+    identity:
       - domain
 
 mappings:

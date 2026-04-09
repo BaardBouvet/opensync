@@ -8,10 +8,8 @@ const scenario: ScenarioDefinition = {
   yaml: `
 channels:
   - id: contacts
-    identityFields: [email]
+    identity: [email]
 
-conflict:
-  strategy: lww
 
 mappings:
   - connector: system-a

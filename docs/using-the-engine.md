@@ -126,11 +126,11 @@ const config: ResolvedConfig = {
     },
   ],
   // How to resolve competing field values when two systems disagree.
-  // 'lww' = last-write-wins based on timestamps.
+  // Default (no strategy) = last-write-wins based on timestamps.
   // 'field_master' = a named connector always wins for declared fields.
   // This is the engine-wide default. Per-channel and per-connector overrides
   // are not yet supported — see plans/engine/PLAN_ENGINE_API_ERGONOMICS.md.
-  conflict: { strategy: 'lww' },
+  conflict: {},
   // Hard ceiling on how long a connector's read() generator may run.
   // Exceeded → ingest rejects with a timeout error.
   // Engine-wide default; per-connector overrides are not yet supported.

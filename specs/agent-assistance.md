@@ -81,6 +81,60 @@ known.
 
 ---
 
+## § 4 Config Schema Design for Agents
+
+### § 4.1 The Principle
+
+OpenSync's configuration schema is deliberately designed to be unambiguous when read by a
+language model. An agent producing YAML should never need to read multiple paragraphs of
+documentation to determine which key to write or whether two keys can coexist.
+
+### § 4.2 Design Rules
+
+**One key per concept.** Two keys for the same concept with a precedence rule between them
+doubles the schema surface and forces the agent to track a runtime ordering that is invisible
+in the generated YAML. A single polymorphic key is always preferable.
+
+**Polymorphism via value shape, not key name.** If a concept has a simple form and a compound
+form, express both through the same key. The agent detects which form to use from the value
+structure (array of strings vs. array of objects), not from naming.
+
+```yaml
+# Simple form — agent writes this when single-field matching is enough
+identity: [email]
+
+# Compound form — agent writes this when AND-within-group semantics are needed
+identity:
+  - fields: [firstName, lastName, dob]
+```
+
+An agent that encounters neither form has written an error that is caught at parse time —
+not a silent runtime mismatch.
+
+**Mutual exclusivity at the schema level, not at runtime.** Conflicting options should be
+structurally impossible to express, not silently resolved by a runtime precedence rule. If
+an agent writes both, the config parser rejects it before any sync runs.
+
+**No future placeholders.** Keys with `# future` comments and no runtime effect are noise.
+An agent generating config from the schema will include them and generate invalid or
+no-op configs. Unimplemented keys must be absent from the schema until they work.
+
+### § 4.3 Application to `identity`
+
+`identity` replaces the former `identityFields` / `identityGroups` pair:
+
+| Old form (two keys) | New form (one key) |
+|---------------------|--------------------|
+| `identityFields: [email, taxId]` | `identity: [email, taxId]` |
+| `identityGroups: [{fields: [email]}, {fields: [first, last, dob]}]` | `identity: [{fields: [email]}, {fields: [first, last, dob]}]` |
+| both present (precedence rule) | parse error |
+
+The Zod schema accepts `string[]` or `IdentityGroup[]` (but not a mixed array). Mixed-array
+inputs are a parse-time error with a clear message. The agent never needs to know about
+precedence.
+
+---
+
 ## § 4 Constraint: No Engine or Database Imports in Agents
 
 Agents that write connectors must only import from `@opensync/sdk`. They must not:

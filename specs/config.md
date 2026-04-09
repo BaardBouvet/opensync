@@ -150,25 +150,29 @@ Optional channel metadata:
 ```yaml
 channels:
   - id: contacts
-    # identityFields: OR-per-field matching. Each field is its own group.
+    # identity: field-value-based record matching. Two forms:
+    #
+    # Shorthand (string list) — each field is its own OR group.
     # Records sharing a value on ANY listed field are linked (transitive).
-    # See identity.md for full semantics.
-    identityFields:
+    identity:
       - email
       - taxId
 
-    # identityGroups: compound (AND-within-group, OR-across-groups). Takes precedence
-    # over identityFields when both are present.
-    # identityGroups:
+    # Compound form (object list) — AND-within-group, OR-across-groups.
+    # All fields in a group must match simultaneously to link two records.
+    # identity:
     #   - fields: [email]
     #   - fields: [firstName, lastName, dob]
 
-    conflict_resolution: lww        # last-write-wins (future)
     circuit_breaker:                # future
       volume_threshold: 100
 ```
 
-`identityFields` / `identityGroups` are the primary configuration point for field-value-based record matching. When set, the engine uses a union-find (connected-components) algorithm to identify records that represent the same real-world entity across connectors, supporting transitive chains (A=B via email, B=C via taxId → A=B=C). See `specs/identity.md § Field-Value-Based Matching` for full semantics, trade-offs, and the compound-group (`identityGroups`) syntax.
+`identity` is the primary configuration point for field-value-based record matching. When set,
+the engine uses a union-find (connected-components) algorithm to identify records that represent
+the same real-world entity across connectors, supporting transitive chains (A=B via email,
+B=C via taxId → A=B=C). See `specs/identity.md § Field-Value-Based Matching` for full semantics,
+trade-offs, and compound-group syntax.
 
 ---
 

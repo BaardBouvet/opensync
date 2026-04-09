@@ -203,7 +203,7 @@ function makeArrayConfig(erpConnector: Connector, crmConnector: Connector): Reso
         ],
       },
     ],
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 10_000,
   };
 }
@@ -509,11 +509,11 @@ describe("Nested array expansion — integration", () => {
         {
           id: "order-lines",
           // Compound identity group: both fields must match simultaneously.
-          identityGroups: [{ fields: ["lineNumber", "sku"] }],
+          identity: [{ fields: ["lineNumber", "sku"] }],
           members: makeArrayConfig(makeErpConnector(orders), crmConnector).channels[0]!.members,
         },
       ],
-      conflict: { strategy: "lww" },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 

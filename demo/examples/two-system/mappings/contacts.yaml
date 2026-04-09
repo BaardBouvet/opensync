@@ -1,6 +1,6 @@
 channels:
   - id: contacts
-    identityFields:
+    identity:
       - email
 
 mappings:

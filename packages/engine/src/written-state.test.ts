@@ -66,10 +66,10 @@ function makeConfig(crmUrl: string, erpUrl: string): ResolvedConfig {
           { connectorId: "crm", entity: "contacts" },
           { connectorId: "erp", entity: "employees" },
         ],
-        identityFields: ["email"],
+        identity: ["email"],
       },
     ],
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 10_000,
   };
 }

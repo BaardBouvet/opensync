@@ -13,11 +13,11 @@
  *         After ingest, the two canonicals are merged.
  * T-TC-5  addConnector bridge: joiner record matches two separate existing canonicals via
  *         different fields. After addConnector they share one canonical.
- * T-LG-1  identityGroups compound group: no match when only some fields of the group are present.
- * T-LG-2  identityGroups compound group + transitive: A has email; B has email+name+dob; C has name+dob.
+ * T-LG-1  identity compound group: no match when only some fields of the group are present.
+ * T-LG-2  identity compound group + transitive: A has email; B has email+name+dob; C has name+dob.
  *         A matches B via email group; C matches B via compound group → A=B=C.
- * T-LG-3  identityGroups at ingest-time via _resolveCanonical compound group.
- * T-LG-4  identityGroups takes precedence over identityFields when both present.
+ * T-LG-3  identity compound group at ingest-time via _resolveCanonical.
+ * T-LG-4  identity compound group: only declared fields trigger a match; sharing unlisted fields does not.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -59,8 +59,8 @@ function makeEngine(
   return new SyncEngine(
     {
       connectors,
-      channels: [{ id: "ch", members, identityFields: ["email", "taxId"], ...channelOverride }],
-      conflict: { strategy: "lww" },
+      channels: [{ id: "ch", members, identity: ["email", "taxId"], ...channelOverride }],
+      conflict: {},
       readTimeoutMs: 10_000,
     },
     db,
@@ -141,7 +141,7 @@ describe("T-TC-2: four-leg transitive chain (email → taxId → phone)", () => 
         { connectorId: "C", entity: "contacts" },
         { connectorId: "D", entity: "contacts" },
       ],
-      { identityFields: ["email", "taxId", "phone"] },
+      { identity: ["email", "taxId", "phone"] },
     );
 
     for (const id of ["A", "B", "C", "D"]) {
@@ -181,7 +181,7 @@ describe("T-TC-3: ambiguous component — same-connector duplicate bridged to an
     const engine = makeEngine(db, [inst("A", dA), inst("B", dB)], [
       { connectorId: "A", entity: "contacts" },
       { connectorId: "B", entity: "contacts" },
-    ], { identityFields: ["email"] });
+    ], { identity: ["email"] });
 
     await engine.ingest("ch", "A", { batchId: crypto.randomUUID(), collectOnly: true });
     await engine.ingest("ch", "B", { batchId: crypto.randomUUID(), collectOnly: true });
@@ -257,8 +257,8 @@ describe("T-TC-5: addConnector bridges a fully-linked canonical and a provisiona
 
     const cfg = (connectors: ResolvedConfig["connectors"], mems: { connectorId: string; entity: string }[]): ResolvedConfig => ({
       connectors,
-      channels: [{ id: "ch", members: mems, identityFields: ["email", "taxId"] }],
-      conflict: { strategy: "lww" },
+      channels: [{ id: "ch", members: mems, identity: ["email", "taxId"] }],
+      conflict: {},
       readTimeoutMs: 10_000,
     });
 
@@ -328,9 +328,9 @@ describe("T-LG-1: identityGroups compound group — no partial match", () => {
             { connectorId: "A", entity: "contacts" },
             { connectorId: "B", entity: "contacts" },
           ],
-          identityGroups: [{ fields: ["firstName", "lastName", "dob"] }],
+          identity: [{ fields: ["firstName", "lastName", "dob"] }],
         }],
-        conflict: { strategy: "lww" },
+        conflict: {},
         readTimeoutMs: 10_000,
       },
       db,
@@ -367,12 +367,12 @@ describe("T-LG-2: identityGroups compound group + transitive", () => {
             { connectorId: "B", entity: "contacts" },
             { connectorId: "C", entity: "contacts" },
           ],
-          identityGroups: [
+          identity: [
             { fields: ["email"] },
             { fields: ["firstName", "lastName", "dob"] },
           ],
         }],
-        conflict: { strategy: "lww" },
+        conflict: {},
         readTimeoutMs: 10_000,
       },
       db,
@@ -416,9 +416,9 @@ describe("T-LG-3: identityGroups compound group at _resolveCanonical ingest time
           { connectorId: "A", entity: "contacts" },
           { connectorId: "B", entity: "contacts" },
         ],
-        identityGroups: [{ fields: ["firstName", "lastName", "dob"] }],
+        identity: [{ fields: ["firstName", "lastName", "dob"] }],
       }],
-      conflict: { strategy: "lww" as const },
+      conflict: {},
       readTimeoutMs: 10_000,
     };
 
@@ -440,14 +440,14 @@ describe("T-LG-3: identityGroups compound group at _resolveCanonical ingest time
 
 // ─── T-LG-4 ──────────────────────────────────────────────────────────────────
 
-describe("T-LG-4: identityGroups takes precedence over identityFields when both present", () => {
-  it("uses identityGroups logic when both keys are present; identityFields is ignored", async () => {
+describe("T-LG-4: identity compound group — only declared fields trigger a match", () => {
+  it("records sharing an unlisted field are not matched when that field is not in any identity group", async () => {
     const db = openDb(":memory:");
     const [dA, dB] = [tmp(), tmp()];
 
-    // identityFields: [email] would match on email.
-    // identityGroups: [{ fields: ['taxId'] }] matches on taxId only.
-    // A has email only, B has taxId only — should NOT match when identityGroups wins.
+    // A has email only; B has taxId only.
+    // identity: [{ fields: ['taxId'] }] — only taxId matching.
+    // A and B share no taxId value → should NOT match.
     write(dA, "contacts.json", [{ id: "a1", data: { email: "alice@example.com" } }]);
     write(dB, "contacts.json", [{ id: "b1", data: { taxId: "123" } }]);
 
@@ -460,10 +460,9 @@ describe("T-LG-4: identityGroups takes precedence over identityFields when both 
             { connectorId: "A", entity: "contacts" },
             { connectorId: "B", entity: "contacts" },
           ],
-          identityFields: ["email"],
-          identityGroups: [{ fields: ["taxId"] }],
+          identity: [{ fields: ["taxId"] }],
         }],
-        conflict: { strategy: "lww" },
+        conflict: {},
         readTimeoutMs: 10_000,
       },
       db,
@@ -473,7 +472,7 @@ describe("T-LG-4: identityGroups takes precedence over identityFields when both 
     await engine.ingest("ch", "B", { batchId: crypto.randomUUID(), collectOnly: true });
     const report = await engine.discover("ch");
 
-    // identityGroups drives discovery — no taxId match → no match at all
+    // Compound group on taxId: A has no taxId → no match.
     expect(report.matched).toHaveLength(0);
     expect(report.uniquePerSide).toHaveLength(2);
   });

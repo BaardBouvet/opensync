@@ -145,11 +145,11 @@ export interface ChannelMember {
 export interface ChannelConfig {
   id: string;
   members: ChannelMember[];
-  identityFields?: string[];
-  /** Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
-   * Compound identity groups. Each group matches as an AND-tuple; groups are OR-ed across.
-   * Takes precedence over identityFields when both are present. */
-  identityGroups?: IdentityGroup[];
+  /** Spec: specs/agent-assistance.md §4.3 — single polymorphic key.
+   * `string[]` shorthand: each string is its own OR group.
+   * `IdentityGroup[]` compound form: AND-within-group, OR-across-groups.
+   * Normalised to IdentityGroup[] inside _resolveGroups before use. */
+  identity?: string[] | IdentityGroup[];
 }
 
 /** A resolved connector instance — plugin loaded, context wired, entities retrieved. */
@@ -171,7 +171,7 @@ export interface ConnectorInstance {
 }
 
 export interface ConflictConfig {
-  strategy: "lww" | "field_master" | "origin_wins";
+  strategy?: "field_master" | "origin_wins";
   fieldMasters?: Record<string, string>;
   connectorPriorities?: Record<string, number>;
   fieldStrategies?: Record<string, { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" | "origin_wins" }>;
@@ -281,7 +281,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
   return {
     connectors: connectorInstances,
     channels,
-    conflict: { strategy: "lww" },
+    conflict: {},
     readTimeoutMs: 30_000,
   };
 }
@@ -291,7 +291,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 // the browser playground (which parses YAML directly, without file I/O).
 
 export function buildChannelsFromEntries(
-  channelDefs: Array<{ id: string; identityFields?: string[]; identityGroups?: IdentityGroup[] }>,
+  channelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[] }>,
   mappingEntries: MappingEntry[],
 ): ChannelConfig[] {
   // Spec: specs/field-mapping.md §3.2 — build a global index of named mappings so
@@ -339,8 +339,7 @@ export function buildChannelsFromEntries(
     channelMap.set(chDef.id, {
       id: chDef.id,
       members: [],
-      identityFields: chDef.identityFields,
-      identityGroups: chDef.identityGroups,
+      identity: chDef.identity,
     });
   }
 

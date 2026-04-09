@@ -14,14 +14,12 @@ const scenario: ScenarioDefinition = {
   yaml: `
 channels:
   - id: orders
-    identityFields: [ref]
+    identity: [ref]
   - id: order-lines
     # Compound group: both orderRef AND lineNo must match to link records.
-    identityGroups:
+    identity:
       - fields: [orderRef, lineNo]
 
-conflict:
-  strategy: lww
 
 mappings:
   # ── Channel 1: orders ──────────────────────────────────────────────────────

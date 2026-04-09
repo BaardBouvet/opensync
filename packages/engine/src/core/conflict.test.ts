@@ -22,7 +22,7 @@ import { resolveConflicts } from "./conflict.js";
 import type { FieldData } from "../db/schema.js";
 import type { ConflictConfig, FieldMappingList } from "../config/loader.js";
 
-const lww: ConflictConfig = { strategy: "lww" };
+const lww: ConflictConfig = {};
 
 function shadow(fields: Record<string, { val: unknown; src: string; ts: number }>): FieldData {
   return Object.fromEntries(
@@ -104,7 +104,6 @@ describe("FG2: existing has higher priority (via connectorPriorities) — incomi
       city:   { val: "Springfield", src: "crm", ts: 50 },
     });
     const config: ConflictConfig = {
-      strategy: "lww",
       connectorPriorities: { crm: 1, erp: 2 },
     };
     const result = resolveConflicts(
@@ -264,7 +263,6 @@ describe("FG8: new record (no shadow) — all fields accepted regardless of grou
 describe("RS1: collect — first source sets initial scalar", () => {
   it("first source with no shadow: field accepted via fast-path → scalar returned as-is", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { tags: { strategy: "collect" } },
     };
     // No existing shadow (first ingest) → fast-path returns incoming unchanged
@@ -281,7 +279,6 @@ describe("RS1: collect — first source sets initial scalar", () => {
 describe("RS2: collect — second source appends to scalar → array", () => {
   it("second source sends a different value; accumulates into array", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { tags: { strategy: "collect" } },
     };
     const existingShadow = shadow({ tags: { val: "vip", src: "crm", ts: 100 } });
@@ -298,7 +295,6 @@ describe("RS2: collect — second source appends to scalar → array", () => {
 describe("RS3: collect — duplicate value not re-added", () => {
   it("third source sends same as existing element → array value unchanged (no new element)", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { tags: { strategy: "collect" } },
     };
     const existingShadow = shadow({ tags: { val: ["vip", "churned"], src: "crm", ts: 100 } });
@@ -316,7 +312,6 @@ describe("RS3: collect — duplicate value not re-added", () => {
 describe("RS4: collect — merges unique values from array source", () => {
   it("incoming is an array; unique elements are appended", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { tags: { strategy: "collect" } },
     };
     // existing has ["a", "b"], incoming is "c"
@@ -338,7 +333,6 @@ describe("RS4: collect — merges unique values from array source", () => {
 describe("BO1: bool_or — first source sends true: accepted", () => {
   it("incoming true accepted when shadow holds false", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
@@ -350,7 +344,6 @@ describe("BO1: bool_or — first source sends true: accepted", () => {
 describe("BO2: bool_or — first source sends false (no prior shadow): accepted via fast-path", () => {
   it("first ingest (no shadow) falls through to fast-path", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const result = resolveConflicts({ deleted: false }, undefined, "erp", 200, config);
@@ -361,7 +354,6 @@ describe("BO2: bool_or — first source sends false (no prior shadow): accepted 
 describe("BO3: bool_or — existing true, incoming false: no overwrite", () => {
   it("existing shadow = true; incoming false must not overwrite", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const existingShadow = shadow({ deleted: { val: true, src: "crm", ts: 100 } });
@@ -373,7 +365,6 @@ describe("BO3: bool_or — existing true, incoming false: no overwrite", () => {
 describe("BO4: bool_or — existing false, incoming true: updated to true", () => {
   it("shadow = false → incoming true causes update", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
@@ -385,7 +376,6 @@ describe("BO4: bool_or — existing false, incoming true: updated to true", () =
 describe("BO5: bool_or — both false: no change", () => {
   it("existing false, incoming false → no resolved field", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const existingShadow = shadow({ deleted: { val: false, src: "crm", ts: 100 } });
@@ -397,7 +387,6 @@ describe("BO5: bool_or — both false: no change", () => {
 describe("BO6: bool_or — null shadow, truthy string incoming: updated to true", () => {
   it("shadow = null/undefined, incoming truthy string → resolved to true", () => {
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { deleted: { strategy: "bool_or" } },
     };
     const existingShadow = shadow({ deleted: { val: null, src: "crm", ts: 100 } });
@@ -460,7 +449,6 @@ describe("ER5: resolve takes precedence over fieldStrategies", () => {
       { target: "score", resolve: (v, _acc) => String(v).toUpperCase() },
     ];
     const config: ConflictConfig = {
-      strategy: "lww",
       fieldStrategies: { score: { strategy: "collect" } },
     };
     const existingShadow = shadow({ score: { val: "alpha", src: "crm", ts: 100 } });

@@ -9,10 +9,8 @@ const scenario: ScenarioDefinition = {
   yaml: `
 channels:
   - id: companies
-    identityFields: [domain]
+    identity: [domain]
 
-conflict:
-  strategy: lww
 
 mappings:
   - connector: crm

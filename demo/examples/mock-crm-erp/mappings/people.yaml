@@ -1,6 +1,6 @@
 channels:
   - id: people
-    identityFields:
+    identity:
       - email
 
 mappings:
