@@ -66,7 +66,7 @@ interface FieldMapping {
 }
 
 interface ConflictConfig {
-  strategy:             "lww" | "field_master";
+  strategy?:            "field_master" | "origin_wins";
   fieldMasters?:        Record<string, string>;   // field → connectorId
   connectorPriorities?: Record<string, number>;   // connectorId → priority (lower wins)
   fieldStrategies?:     Record<string, { strategy: "coalesce" | "last_modified" | "collect" }>;
@@ -218,7 +218,33 @@ Shadow state serves three purposes:
 | Normal ingest, no change | Nothing (shadow matches incoming) |
 | Normal ingest, changed fields | Update row; write `prev` before overwriting `val` |
 | `onboard()` / `addConnector()` | Re-seed: update `canonical_id` to merged value |
+| `splitCluster()` | New UUID per connector; shadow rows updated to new canonical_ids |
 | Record deleted in source | Set `deleted_at` |
+
+---
+
+## § splitCluster
+
+`splitCluster(canonicalId: string): void`
+
+The inverse of the merge that occurs during `onboard()` / `addConnector()`. Assigns each
+connector row in the cluster its own fresh canonical_id so the records are no longer treated
+as the same real-world entity.
+
+**Tables updated atomically:**
+
+| Table | Change |
+|---|---|
+| `identity_map` | Each `(canonical_id, connector_id)` row gets a new unique `canonical_id` |
+| `shadow_state` | `canonical_id` updated per-connector to match the new value |
+| `written_state` | `canonical_id` updated per-connector |
+| `array_parent_map` | `parent_canon_id` re-pointed via child's connector identity |
+
+`transaction_log` is not modified — historical records remain intact under the old
+`canonical_id`.
+
+A no-op if the cluster has fewer than two connector members. Logs a structured message
+to `console.info` on every successful split.
 
 ---
 
@@ -247,7 +273,7 @@ values against the target connector's current shadow to decide which values to a
 
 ### Global strategies
 
-**`lww` (last-write-wins)** — the default. If `incoming.ts >= shadow[field].ts`, accept the
+**Last-write-wins (default)** — if `incoming.ts >= shadow[field].ts`, accept the
 incoming value. Otherwise drop it (the target already has something newer).
 
 **`field_master`** — a named connector always wins for declared fields. Other connectors'
@@ -265,7 +291,7 @@ Declared in `ConflictConfig.fieldStrategies` to override the global strategy for
 
 ```typescript
 interface ConflictConfig {
-  strategy:           "lww" | "field_master";
+  strategy?:          "field_master" | "origin_wins";
   fieldMasters?:      Record<string, string>;    // field → connectorId
   connectorPriorities?: Record<string, number>;  // connectorId → priority (lower = wins)
   fieldStrategies?:   Record<string, FieldStrategy>;
@@ -820,7 +846,7 @@ When a user changes their mapping configuration, the engine can re-process exist
 When the same field changes in multiple systems between sync cycles.
 
 ```typescript
-type ResolutionStrategy = 'field_master' | 'lww' | 'manual';
+type ResolutionStrategy = 'field_master' | 'manual';
 
 interface FieldRule {
   field: string;
@@ -852,14 +878,14 @@ function resolveConflicts(
 
 **field_master**: One system always wins for specific fields. Example: CRM is master for email/phone, ERP is master for invoice_address/vat_number. If a non-master system changes a mastered field, the change is rejected and the master's value is written back.
 
-**lww (Last Write Wins)**: The change with the most recent timestamp wins. Default fallback. Uses `FieldEntry.ts` for comparison.
+**Last Write Wins (default)**: The change with the most recent timestamp wins. Default fallback. Uses `FieldEntry.ts` for comparison.
 
 **manual**: Flag the conflict for human review. The record is paused (not synced) until resolved.
 
 ### Typical setup
 ```yaml
 conflict_resolution:
-  default: lww
+  default: field_master
   field_rules:
     - field: email
       strategy: field_master

@@ -57,6 +57,70 @@ export function dbMergeCanonicals(db: Db, keepId: string, dropId: string): void 
   db.prepare("UPDATE shadow_state SET canonical_id = ? WHERE canonical_id = ?").run(keepId, dropId);
 }
 
+/**
+ * Break a cluster apart: assign each connector row its own fresh canonical_id.
+ * Updates identity_map, shadow_state, written_state, and array_parent_map.
+ * Returns the list of new canonical IDs (one per connector that was in the cluster),
+ * or an empty array if the cluster had fewer than two members (nothing to split).
+ * Spec: specs/sync-engine.md § splitCluster
+ */
+export function dbSplitCluster(
+  db: Db,
+  canonicalId: string,
+): Array<{ connectorId: string; newCanonicalId: string }> {
+  const rows = db
+    .prepare<{ connector_id: string }>(
+      "SELECT connector_id FROM identity_map WHERE canonical_id = ?",
+    )
+    .all(canonicalId);
+
+  if (rows.length <= 1) return [];
+
+  // Build connector → new canonical_id mapping before touching any tables.
+  const mapping = new Map<string, string>();
+  for (const row of rows) {
+    mapping.set(row.connector_id, crypto.randomUUID());
+  }
+
+  // Capture array_parent_map children (via identity_map) before identity_map is modified.
+  const affectedChildren = db
+    .prepare<{ child_canon_id: string; connector_id: string }>(
+      `SELECT apm.child_canon_id, im.connector_id
+       FROM array_parent_map apm
+       JOIN identity_map im ON im.canonical_id = apm.child_canon_id
+       WHERE apm.parent_canon_id = ?`,
+    )
+    .all(canonicalId);
+
+  // Update identity_map, shadow_state, and written_state per connector.
+  for (const row of rows) {
+    const newId = mapping.get(row.connector_id)!;
+    db.prepare(
+      "UPDATE identity_map SET canonical_id = ? WHERE canonical_id = ? AND connector_id = ?",
+    ).run(newId, canonicalId, row.connector_id);
+    db.prepare(
+      "UPDATE shadow_state SET canonical_id = ? WHERE canonical_id = ? AND connector_id = ?",
+    ).run(newId, canonicalId, row.connector_id);
+    db.prepare(
+      "UPDATE written_state SET canonical_id = ? WHERE canonical_id = ? AND connector_id = ?",
+    ).run(newId, canonicalId, row.connector_id);
+  }
+
+  // Fix up array_parent_map so child entries point to the correct new parent canonical_id.
+  for (const child of affectedChildren) {
+    const parentNewId = mapping.get(child.connector_id);
+    if (parentNewId === undefined) continue;
+    db.prepare(
+      "UPDATE array_parent_map SET parent_canon_id = ? WHERE child_canon_id = ? AND parent_canon_id = ?",
+    ).run(parentNewId, child.child_canon_id, canonicalId);
+  }
+
+  return Array.from(mapping.entries()).map(([connectorId, newCanonicalId]) => ({
+    connectorId,
+    newCanonicalId,
+  }));
+}
+
 export function dbFindCanonicalByField(
   db: Db,
   entityName: string,

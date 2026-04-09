@@ -20,6 +20,8 @@ export interface SystemsPaneCallbacks {
   onSave: (systemId: string, entity: string, id: string | null, data: Record<string, unknown>, explicitId?: string) => void;
   onSoftDelete: (systemId: string, entity: string, id: string) => void;
   onRestore:    (systemId: string, entity: string, id: string) => void;
+  /** Break a linked cluster into individual records (each gets its own canonical_id). */
+  onSplitCluster: (canonicalId: string) => void;
   /** Called whenever the active tab changes (channel id, "__unmapped__", or "__lineage__").
    *  Used by main.ts to keep the URL hash in sync. Spec: specs/playground.md § 12.2 */
   onTabChange?: (tab: string) => void;
@@ -654,6 +656,19 @@ export function createSystemsPane(
       label.className = "cluster-label";
       label.textContent = cluster.canonicalId ? cluster.canonicalId.slice(0, 8) : "• unlinked";
       group.appendChild(label);
+
+      // Split button — only for linked clusters with ≥2 non-null slots.
+      if (
+        cluster.canonicalId !== null &&
+        cluster.slots.filter((s) => s !== null).length >= 2
+      ) {
+        const splitBtn = document.createElement("button");
+        splitBtn.className = "btn-cluster-split";
+        splitBtn.title = "Break up this cluster — each record gets its own identity";
+        splitBtn.textContent = "✂";
+        splitBtn.addEventListener("click", () => callbacks.onSplitCluster(cluster.canonicalId!));
+        group.appendChild(splitBtn);
+      }
 
       const cardsRow = document.createElement("div");
       cardsRow.className = "cluster-cards-row";

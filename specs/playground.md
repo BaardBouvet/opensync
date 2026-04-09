@@ -132,9 +132,6 @@ mappings:
     fields:
       - source: email_address
         target: email
-
-conflict:
-  strategy: lww
 ```
 
 ---

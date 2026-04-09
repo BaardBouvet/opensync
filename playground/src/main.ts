@@ -285,6 +285,13 @@ document.addEventListener("DOMContentLoaded", () => {
       if (engineState?.isRealtime) schedulePoll();
       else refreshUI();
     },
+    onSplitCluster(canonicalId) {
+      if (!engineState) return;
+      isDirty = true;
+      engineState.splitCluster(canonicalId);
+      refreshUI();
+      devTools?.refreshDbState();
+    },
     // Spec: specs/playground.md § 12.2 — tab switches replace the history entry
     onTabChange(tab: string) {
       history.replaceState(null, "", buildHash(dropdown.value, tab));

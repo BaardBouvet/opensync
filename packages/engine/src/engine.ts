@@ -22,6 +22,7 @@ import {
   dbGetExternalId,
   dbLinkIdentity,
   dbMergeCanonicals,
+  dbSplitCluster,
   dbFindCanonicalByField,
   dbFindCanonicalByGroup,
   dbGetAllCanonicals,
@@ -592,7 +593,6 @@ export class SyncEngine {
       });
     }
 
-    const identityFields = channel.identityFields ?? [];
     const groups = this._resolveGroups(channel);
 
     // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1
@@ -1006,6 +1006,27 @@ export class SyncEngine {
     return result;
   }
 
+  // ─── splitCluster ─────────────────────────────────────────────────────────
+
+  /**
+   * Break a cluster apart: each connector record in the cluster gets its own fresh
+   * canonical_id so they are no longer considered the same real-world entity.
+   * This is the inverse of the merge that happens during onboard() / addConnector().
+   *
+   * Identity_map, shadow_state, written_state, and array_parent_map are all updated
+   * atomically. A no-op if the cluster has fewer than two members.
+   *
+   * Spec: specs/sync-engine.md § splitCluster
+   */
+  splitCluster(canonicalId: string): void {
+    const splits = dbSplitCluster(this.db, canonicalId);
+    if (splits.length > 0) {
+      console.info(
+        `[opensync] cluster split: ${canonicalId} → [${splits.map((s) => s.newCanonicalId).join(", ")}]`,
+      );
+    }
+  }
+
   // ─── addConnector ─────────────────────────────────────────────────────────
 
   // Spec: specs/discovery.md
@@ -1042,7 +1063,6 @@ export class SyncEngine {
       canonical: shadowToCanonical(fieldData),
     }));
 
-    const identityFields = channel.identityFields ?? [];
     const groups = this._resolveGroups(channel);
 
     // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.1 / §3.1
@@ -1233,12 +1253,11 @@ export class SyncEngine {
     externalId: string,
     canonical: Record<string, unknown>,
     entityName: string,
-    identityFields: string[] | undefined,
     channel?: ChannelConfig,
   ): string {
     // Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.4
     // Collect-then-merge: find ALL canonicals matched by any identity group, merge them all.
-    const groups = channel ? this._resolveGroups(channel) : (identityFields ?? []).map((f) => ({ fields: [f] }));
+    const groups = channel ? this._resolveGroups(channel) : [];
     if (groups.length) {
       // Spec: specs/field-mapping.md §3.2 — when searching shadow_state for an existing
       // canonical, probe all entity names used by OTHER channel members in addition to the
@@ -1282,17 +1301,15 @@ export class SyncEngine {
 
   /**
    * Spec: plans/engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md §2.5
-   * Normalise identityFields/identityGroups to a single IdentityGroup[] list.
-   * identityGroups takes precedence when both are present.
+   * Normalise identity (string[] shorthand or IdentityGroup[] compound form) to IdentityGroup[].
    */
   private _resolveGroups(channel: ChannelConfig): IdentityGroup[] {
-    if (channel.identityGroups?.length) {
-      if (channel.identityFields?.length) {
-        console.warn(`[opensync] channel "${channel.id}": both identityFields and identityGroups are set; identityGroups takes precedence.`);
-      }
-      return channel.identityGroups;
+    const identity = channel.identity;
+    if (!identity?.length) return [];
+    if (typeof identity[0] === "string") {
+      return (identity as string[]).map((f) => ({ fields: [f] }));
     }
-    return (channel.identityFields ?? []).map((f) => ({ fields: [f] }));
+    return identity as IdentityGroup[];
   }
 
   /**
@@ -1983,13 +2000,13 @@ export class SyncEngine {
         sourceShadowAssociations: existingShadow ? parseSentinelAssociations(existingShadow) : undefined,
       });
 
-      const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel.identityFields, channel);
+      const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel);
 
       // Spec: specs/field-mapping.md §7.2 — per-field timestamps (always-on shadow derivation)
       const fieldTimestamps = computeFieldTimestamps(canonical, existingShadow, record, ingestTs);
       // Spec: specs/field-mapping.md §2.N origin_wins / last_modified tie-breaking
       const incomingCreatedAt = record.createdAt ? (Date.parse(record.createdAt) || undefined) : undefined;
-      const needsCreatedAts = this.conflictConfig.strategy === "origin_wins" || this.conflictConfig.strategy === "lww";
+      const needsCreatedAts = !this.conflictConfig.strategy || this.conflictConfig.strategy === "origin_wins";
       const createdAtBySrc = needsCreatedAts ? dbGetSourceCreatedAts(this.db, canonId) : undefined;
 
       type Outcome = { result: RecordSyncResult; localData: Record<string, unknown>; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };

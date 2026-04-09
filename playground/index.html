@@ -211,6 +211,21 @@
       color: #484870;
       letter-spacing: 0.2px;
     }
+    .btn-cluster-split {
+      position: absolute;
+      top: 0;
+      right: 8px;
+      transform: translateY(-50%);
+      background: #16161a;
+      border: 1px solid #2a2a3a;
+      border-radius: 3px;
+      color: #484870;
+      font-size: 11px;
+      padding: 0 5px;
+      cursor: pointer;
+      line-height: 1.6;
+    }
+    .btn-cluster-split:hover { color: #e07070; border-color: #6a2a2a; }
     .cluster-cards-row { display: grid; gap: 6px; }
     .cluster-cell { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
     /* Matching faint left-border accent on card cells — same nth-child colours as header */
@@ -407,6 +422,7 @@
     .te-op-read   { background: #1e1e22; color: #555;    border: 1px solid #2a2a30; }
     .te-op-delete { background: #2e1a1a; color: #e06c75; border: 1px solid #4a2a2a; }
     .te-op-defer  { background: #2e2518; color: #e8a838; border: 1px solid #4a3a1a; }
+    .te-op-split  { background: #2a1e2e; color: #b07cd4; border: 1px solid #4a2a5a; }
     .te-conn   { color: #555; font-size: 10px; flex-shrink: 0; }
     .te-entity { color: #666; font-size: 10px; flex-shrink: 0; }
     .te-id     { color: #888; font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

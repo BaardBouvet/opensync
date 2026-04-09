@@ -368,7 +368,7 @@ await db.query('UPDATE ... WHERE country_code = $1 AND product_id = $2', [countr
 
 This keeps the engine contract simple — `id` is always an opaque string — and avoids any engine-side knowledge of composite key structure. The engine never needs to decompose the ID; it always passes it back verbatim.
 
-**When the composite fields are canonical domain fields** (e.g. `orderId` + `lineNo` are both meaningful in the canonical model), consider also mapping them as ordinary fields and declaring `identityGroups: [{ fields: [orderId, lineNo] }]` on the channel in addition to the serialised `id`. This enables cross-connector matching by field value, not just by engine-assigned ID. See [identity.md](identity.md) §Compound Identity Groups.
+**When the composite fields are canonical domain fields** (e.g. `orderId` + `lineNo` are both meaningful in the canonical model), consider also mapping them as ordinary fields and declaring `identity: [{ fields: [orderId, lineNo] }]` on the channel in addition to the serialised `id`. This enables cross-connector matching by field value, not just by engine-assigned ID. See [identity.md](identity.md) §Compound Identity Groups.
 
 ## Write Records
 

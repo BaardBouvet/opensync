@@ -28,7 +28,7 @@ export interface EditorPaneOptions {
 function parseScenarioYaml(raw: string): { channels: ChannelConfig[]; conflict: ConflictConfig } {
   const parsed = MappingsFileSchema.parse(parseYaml(raw));
   const channels = buildChannelsFromEntries(parsed.channels ?? [], parsed.mappings ?? []);
-  const conflict: ConflictConfig = parsed.conflict ?? { strategy: "lww" };
+  const conflict: ConflictConfig = parsed.conflict ?? {};
   return { channels, conflict };
 }
 

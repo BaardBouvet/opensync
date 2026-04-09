@@ -48,7 +48,13 @@ export interface ChannelLineage {
 
 // Spec: specs/playground.md § 11.2
 export function buildChannelLineage(channel: ChannelConfig): ChannelLineage {
-  const identitySet = new Set(channel.identityFields ?? []);
+  const rawIdentity = channel.identity ?? [];
+  const identityFieldNames =
+    rawIdentity.length === 0 ? [] :
+    typeof rawIdentity[0] === "string"
+      ? rawIdentity as string[]
+      : (rawIdentity as Array<{ fields: string[] }>).flatMap((g) => g.fields);
+  const identitySet = new Set(identityFieldNames);
   // Map from canonical name → { isAssoc } so fields are listed first, assoc predicates second.
   const canonicalMap = new Map<string, { isAssoc: boolean; hasResolver: boolean }>();
   const inboundFields: ConnectorFieldNode[] = [];

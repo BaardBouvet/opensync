@@ -27,6 +27,11 @@ export interface EngineState {
   getClusters(channelId: string): ChannelCluster[];
   /** Returns a snapshot of key internal tables for the DB State dev view. */
   getDbState(): DbSnapshot;
+  /**
+   * Break a cluster apart so each connector record gets its own canonical_id.
+   * Emits a SPLIT event to the log. No-op if the cluster has fewer than two members.
+   */
+  splitCluster(canonicalId: string): void;
   /** Whether the automatic poll interval is currently running. */
   readonly isRealtime: boolean;
   /** Pause the automatic poll interval (manual sync mode). */
@@ -102,7 +107,7 @@ function hhmm(): string {
 function parseScenario(scenario: ScenarioDefinition): { channels: ChannelConfig[]; conflict: ConflictConfig } {
   const parsed = MappingsFileSchema.parse(parseYaml(scenario.yaml));
   const channels = buildChannelsFromEntries(parsed.channels ?? [], parsed.mappings ?? []);
-  const conflict: ConflictConfig = parsed.conflict ?? { strategy: "lww" };
+  const conflict: ConflictConfig = parsed.conflict ?? {};
   return { channels, conflict };
 }
 
@@ -331,6 +336,20 @@ export async function startEngine(
     },
     getClusters(channelId: string): ChannelCluster[] {
       return computeClusters(channelId, engine, connectors, config.channels);
+    },
+    splitCluster(canonicalId: string): void {
+      engine.splitCluster(canonicalId);
+      onEvent({
+        ts: hhmm(),
+        channel: "—",
+        sourceConnector: "—",
+        sourceEntity: "—",
+        targetConnector: "—",
+        targetEntity: "—",
+        action: "SPLIT",
+        sourceId: canonicalId.slice(0, 8),
+        targetId: canonicalId.slice(0, 8),
+      });
     },
     getDbState(): DbSnapshot {
       return {
