@@ -1,6 +1,6 @@
 # PLAN: Cluster Split (Break Up a Cluster)
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-09  
 **Effort:** M  
 **Domain:** Engine + Playground  

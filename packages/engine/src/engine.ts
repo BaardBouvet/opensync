@@ -22,7 +22,10 @@ import {
   dbGetExternalId,
   dbLinkIdentity,
   dbMergeCanonicals,
+  dbMergeBlockedByNoLink,
   dbSplitCluster,
+  dbSplitCanonical,
+  dbRemoveNoLink,
   dbFindCanonicalByField,
   dbFindCanonicalByGroup,
   dbGetAllCanonicals,
@@ -153,6 +156,16 @@ export interface AddConnectorReport {
   newFromJoiner: Array<{ externalId: string; data: Record<string, unknown> }>;
   missingInJoiner: Array<{ canonicalId: string; data: Record<string, unknown> }>;
   summary: { totalInJoiner: number; linked: number; newFromJoiner: number; missingInJoiner: number };
+}
+
+export interface SplitCanonicalResult {
+  oldCanonicalId: string;
+  newCanonicalId: string;
+  connectorId: string;
+  entityName: string;
+  externalId: string;
+  /** Sibling records that received a no_link entry pointing at (connectorId, entityName, externalId). */
+  noLinkWritten: Array<{ connectorId: string; entityName: string; externalId: string }>;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -730,7 +743,8 @@ export class SyncEngine {
         for (let i = 1; i < match.sides.length; i++) {
           const side = match.sides[i];
           const dropId = dbGetCanonicalId(this.db, side.connectorId, side.externalId);
-          if (dropId && dropId !== winnerId) dbMergeCanonicals(this.db, winnerId, dropId);
+          // Spec: specs/identity.md § Anti-Affinity — skip merge if blocked by no_link
+          if (dropId && dropId !== winnerId && !dbMergeBlockedByNoLink(this.db, winnerId, dropId)) dbMergeCanonicals(this.db, winnerId, dropId);
           else if (!dropId) dbLinkIdentity(this.db, winnerId, side.connectorId, side.externalId);
         }
         for (const side of match.sides) {
@@ -1027,6 +1041,54 @@ export class SyncEngine {
     }
   }
 
+  // ─── splitCanonical ───────────────────────────────────────────────────────
+
+  /**
+   * Detach one (connectorId, entityName, externalId) record from a cluster, give it a fresh
+   * canonical_id, and write no_link entries for every sibling so they can never be re-merged.
+   *
+   * Unlike splitCluster() which scatters all members, splitCanonical() affects only the
+   * nominated record. The rest of the cluster stays intact.
+   *
+   * Spec: specs/identity.md § Split Operation
+   */
+  splitCanonical(
+    canonicalId: string,
+    connectorId: string,
+    entityName: string,
+    externalId: string,
+  ): SplitCanonicalResult {
+    const { newCanonicalId, siblings } = dbSplitCanonical(
+      this.db, canonicalId, connectorId, entityName, externalId,
+    );
+    console.info(
+      `[opensync] splitCanonical: ${connectorId}/${entityName}/${externalId} detached from ${canonicalId} → ${newCanonicalId}`,
+    );
+    return {
+      oldCanonicalId: canonicalId,
+      newCanonicalId,
+      connectorId,
+      entityName,
+      externalId,
+      noLinkWritten: siblings,
+    };
+  }
+
+  // ─── removeNoLink ─────────────────────────────────────────────────────────
+
+  /**
+   * Remove an anti-affinity pair so the two records may be re-merged on the next sync tick.
+   * No-op if the pair does not exist.
+   *
+   * Spec: specs/identity.md § Anti-Affinity
+   */
+  removeNoLink(
+    connectorIdA: string, entityNameA: string, externalIdA: string,
+    connectorIdB: string, entityNameB: string, externalIdB: string,
+  ): void {
+    dbRemoveNoLink(this.db, connectorIdA, entityNameA, externalIdA, connectorIdB, entityNameB, externalIdB);
+  }
+
   // ─── addConnector ─────────────────────────────────────────────────────────
 
   // Spec: specs/discovery.md
@@ -1144,7 +1206,8 @@ export class SyncEngine {
           if (!k) continue;
           for (const [cid, fields] of canonicalMap) {
             const ck = buildGroupKey(fields, group.fields);
-            if (ck === k && cid !== entry.canonicalId) {
+            // Spec: specs/identity.md § Anti-Affinity — skip merge if blocked by no_link
+            if (ck === k && cid !== entry.canonicalId && !dbMergeBlockedByNoLink(this.db, entry.canonicalId, cid)) {
               dbMergeCanonicals(this.db, entry.canonicalId, cid);
             }
           }
@@ -1152,7 +1215,8 @@ export class SyncEngine {
 
         if (dbGetExternalId(this.db, entry.canonicalId, connectorId)) continue;
         const provisionalId = dbGetCanonicalId(this.db, connectorId, entry.externalId);
-        if (provisionalId && provisionalId !== entry.canonicalId) dbMergeCanonicals(this.db, entry.canonicalId, provisionalId);
+        // Spec: specs/identity.md § Anti-Affinity — skip merge if blocked by no_link
+        if (provisionalId && provisionalId !== entry.canonicalId && !dbMergeBlockedByNoLink(this.db, entry.canonicalId, provisionalId)) dbMergeCanonicals(this.db, entry.canonicalId, provisionalId);
         else if (!provisionalId) dbLinkIdentity(this.db, entry.canonicalId, connectorId, entry.externalId);
         dbSetShadow(this.db, connectorId, joinerMember.entity, entry.externalId, entry.canonicalId,
           buildFieldData(undefined, jr.canonical, connectorId, ts, undefined));
@@ -1282,11 +1346,12 @@ export class SyncEngine {
         const winner = matchedCids[0]!;
         // Merge all secondary matched canonicals into the winner
         for (let i = 1; i < matchedCids.length; i++) {
-          if (matchedCids[i] !== winner) dbMergeCanonicals(this.db, winner, matchedCids[i]!);
+          // Spec: specs/identity.md § Anti-Affinity — skip merge if blocked by no_link
+          if (matchedCids[i] !== winner && !dbMergeBlockedByNoLink(this.db, winner, matchedCids[i]!)) dbMergeCanonicals(this.db, winner, matchedCids[i]!);
         }
         // Link this external ID to the winner
         const ownId = dbGetCanonicalId(this.db, connectorId, externalId);
-        if (ownId && ownId !== winner) {
+        if (ownId && ownId !== winner && !dbMergeBlockedByNoLink(this.db, winner, ownId)) {
           dbMergeCanonicals(this.db, winner, ownId);
         } else if (!ownId) {
           const alreadyLinked = dbGetExternalId(this.db, winner, connectorId);

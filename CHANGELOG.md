@@ -12,6 +12,13 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Added
+- **Sync Engine — `splitCanonical()`** — new `SyncEngine.splitCanonical(canonicalId, connectorId, entityName, externalId)` detaches one record from a cluster without disturbing the other members (scalpel vs `splitCluster`'s sledgehammer). Automatically writes `no_link` entries for every sibling. Spec: `specs/identity.md § Split Operation`.
+- **Sync Engine — anti-affinity (`no_link`)** — new `no_link` table tracks `(connector_id, entity_name, external_id)` pairs that must never be merged. Every `dbMergeCanonicals` call-site now checks `dbMergeBlockedByNoLink` first so records split by `splitCanonical()` are not silently re-merged on the next sync tick. `SyncEngine.removeNoLink()` removes an entry to re-enable merging. Spec: `specs/identity.md § Anti-Affinity`.
+- **Browser Playground — Break button on record cards** — each card in a linked cluster now has a "Break" button that calls `splitCanonical()` to detach that specific record. Emits a `BREAK` event to the dev-tools log. Spec: `specs/playground.md §5.5`.
+- **Browser Playground — no-link badge + popover** — cards with `no_link` entries show an amber `⛓ no-link (N)` badge. Clicking it opens an inline popover listing each anti-affinity partner with a ✕ remove button. Spec: `specs/playground.md §5.7`.
+- **Browser Playground — `no_link` dev-tools tab** — new sixth tab in the dev-tools panel shows all `no_link` rows for audit and bulk inspection. Spec: `specs/playground.md §7.5`.
+
 ### Changed
 - **Sync Engine — `identity` key** — channel `identityFields` and `identityGroups` have been collapsed into a single polymorphic `identity` key. String list form (`identity: [email, taxId]`) is the shorthand; object list form (`identity: [{fields: [email]}, {fields: [first, last, dob]}]`) is the compound form. A mixed array is a parse-time error. The old two-key design with a silent runtime precedence rule is removed. Spec: `specs/identity.md`, `specs/agent-assistance.md §4`.
 - **Sync Engine — remove `conflict: strategy: lww`** — `"lww"` is removed from `ConflictConfig.strategy`; last-write-wins is the implicit default when no strategy is set. `strategy` is now optional and only needed when selecting `"field_master"` or `"origin_wins"`.

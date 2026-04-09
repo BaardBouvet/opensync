@@ -94,7 +94,10 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
       scenario,
       (ev) => devTools?.appendEvent(ev),
       () => {
-        systemsPane?.refresh(engineState!.channels, engineState!.connectors, buildClusters());
+        systemsPane?.refresh(
+          engineState!.channels, engineState!.connectors, buildClusters(),
+          engineState!.getDbState().noLinks,
+        );
         editorPane?.update(engineState!.scenario);
         devTools?.refreshDbState();
         // After each poll, if auto-mode is on and no notification is pending,
@@ -149,7 +152,8 @@ async function boot(scenario: ScenarioDefinition): Promise<void> {
   if (autoOn) {
     schedulePoll(BOOT_NOTIFY_MS);
   } else {
-    systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters());
+    systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters(),
+      engineState.getDbState().noLinks);
   }
 }
 
@@ -292,6 +296,23 @@ document.addEventListener("DOMContentLoaded", () => {
       refreshUI();
       devTools?.refreshDbState();
     },
+    onSplitCanonical(canonicalId, connectorId, entityName, externalId) {
+      if (!engineState) return;
+      isDirty = true;
+      engineState.splitCanonical(canonicalId, connectorId, entityName, externalId);
+      refreshUI();
+      devTools?.refreshDbState();
+    },
+    onRemoveNoLink(entry) {
+      if (!engineState) return;
+      isDirty = true;
+      engineState.removeNoLink(
+        entry.connector_id_a, entry.entity_name_a, entry.external_id_a,
+        entry.connector_id_b, entry.entity_name_b, entry.external_id_b,
+      );
+      refreshUI();
+      devTools?.refreshDbState();
+    },
     // Spec: specs/playground.md § 12.2 — tab switches replace the history entry
     onTabChange(tab: string) {
       history.replaceState(null, "", buildHash(dropdown.value, tab));
@@ -402,7 +423,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function refreshUI(): void {
   if (!engineState) return;
-  systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters());
+  const { noLinks } = engineState.getDbState();
+  systemsPane?.refresh(engineState.channels, engineState.connectors, buildClusters(), noLinks);
   devTools?.refreshDbState();
 }
 

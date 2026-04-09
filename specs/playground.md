@@ -176,6 +176,9 @@ Each identity cluster is rendered as a bordered group box with:
 - A canonical ID label floating on the top border (first 8 characters of the UUID), or
   `• unlinked` for records not yet ingested by the engine.
 - A `cluster-cards-row` grid with one cell per channel member.
+- A `✂` button (`.btn-cluster-split`) on the top-right border edge, shown only for linked
+  clusters with ≥2 non-null slots. Clicking calls `onSplitCluster(canonicalId)`, which
+  scatters every member into its own canonical UUID. See § 4.9.
 
 ### § 4.4 Multi-record cells
 
@@ -204,6 +207,13 @@ below the clusters.  There is no `cluster-new-row`.
 A pseudo-tab labelled `unmapped` is always appended at the end of the tab bar. It shows all
 connector entities that are not covered by any channel, in a horizontal column layout matching
 the cluster view style. Column headers include count badges (§ 4.2).
+
+### § 4.9 Cluster-level split (✂ button)
+
+The `✂` button on a cluster group header calls `onSplitCluster(canonicalId)` which invokes
+`SyncEngine.splitCluster()` — a whole-cluster scatter where every member receives a new
+canonical UUID. This is the sledgehammer operation; for surgical per-record detachment see
+§ 5.7 (Break button) and `specs/identity.md § Split Operation`.
 
 ---
 
@@ -256,10 +266,21 @@ renders with the missing-target style (red, ⚠ prefix, non-clickable).
 
 ### § 5.5 Footer and action buttons
 
-Cards that are **not** array sub-objects show Edit and Delete buttons (or Restore for
-soft-deleted records). Array sub-objects are read-only; their footer shows a small italic
-annotation `⊂ <parentEntity>.<arrayPath>` in place of the action buttons, with a tooltip
-explaining that the parent record must be edited to change the sub-object.
+Cards that are **not** array sub-objects show the following buttons:
+
+| Button | Condition | Action |
+|---|---|---|
+| Edit | Not soft-deleted | Open edit modal (§ 6.1) |
+| Delete | Not soft-deleted | Soft-delete the record |
+| **Break** | Not soft-deleted; cluster has ≥2 non-null slots | Call `onSplitCanonical(canonicalId, connectorId, entityName, externalId)` |
+| Restore | Soft-deleted only | Restore the record |
+
+The **Break** button calls `SyncEngine.splitCanonical()` to detach this record from the
+cluster and writes `no_link` entries for every sibling (preventing re-merge). See
+`specs/identity.md § Split Operation`.
+
+Array sub-objects are read-only; their footer shows a small italic annotation
+`⊂ <parentEntity>.<arrayPath>` in place of the action buttons.
 
 ### § 5.6 Flash tracking
 
@@ -269,6 +290,17 @@ real connector entities, watermarks are written by `updateWatermarks()` from `sn
 For synthesized array sub-object records (which never appear in `snapshotFull()`), the
 watermark is stored directly into `lastWatermarks` after each card render in the cluster loop,
 preventing unwanted flash on every poll tick.
+
+### § 5.7 No-link badge and popover
+
+When a record has one or more `no_link` entries (see `specs/identity.md § Anti-Affinity`),
+an amber badge `⛓ no-link (N)` (`.no-link-badge`) is rendered between the association
+badges and the footer.
+
+Clicking the badge toggles a `.no-link-popover` anchored below it. The popover lists each
+anti-affinity partner record with its `connector_id / entity_name / external_id` and an
+✕ button (`.btn-nl-remove`) that calls `onRemoveNoLink(entry)`. Removing an entry calls
+`SyncEngine.removeNoLink()` and immediately re-renders the UI.
 
 ---
 
@@ -310,7 +342,7 @@ switches and resets behind a confirmation prompt.
 
 ## § 7 Dev tools panel
 
-Five tabs:
+Six tabs:
 
 | Tab | Contents |
 |---|---|
@@ -319,6 +351,7 @@ Five tabs:
 | shadow_state | Split view — metadata table on the left, field detail panel on the right (see § 7.2) |
 | watermarks | Table snapshot of `watermarks` rows from the sql.js DB (see § 7.3) |
 | channels | Table snapshot of `channel_onboarding_status` rows from the sql.js DB (see § 7.4) |
+| no_link | Table snapshot of `no_link` rows from the sql.js DB (see § 7.5) |
 
 All DB tabs are refreshed after each poll pass. Re-rendering a DB tab preserves the current
 scroll position and, where applicable, the selected row (§ 7.2).
@@ -411,6 +444,15 @@ Shows the `channel_onboarding_status` table: `channel_id`, `entity`, `marked_rea
 A channel that has completed onboarding has a row here. This is useful for confirming
 whether a channel has been fully onboarded during the boot sequence, and is relevant when
 using the manual sync button (which only runs poll ticks, not onboarding).
+
+### § 7.5 no_link tab
+
+Shows the `no_link` table: `id`, `connector_id_a`, `entity_name_a`, `external_id_a`,
+`connector_id_b`, `entity_name_b`, `external_id_b`, `created_at`. Each row represents an
+anti-affinity pair — two records that must never be merged. Rows are added by
+`splitCanonical()` (\u00a7 5.7) and deleted by `removeNoLink()`. This tab is an audit and
+bulk-inspection view; individual entries are managed via the inline popover on the record
+card badge (\u00a7 5.7).
 
 ## § 8 Engine integration
 

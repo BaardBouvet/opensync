@@ -9,7 +9,7 @@ import { keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { oneDark } from "@codemirror/theme-one-dark";
 import type { InMemoryConnector, RecordWithMeta } from "../inmemory.js";
-import type { ChannelCluster } from "../engine-lifecycle.js";
+import type { ChannelCluster, NoLinkEntry } from "../engine-lifecycle.js";
 import type { ChannelConfig } from "@opensync/engine";
 import { renderLineageDiagram, type FieldPreview } from "./lineage-diagram.js";
 
@@ -22,6 +22,10 @@ export interface SystemsPaneCallbacks {
   onRestore:    (systemId: string, entity: string, id: string) => void;
   /** Break a linked cluster into individual records (each gets its own canonical_id). */
   onSplitCluster: (canonicalId: string) => void;
+  /** Detach one record from a cluster and write no_link for all siblings. */
+  onSplitCanonical: (canonicalId: string, connectorId: string, entityName: string, externalId: string) => void;
+  /** Remove an anti-affinity pair so the two records may be re-merged. */
+  onRemoveNoLink: (entry: NoLinkEntry) => void;
   /** Called whenever the active tab changes (channel id, "__unmapped__", or "__lineage__").
    *  Used by main.ts to keep the URL hash in sync. Spec: specs/playground.md § 12.2 */
   onTabChange?: (tab: string) => void;
@@ -135,6 +139,12 @@ function buildCard(
   embeddedIn?: string,
   /** When set, show a clickable badge linking back to the parent record. */
   parentRef?: { entity: string; id: string },
+  /** Canonical ID of the cluster this card belongs to (undefined for unlinked). */
+  canonicalId?: string,
+  /** When true, the cluster has ≥2 non-null slots — show the Break button. */
+  isLinkedCluster?: boolean,
+  /** Anti-affinity entries where one endpoint is this record. */
+  noLinkEntries?: NoLinkEntry[],
 ): HTMLElement {
   const card = document.createElement("div");
   card.className = "record-card";
@@ -219,6 +229,61 @@ function buildCard(
     card.appendChild(parentBadges);
   }
 
+  // Anti-affinity badge — shown when this record has no_link entries.
+  if ((noLinkEntries?.length ?? 0) > 0) {
+    const nlWrap = document.createElement("div");
+    nlWrap.className = "assoc-badges";
+    nlWrap.style.position = "relative";
+
+    const badge = document.createElement("button");
+    badge.className = "no-link-badge";
+    badge.textContent = `⛓ no-link (${noLinkEntries!.length})`;
+    badge.title = "Click to view or remove anti-affinity entries";
+
+    const popover = document.createElement("div");
+    popover.className = "no-link-popover";
+    popover.hidden = true;
+
+    function refreshPopover(): void {
+      popover.innerHTML = "";
+      const heading = document.createElement("div");
+      heading.className = "no-link-popover-title";
+      heading.textContent = "Anti-affinity — never merge with:";
+      popover.appendChild(heading);
+      for (const nl of noLinkEntries!) {
+        // Badge is only shown on the A-side (owner), so the partner is always the B-side
+        const [partConn, partEntity, partExt] = [nl.connector_id_b, nl.entity_name_b, nl.external_id_b];
+        const row = document.createElement("div");
+        row.className = "no-link-popover-row";
+        const label = document.createElement("span");
+        label.textContent = `${partConn}/${partEntity}/${partExt}`;
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "btn-nl-remove";
+        removeBtn.textContent = "✕";
+        removeBtn.title = "Remove this anti-affinity entry";
+        removeBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          callbacks.onRemoveNoLink(nl);
+        });
+        row.appendChild(label);
+        row.appendChild(removeBtn);
+        popover.appendChild(row);
+      }
+    }
+    refreshPopover();
+
+    badge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      popover.hidden = !popover.hidden;
+    });
+    // Close when clicking anywhere outside
+    document.addEventListener("click", () => { popover.hidden = true; });
+
+    nlWrap.appendChild(badge);
+    nlWrap.appendChild(popover);
+    card.appendChild(nlWrap);
+  }
+
   // Footer
   const footer = document.createElement("div");
   footer.className = "card-footer";
@@ -264,6 +329,18 @@ function buildCard(
       callbacks.onSoftDelete(systemId, entity, rec.id);
     });
     actions.appendChild(delBtn);
+
+    // Break button — only for records in linked clusters with ≥2 members.
+    if (isLinkedCluster && canonicalId) {
+      const breakBtn = document.createElement("button");
+      breakBtn.className = "btn-card btn-break";
+      breakBtn.textContent = "Break";
+      breakBtn.title = "Detach this record from the cluster \u2014 writes no_link for all siblings";
+      breakBtn.addEventListener("click", () => {
+        callbacks.onSplitCanonical(canonicalId, systemId, entity, rec.id);
+      });
+      actions.appendChild(breakBtn);
+    }
   } else {
     const restoreBtn = document.createElement("button");
     restoreBtn.className = "btn-card btn-restore";
@@ -290,6 +367,7 @@ export function createSystemsPane(
     channels: ChannelConfig[],
     systems: Map<string, InMemoryConnector>,
     clustersByChannel: Map<string, ChannelCluster[]>,
+    noLinks?: NoLinkEntry[],
   ) => void;
   /** Set the active tab without pushing a history entry (used for hash restore). */
   setActiveTab: (tab: string) => void;
@@ -316,6 +394,14 @@ export function createSystemsPane(
   let cachedChannels: ChannelConfig[] = [];
   let cachedSystems: Map<string, InMemoryConnector> = new Map();
   let cachedClusters: Map<string, ChannelCluster[]> = new Map();
+  let cachedNoLinks: NoLinkEntry[] = [];
+
+  function noLinksForRecord(connectorId: string, entity: string, externalId: string): NoLinkEntry[] {
+    // Badge is shown only on the A-side (owner — the broken-out record)
+    return cachedNoLinks.filter((nl) =>
+      nl.connector_id_a === connectorId && nl.entity_name_a === entity && nl.external_id_a === externalId
+    );
+  }
 
   /** Returns true if any record in the channel has a new or updated watermark
    * since the last render.  Checks real connector records only (synthetic array
@@ -657,11 +743,11 @@ export function createSystemsPane(
       label.textContent = cluster.canonicalId ? cluster.canonicalId.slice(0, 8) : "• unlinked";
       group.appendChild(label);
 
+      const filledSlots = cluster.slots.filter((s) => s !== null).length;
+      const isLinkedCluster = cluster.canonicalId !== null && filledSlots >= 2;
+
       // Split button — only for linked clusters with ≥2 non-null slots.
-      if (
-        cluster.canonicalId !== null &&
-        cluster.slots.filter((s) => s !== null).length >= 2
-      ) {
+      if (isLinkedCluster) {
         const splitBtn = document.createElement("button");
         splitBtn.className = "btn-cluster-split";
         splitBtn.title = "Break up this cluster — each record gets its own identity";
@@ -702,7 +788,14 @@ export function createSystemsPane(
               const parentRef = m.arrayPath
                 ? { entity: m.sourceEntity ?? m.entity, id: rec.id.split("#").slice(0, -1).join("#") }
                 : undefined;
-              cell.appendChild(buildCard(rec, slot.connectorId, slot.entity, flash, isHl, callbacks, navigateToRecord, systems, embeddedIn, parentRef));
+              cell.appendChild(buildCard(
+                rec, slot.connectorId, slot.entity, flash, isHl,
+                callbacks, navigateToRecord, systems,
+                embeddedIn, parentRef,
+                cluster.canonicalId ?? undefined,
+                isLinkedCluster,
+                noLinksForRecord(slot.connectorId, slot.entity, externalId),
+              ));
             } else {
               const pend = document.createElement("div");
               pend.className = "cluster-cell-pending";
@@ -824,10 +917,12 @@ export function createSystemsPane(
     channels: ChannelConfig[],
     systems: Map<string, InMemoryConnector>,
     clustersByChannel: Map<string, ChannelCluster[]>,
+    noLinks?: NoLinkEntry[],
   ): void {
     cachedChannels = channels;
     cachedSystems  = systems;
     cachedClusters = clustersByChannel;
+    cachedNoLinks  = noLinks ?? [];
 
     if (activeChannel === null && channels.length > 0) {
       activeChannel = channels[0]!.id;

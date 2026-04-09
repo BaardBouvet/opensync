@@ -33,6 +33,7 @@ export function createDevTools(
     <button class="devtools-tab" data-tab="shadow_state">shadow_state</button>
     <button class="devtools-tab" data-tab="watermarks">watermarks</button>
     <button class="devtools-tab" data-tab="channels">channels</button>
+    <button class="devtools-tab" data-tab="no_link">no_link</button>
   `;
   container.appendChild(tabBar);
 
@@ -129,12 +130,17 @@ export function createDevTools(
   channelsPanel.className = "devtools-panel devtools-panel-db";
   container.appendChild(channelsPanel);
 
+  const noLinkPanel = document.createElement("div");
+  noLinkPanel.className = "devtools-panel devtools-panel-db";
+  container.appendChild(noLinkPanel);
+
   const panels: Record<string, HTMLElement> = {
     ticks: ticksPanel,
     identity_map: identityPanel,
     shadow_state: shadowPanel,
     watermarks: watermarksPanel,
     channels: channelsPanel,
+    no_link: noLinkPanel,
   };
 
   // ── Tab switching ─────────────────────────────────────────────────────────
@@ -151,6 +157,7 @@ export function createDevTools(
     if (tab === "shadow_state") renderShadowState();
     if (tab === "watermarks") renderWatermarks();
     if (tab === "channels") renderChannelStatus();
+    if (tab === "no_link") renderNoLinks();
   }
 
   tabBar.addEventListener("click", (e) => {
@@ -713,11 +720,16 @@ export function createDevTools(
     renderTable(channelsPanel, getDbState().channelStatus);
   }
 
+  function renderNoLinks(): void {
+    renderTable(noLinkPanel, getDbState().noLinks);
+  }
+
   function refreshDbState(): void {
     if (activeTab === "identity_map") renderIdentityMap();
     else if (activeTab === "shadow_state") renderShadowState();
     else if (activeTab === "watermarks") renderWatermarks();
     else if (activeTab === "channels") renderChannelStatus();
+    else if (activeTab === "no_link") renderNoLinks();
   }
 
   return { appendEvent, beginTick, clearEvents, refreshDbState };

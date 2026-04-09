@@ -32,6 +32,20 @@ export interface EngineState {
    * Emits a SPLIT event to the log. No-op if the cluster has fewer than two members.
    */
   splitCluster(canonicalId: string): void;
+  /**
+   * Detach one (connectorId, entityName, externalId) record from its cluster, giving it a
+   * fresh canonical_id, and write no_link entries for all siblings.
+   * Spec: specs/identity.md § Split Operation
+   */
+  splitCanonical(canonicalId: string, connectorId: string, entityName: string, externalId: string): void;
+  /**
+   * Remove an anti-affinity pair so the two records may be re-merged on the next sync cycle.
+   * Spec: specs/identity.md § Anti-Affinity
+   */
+  removeNoLink(
+    connectorIdA: string, entityNameA: string, externalIdA: string,
+    connectorIdB: string, entityNameB: string, externalIdB: string,
+  ): void;
   /** Whether the automatic poll interval is currently running. */
   readonly isRealtime: boolean;
   /** Pause the automatic poll interval (manual sync mode). */
@@ -43,11 +57,19 @@ export interface EngineState {
   stop(): void;
 }
 
+export interface NoLinkEntry {
+  id: number;
+  connector_id_a: string; entity_name_a: string; external_id_a: string;
+  connector_id_b: string; entity_name_b: string; external_id_b: string;
+  created_at: string;
+}
+
 export interface DbSnapshot {
   identityMap: Array<{ canonical_id: string; connector_id: string; external_id: string }>;
   shadowState: Array<{ connector_id: string; entity_name: string; external_id: string; canonical_id: string; canonical_data: string; deleted_at: string | null }>;
   watermarks: Array<{ connector_id: string; entity_name: string; since: string }>;
   channelStatus: Array<{ channel_id: string; entity: string; marked_ready_at: string }>;
+  noLinks: NoLinkEntry[];
 }
 
 export interface SyncEvent {
@@ -351,6 +373,26 @@ export async function startEngine(
         targetId: canonicalId.slice(0, 8),
       });
     },
+    splitCanonical(canonicalId: string, connectorId: string, entityName: string, externalId: string): void {
+      engine.splitCanonical(canonicalId, connectorId, entityName, externalId);
+      onEvent({
+        ts: hhmm(),
+        channel: "—",
+        sourceConnector: connectorId,
+        sourceEntity: entityName,
+        targetConnector: "—",
+        targetEntity: "—",
+        action: "BREAK",
+        sourceId: externalId,
+        targetId: canonicalId.slice(0, 8),
+      });
+    },
+    removeNoLink(
+      connectorIdA: string, entityNameA: string, externalIdA: string,
+      connectorIdB: string, entityNameB: string, externalIdB: string,
+    ): void {
+      engine.removeNoLink(connectorIdA, entityNameA, externalIdA, connectorIdB, entityNameB, externalIdB);
+    },
     getDbState(): DbSnapshot {
       return {
         identityMap: db
@@ -371,6 +413,13 @@ export async function startEngine(
         channelStatus: db
           .prepare<{ channel_id: string; entity: string; marked_ready_at: string }>(
             "SELECT channel_id, entity, marked_ready_at FROM channel_onboarding_status ORDER BY channel_id",
+          )
+          .all(),
+        noLinks: db
+          .prepare<NoLinkEntry>(
+            `SELECT id, connector_id_a, entity_name_a, external_id_a,
+                    connector_id_b, entity_name_b, external_id_b, created_at
+             FROM no_link ORDER BY id`,
           )
           .all(),
       };

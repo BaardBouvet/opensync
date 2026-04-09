@@ -14,6 +14,7 @@ export type {
   ChannelStatus,
   AddConnectorOptions,
   AddConnectorReport,
+  SplitCanonicalResult,
 } from "./engine.js";
 
 export { loadConfig, buildChannelsFromEntries } from "./config/loader.js";

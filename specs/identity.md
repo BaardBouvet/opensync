@@ -153,3 +153,80 @@ channels:
 A record satisfies a group only when **all** fields in that group are present and non-empty. Groups are OR-ed across: satisfying ANY group links the records. Within each group the AND-semantics prevents false positives from partial field matches.
 
 Internally, the shorthand string form `identity: [email, taxId]` is equivalent to the compound form `identity: [{fields: [email]}, {fields: [taxId]}]` — each string becomes a single-field group.
+
+---
+
+## § Split Operation
+
+`SyncEngine.splitCanonical(canonicalId, connectorId, entityName, externalId)` detaches one
+nominated record from a cluster and assigns it a fresh canonical UUID. Unlike `splitCluster()`
+(which scatters every member), `splitCanonical()` affects only the nominated record; the
+remainder of the cluster stays intact.
+
+### § Split.1 Algorithm
+
+1. Validate that `(connectorId, externalId)` belongs to `canonicalId`. Throw if not found,
+   or if it is the **sole** link (nothing to split from).
+2. Collect all sibling identity-map rows for `canonicalId` (every row except the one being split).
+   Join with `shadow_state` to resolve each sibling's `entity_name`.
+3. In a single transaction:
+   - Remove the `(canonicalId, connectorId, externalId)` row from `identity_map`.
+   - Insert a new `identity_map` row linking the same external record to `newCanonicalId`.
+   - `UPDATE shadow_state SET canonical_id = newCanonicalId WHERE connector_id = ? AND external_id = ?`
+   - `DELETE FROM written_state WHERE connector_id = ? AND canonical_id = oldCanonicalId`
+   - For each sibling, call `dbInsertNoLink` (§ Anti-Affinity.2).
+4. Return `{ oldCanonicalId, newCanonicalId, noLinkWritten }`.
+
+**Coexistence with `splitCluster`:** `splitCluster` scatters every member. `splitCanonical`
+detaches one. Both methods coexist on `SyncEngine`.
+
+---
+
+## § Anti-Affinity
+
+After `splitCanonical`, the identity-matching logic (`_resolveCanonical`, `onboard`,
+`addConnector`) would re-merge the records on the next sync tick if they still share
+identity-field values (e.g. the same email address). The `no_link` table prevents this.
+
+### § Anti-Affinity.1 Schema
+
+```sql
+CREATE TABLE no_link (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  connector_id_a  TEXT NOT NULL,
+  entity_name_a   TEXT NOT NULL,
+  external_id_a   TEXT NOT NULL,
+  connector_id_b  TEXT NOT NULL,
+  entity_name_b   TEXT NOT NULL,
+  external_id_b   TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (connector_id_a, entity_name_a, external_id_a,
+          connector_id_b, entity_name_b, external_id_b)
+)
+```
+
+Records are identified by the three-part key `(connector_id, entity_name, external_id)`.
+The **A-side is always the record that was broken out (the owner)**; the B-side is a sibling
+that the owner must never re-merge with. No normalisation is applied — `(A, B)` and `(B, A)`
+are distinct rows storing different ownership relationships.
+
+### § Anti-Affinity.2 DB helpers
+
+| Helper | Description |
+|---|---|
+| `dbInsertNoLink(db, connIdA, entityA, extIdA, connIdB, entityB, extIdB)` | INSERT OR IGNORE — idempotent. A-side is the owner (broken-out record); no normalisation. |
+| `dbRemoveNoLink(db, connIdA, entityA, extIdA, connIdB, entityB, extIdB)` | DELETE the row with this exact (A-side owner, B-side sibling) pair (no-op if missing). Caller must pass the owner as A-side. |
+| `dbMergeBlockedByNoLink(db, canonicalIdA, canonicalIdB): boolean` | Joins `shadow_state` as `sa` (A-side) and `sb` (B-side); checks both directions (sa in canonA ⛓ sb in canonB, or sa in canonB ⛓ sb in canonA). |
+| `dbGetAllNoLinks(db)` | Returns all rows ordered by `id` (used by the playground dev-tools tab). |
+
+### § Anti-Affinity.3 Invariants
+
+- Every `dbMergeCanonicals` call-site in the engine checks `dbMergeBlockedByNoLink` first
+  and skips the merge if blocked.
+- The badge in the playground is shown only on the **A-side (owner)** record — the one
+  that was actively broken out. Partner records (B-side) do not carry a badge.
+- Removing an entry via `SyncEngine.removeNoLink(ownerConnId, ownerEntityName, ownerExtId,
+  partnerConnId, partnerEntityName, partnerExtId)` re-enables merging. The owner must be
+  passed as the A-side.
+- Re-merge after removal requires a fresh `discover + onboard` cycle because incremental
+  ingest skips unchanged records via echo detection.

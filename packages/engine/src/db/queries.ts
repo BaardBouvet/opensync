@@ -121,6 +121,157 @@ export function dbSplitCluster(
   }));
 }
 
+// ─── no_link — anti-affinity helpers ─────────────────────────────────────────
+
+/**
+ * Spec: specs/identity.md § Anti-Affinity — insert an anti-affinity entry.
+ * The A-side is always the broken-out record (owner). B-side is a sibling it must never
+ * re-merge with. No normalisation — (A, B) and (B, A) are distinct rows. Idempotent.
+ */
+export function dbInsertNoLink(
+  db: Db,
+  connectorIdA: string, entityNameA: string, externalIdA: string,
+  connectorIdB: string, entityNameB: string, externalIdB: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO no_link
+       (connector_id_a, entity_name_a, external_id_a, connector_id_b, entity_name_b, external_id_b)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(connectorIdA, entityNameA, externalIdA, connectorIdB, entityNameB, externalIdB);
+}
+
+/**
+ * Spec: specs/identity.md § Anti-Affinity — remove an anti-affinity entry.
+ * A-side must be the owner record; B-side must be the specific sibling to unblock.
+ * No-op if missing.
+ */
+export function dbRemoveNoLink(
+  db: Db,
+  connectorIdA: string, entityNameA: string, externalIdA: string,
+  connectorIdB: string, entityNameB: string, externalIdB: string,
+): void {
+  db.prepare(
+    `DELETE FROM no_link
+     WHERE connector_id_a = ? AND entity_name_a = ? AND external_id_a = ?
+       AND connector_id_b = ? AND entity_name_b = ? AND external_id_b = ?`,
+  ).run(connectorIdA, entityNameA, externalIdA, connectorIdB, entityNameB, externalIdB);
+}
+
+/**
+ * Spec: specs/identity.md § Anti-Affinity — returns true if merging the two canonical IDs
+ * would violate a no_link entry. Joins sa (A-side owner) and sb (B-side sibling) directly
+ * against shadow_state and checks both directions (A in canonA ⛓ B in canonB, or A in canonB ⛓ B in canonA).
+ */
+export function dbMergeBlockedByNoLink(
+  db: Db,
+  canonicalIdA: string,
+  canonicalIdB: string,
+): boolean {
+  if (canonicalIdA === canonicalIdB) return false;
+  const row = db.prepare<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM no_link nl
+     JOIN shadow_state sa
+       ON sa.connector_id = nl.connector_id_a AND sa.entity_name = nl.entity_name_a AND sa.external_id = nl.external_id_a
+     JOIN shadow_state sb
+       ON sb.connector_id = nl.connector_id_b AND sb.entity_name = nl.entity_name_b AND sb.external_id = nl.external_id_b
+     WHERE (sa.canonical_id = ? AND sb.canonical_id = ?)
+        OR (sa.canonical_id = ? AND sb.canonical_id = ?)`,
+  ).get(canonicalIdA, canonicalIdB, canonicalIdB, canonicalIdA);
+  return (row?.n ?? 0) > 0;
+}
+
+/**
+ * Spec: specs/identity.md § Anti-Affinity — return all no_link rows for the dev-tools tab.
+ */
+export function dbGetAllNoLinks(
+  db: Db,
+): Array<{
+  id: number;
+  connector_id_a: string; entity_name_a: string; external_id_a: string;
+  connector_id_b: string; entity_name_b: string; external_id_b: string;
+  created_at: string;
+}> {
+  return db.prepare(
+    `SELECT id, connector_id_a, entity_name_a, external_id_a,
+            connector_id_b, entity_name_b, external_id_b, created_at
+     FROM no_link ORDER BY id`,
+  ).all() as Array<{
+    id: number;
+    connector_id_a: string; entity_name_a: string; external_id_a: string;
+    connector_id_b: string; entity_name_b: string; external_id_b: string;
+    created_at: string;
+  }>;
+}
+
+// ─── splitCanonical ───────────────────────────────────────────────────────────
+
+/**
+ * Spec: specs/identity.md § Split Operation — detach one (connectorId, entityName, externalId)
+ * from canonicalId, give it a fresh UUID, migrate shadow_state + written_state, and write
+ * no_link entries for every sibling. Returns the new canonical UUID and the list of siblings.
+ * Throws if the record is not linked to canonicalId, or if it is the sole remaining link.
+ */
+export function dbSplitCanonical(
+  db: Db,
+  canonicalId: string,
+  connectorId: string,
+  entityName: string,
+  externalId: string,
+): { newCanonicalId: string; siblings: Array<{ connectorId: string; entityName: string; externalId: string }> } {
+  // Validate that the record actually belongs to this canonical before doing anything else
+  const own = db.prepare<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM identity_map
+     WHERE canonical_id = ? AND connector_id = ? AND external_id = ?`,
+  ).get(canonicalId, connectorId, externalId);
+  if ((own?.n ?? 0) === 0)
+    throw new Error(`identity link not found: ${connectorId}/${entityName}/${externalId} → ${canonicalId}`);
+
+  // Collect siblings: identity_map rows in same cluster, joined to shadow_state for entity_name.
+  const siblings = db.prepare<{ connector_id: string; entity_name: string; external_id: string }>(
+    `SELECT im.connector_id, im.external_id,
+            (SELECT ss.entity_name FROM shadow_state ss
+             WHERE ss.connector_id = im.connector_id AND ss.external_id = im.external_id
+             LIMIT 1) AS entity_name
+     FROM identity_map im
+     WHERE im.canonical_id = ? AND NOT (im.connector_id = ? AND im.external_id = ?)`,
+  ).all(canonicalId, connectorId, externalId);
+
+  if (siblings.length === 0)
+    throw new Error(`cannot split the last link from canonical ${canonicalId}`);
+
+  const newId = crypto.randomUUID();
+
+  db.prepare(
+    `DELETE FROM identity_map WHERE canonical_id = ? AND connector_id = ? AND external_id = ?`,
+  ).run(canonicalId, connectorId, externalId);
+  db.prepare(
+    `INSERT INTO identity_map (canonical_id, connector_id, external_id) VALUES (?, ?, ?)`,
+  ).run(newId, connectorId, externalId);
+  db.prepare(
+    `UPDATE shadow_state SET canonical_id = ? WHERE connector_id = ? AND external_id = ?`,
+  ).run(newId, connectorId, externalId);
+  db.prepare(
+    `DELETE FROM written_state WHERE connector_id = ? AND canonical_id = ?`,
+  ).run(connectorId, canonicalId);
+
+  for (const sib of siblings) {
+    dbInsertNoLink(
+      db,
+      connectorId, entityName, externalId,
+      sib.connector_id, sib.entity_name ?? "", sib.external_id,
+    );
+  }
+
+  return {
+    newCanonicalId: newId,
+    siblings: siblings.map((s) => ({
+      connectorId: s.connector_id,
+      entityName: s.entity_name ?? "",
+      externalId: s.external_id,
+    })),
+  };
+}
+
 export function dbFindCanonicalByField(
   db: Db,
   entityName: string,

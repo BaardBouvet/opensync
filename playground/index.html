@@ -339,6 +339,37 @@
     }
     .btn-new-record:hover { background: #1e301e; color: #4ec94e; }
 
+    /* ── Break button on per-card footer ────────────────────────────────── */
+    .btn-break { color: #c08020; border-color: #5a3a00; background: #2a1e00; }
+    .btn-break:hover { background: #33260a; color: #d49030; border-color: #7a4a00; }
+
+    /* ── No-link (anti-affinity) badge + popover ─────────────────────────── */
+    .no-link-badge {
+      font-size: 10px; background: #2a1e00; border: 1px solid #5a3a00;
+      color: #c08020; padding: 1px 6px; border-radius: 3px;
+      cursor: pointer; user-select: none;
+    }
+    .no-link-badge:hover { background: #33260a; color: #d49030; border-color: #7a4a00; }
+    .no-link-popover {
+      position: absolute; z-index: 200; left: 0; top: calc(100% + 4px);
+      background: #1e1c14; border: 1px solid #3a3010; border-radius: 5px;
+      padding: 6px 8px; min-width: 200px; max-width: 300px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.65);
+    }
+    .no-link-popover-title {
+      font-size: 10px; color: #777; margin-bottom: 4px;
+      font-style: italic; border-bottom: 1px solid #2a2a18; padding-bottom: 3px;
+    }
+    .no-link-popover-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      padding: 3px 0; font-size: 10px; color: #c08020; font-family: monospace;
+    }
+    .btn-nl-remove {
+      background: none; border: none; color: #885555; cursor: pointer;
+      padding: 0 3px; font-size: 12px; line-height: 1; flex-shrink: 0;
+    }
+    .btn-nl-remove:hover { color: #e06c75; }
+
     /* ── Record deleted (soft-delete) ────────────────────────────────────── */
     .record-deleted { opacity: 0.45; border-style: dashed; }
     .record-deleted .field-val { text-decoration: line-through; color: #555; }

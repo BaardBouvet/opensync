@@ -163,4 +163,23 @@ export function createSchema(db: Db): void {
       element_key      TEXT NOT NULL
     )
   `);
+
+  // Spec: specs/identity.md § Anti-Affinity — explicit anti-affinity declarations.
+  // Each row asserts that two external IDs must never be merged into the same canonical UUID.
+  // The A-side is always the record that was broken out (the owner); B-side is its sibling.
+  // No normalisation — (A, B) and (B, A) are distinct rows with different owners.
+  // Checked before every dbMergeCanonicals call; written atomically by splitCanonical().
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS no_link (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      connector_id_a  TEXT NOT NULL,
+      entity_name_a   TEXT NOT NULL,
+      external_id_a   TEXT NOT NULL,
+      connector_id_b  TEXT NOT NULL,
+      entity_name_b   TEXT NOT NULL,
+      external_id_b   TEXT NOT NULL,
+      created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      UNIQUE (connector_id_a, entity_name_a, external_id_a, connector_id_b, entity_name_b, external_id_b)
+    )
+  `);
 }
