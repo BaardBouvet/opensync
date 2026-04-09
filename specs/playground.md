@@ -259,11 +259,12 @@ preventing unwanted flash on every poll tick.
 
 Opens when the user clicks "Edit" on a card. Shows:
 - Header: `Edit  <systemId> / <entity> / <id>`
-- JSON editor (CodeMirror, one-dark theme) pre-filled with `{ data: ..., associations: [...] }`
+- JSON editor (CodeMirror, one-dark theme) pre-filled with `{ data: ... }` (the record's current field values, including any plain-string FK values)
 - Footer: Cancel / Save (also Ctrl+Enter / Mod+Enter)
 
-On save, the parsed `data` and `associations` are passed to `callbacks.onSave(systemId, entity,
-id, data, associations)`. A manual poll is triggered immediately after.
+On save, the parsed `data` is passed to `callbacks.onSave(systemId, entity, id, data)`.
+A manual poll is triggered immediately after. FK references are plain strings in `data` —
+the engine derives associations from `FieldDescriptor.entity` in the connector's schema.
 
 ### § 6.2 New record modal
 

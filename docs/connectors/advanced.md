@@ -284,24 +284,23 @@ export default {
   getEntities(ctx: ConnectorContext) {
     return [{
       name: 'person',
+      schema: {
+        'https://schema.org/worksFor': { entity: 'organization' },
+      },
       async *read(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.rdfUrl}`);
         const jsonld = await res.json(); // JSON-LD
-        
+
         yield {
           records: jsonld['@graph'].map((node: any) => ({
             id: node['@id'],
-            data: node,  // Entire JSON-LD node
-            associations: (node['knows'] || [])
-              .map((ref: any) => ({
-                predicate: 'knows',
-                targetEntity: 'person',
-                targetId: ref['@id'],
-                metadata: {
-                  since: ref.since,
-                  strength: ref.trustLevel,
-                },
-              })),
+            data: {
+              ...node,
+              // FK reference as an explicit Ref object; '@entity' overrides schema inference
+              'https://schema.org/worksFor': node['https://schema.org/worksFor']?.['@id']
+                ? { '@id': node['https://schema.org/worksFor']['@id'], '@entity': 'organization' }
+                : undefined,
+            },
           })),
         };
       },

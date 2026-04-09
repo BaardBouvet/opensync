@@ -35,12 +35,13 @@ remapped plain ID strings into `InsertRecord.data` / `UpdateRecord.data` at disp
 
 The engine infers which entity a field references, in order of precedence:
 
-1. **Schema auto-synthesis** — field has a plain string value **and** `entity: 'E'` on the
+1. **Schema auto-synthesis** — field value is a **plain string** and `entity: 'E'` is set on the
    `FieldDescriptor` in the entity's `schema`. The engine wraps the string as a Ref internally
    during ingest. Connector does not need to construct Ref objects — just declare `entity` in
    the schema and return raw API payloads. This is the recommended path for SaaS connectors.
-2. `@entity` on an explicit `Ref` object in `data`
-3. `entity` on the `FieldDescriptor` in `schema` when `@entity` is absent from the Ref
+2. `@entity` on an **explicit `Ref` object** in `data` — the Ref's own `@entity` value is used directly.
+3. `entity` on the `FieldDescriptor` in `schema` — used when the field value is an explicit `Ref`
+   object but `@entity` is absent from it.
 4. None of the above → opaque; no association derived
 
 ## The Composite Key
@@ -59,22 +60,24 @@ target record arrives (on the next sync cycle or via webhook), pending edges are
 
 ## Relational Example
 
-A contact references a company:
+A contact references a company via schema auto-synthesis (Entity Inference, item 1):
 
 ```typescript
-// ReadRecord from a CRM contact
+// Schema declaration (EntityDefinition)
+schema: {
+  companyId: { entity: 'company' },
+}
+
+// ReadRecord from a CRM contact — connector returns raw API payload unchanged
 {
   id: 'contact-42',
   data: { name: 'Alice', companyId: 'hs_456', email: 'alice@example.com' },
-  associations: [
-    { predicate: 'companyId', targetEntity: 'company', targetId: 'hs_456' }
-  ]
 }
 ```
 
-`predicate` is the field key in `data` whose value is the reference (`companyId`). `targetId`
-is that value (`hs_456`). `targetEntity` tells the engine which entity's identity namespace
-to look in (`company`).
+Because the schema declares `entity: 'company'` on `companyId`, the engine auto-wraps the plain
+string value as `{ '@id': 'hs_456', '@entity': 'company' }` during ingest. The connector returns
+the raw API payload without constructing any `Ref` objects.
 
 ## JSON-LD Example
 
@@ -165,20 +168,22 @@ membership config — no extra declaration beyond the existing channel mapping i
 
 ### § 7.1 Connector uses its own entity name
 
-`targetEntity` must be the **connector's own entity name** — exactly as it is registered
-under `entity` in the channel mapping config. The connector has no knowledge of the canonical
-data model or of other connectors' entity names.
+The `entity` value on a `FieldDescriptor` (or `@entity` on an explicit `Ref`) must be the
+**connector's own entity name** — exactly as it is registered under `entity` in the channel
+mapping config. The connector has no knowledge of the canonical data model or of other
+connectors' entity names.
 
 Example: the CRM connector registers entity `company`; the ERP connector registers entity
-`accounts`. Both appear in the same channel (`companies`). A CRM contact association uses:
+`accounts`. Both appear in the same channel (`companies`). The CRM contact schema declares:
 
 ```typescript
-{ predicate: 'companyId', targetEntity: 'company', targetId: 'hs_456' }
-//                                       ^^^^^^^
-//                         CRM's own entity name, matches the channel mapping
+schema: {
+  companyId: { entity: 'company' },  // 'company' = CRM's own entity name
+}
 ```
 
-The ERP connector's equivalent would use `accounts`. Neither connector knows the other exists.
+The ERP contact schema would declare `entity: 'accounts'`. Neither connector knows the
+other exists.
 
 ### § 7.2 Engine remap steps
 
@@ -301,14 +306,16 @@ This applies only to UPDATE dispatches. INSERT dispatches have no prior target s
 
 ### § 8.2 Pre-Flight Warnings
 
-At channel setup (when `addConnector()` wires an entity into a channel), if a field with
-`entity` set names an entity not registered in that channel, the engine logs a `[WARN]` entry.
+At channel setup, if a field with `entity` set names an entity that is not registered for
+that connector in **any** channel, the engine logs a `[WARN]` entry. Cross-channel FK
+targets (§7) are intentional and do not trigger this warning — the entity is found in a
+different channel and can be resolved once that channel has been synced.
 Dispatch is not blocked — the warning is informational.
 
 Format:
 ```
 [WARN] <connectorId>:<entity>.schema['<predicate>'].entity targets entity '<targetEntity>'
-       but no '<targetEntity>' entity is registered in channel '<channelId>'.
+       but no '<targetEntity>' entity is registered for connector '<connectorId>' in any channel.
        Associations with this predicate will have unresolvable targets.
 ```
 

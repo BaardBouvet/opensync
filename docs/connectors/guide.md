@@ -77,27 +77,26 @@ export default {
 
 ## Add a Second Entity
 
-Your first sync works for contacts. Now add companies:
+Your first sync works for contacts. Now add companies. Declare the FK reference with
+`entity` in the field's schema so the engine can track it across systems:
 
 ```typescript
 getEntities(ctx: ConnectorContext) {
   return [
     {
       name: 'contact',
+      schema: {
+        companyId: { entity: 'company' },  // tells the engine this is a FK to 'company'
+      },
       async *read(ctx: ConnectorContext, since?: string) {
         const res = await ctx.http(`${ctx.config.apiUrl}/contacts`);
         const contacts = await res.json();
         yield {
           records: contacts.map((c: any) => ({
             id: c.id,
-            data: { name: c.name, email: c.email },
-            associations: [
-              {
-                predicate: 'worksFor',
-                targetEntity: 'company',
-                targetId: c.companyId,
-              },
-            ],
+            data: { name: c.name, email: c.email, companyId: c.companyId },
+            // plain string — engine auto-wraps into a Ref during ingest
+            // because schema.companyId declares entity: 'company'
           })),
         };
       },

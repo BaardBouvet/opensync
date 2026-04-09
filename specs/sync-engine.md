@@ -295,28 +295,29 @@ All of steps 6–8 happen inside the per-record atomic commit transaction.
 
 ### Deferred records
 
-If a record has an `Association` whose `targetId` is not yet in `identity_map`, the record
-is deferred (`action = "defer"`). It will be re-processed on the next ingest cycle after
-the referenced entity has been synced. See Association Propagation below.
+When a record carries a `Ref` value (or a plain string with `FieldDescriptor.entity` declared)
+whose target ID is not yet in `identity_map`, the record is dispatched immediately without
+that FK field. A `deferred_associations` row is written so the engine retries the missing
+link on the next ingest cycle. Result action is `"defer"` for the retry attempt while the
+target is still absent. See `specs/associations.md § 6` for full deferred-edge rules.
 
 ---
 
 ## Association Propagation
 
-Associations (`Association[]` on a `ReadRecord`) represent foreign-key style links. The engine
-remaps `targetId` through `identity_map` before writing to targets.
+Associations are extracted from `Ref` values (`{ '@id': string; '@entity'?: string }`) embedded
+in `ReadRecord.data`, or from plain strings when `FieldDescriptor.entity` is declared in the
+connector's schema. The engine remaps each target ID through `identity_map` before writing
+remapped plain strings to `data[predicate]` in the target write payload.
+See `specs/associations.md § 6–7` for deferred edges, circular references, and
+cross-system remapping.
 
-**Rule 1: `associations: undefined`** — sparse update; leave associations untouched at target.
+**Unknown `@entity`** — if the entity name (from `@entity` or `FieldDescriptor.entity`) is not
+registered for this connector in any channel, the engine surfaces a record-level `"error"`
+action. Configuration errors never self-resolve.
 
-**Rule 2: `associations: []`** — explicit empty; propagate removal to target.
-
-**Rule 3: Null or falsy `targetId`** — explicit disassociation, not a missing dependency.
-Propagate the removal rather than deferring.
-
-**Rule 4: Unknown `targetEntity`** — configuration error, never self-resolves.
-Action = `"error"`, not `"defer"`.
-
-**Rule 5: Duplicate predicates** — deduplicated (last-wins) before remapping.
+**Unresolvable `@id`** — if the target ID is absent from `identity_map`, the engine dispatches
+the record immediately without that FK field and writes a `deferred_associations` row for retry.
 
 ---
 
@@ -547,34 +548,38 @@ Records are processed in **arrival order** — the order the connector yields th
 
 ## Association Propagation Rules
 
-Associations (`Association[]` on a `ReadRecord`) represent foreign-key style links between entities. The engine resolves them through the identity map and applies the following rules — all four are unconditional.
+`Ref` values in `data` (and plain strings with `FieldDescriptor.entity` declared) are the
+source of all association metadata the engine sees. Field keys are unique in a JS object, so
+no deduplication step is needed.
 
-### Rule 1: Empty associations propagate as removal
+### Rule 1: Unknown entity name surfaces as an error
 
-`associations: []` (an explicit empty array) is distinct from `associations: undefined` (field absent from this record).
-
-- `undefined` → field was not included in this read; treat as a sparse update — leave associations untouched on the target.
-- `[]` → source explicitly carries zero associations; propagate the removal so the target clears its association list.
-
-Passing `undefined` when a source has removed all associations silently drops the removal and the target retains stale associations indefinitely.
-
-### Rule 2: Null or falsy `targetId` is a removal tombstone
-
-When an association carries a falsy `targetId` (null, empty string, undefined), the engine treats this as an explicit disassociation — not as a missing dependency. It does **not** defer the record.
-
-The engine passes `{ ...assoc, targetId: null }` to the target (or omits the association entirely, depending on the connector contract) rather than suspending the record in the defer queue.
-
-### Rule 3: Unknown `targetEntity` surfaces as an error
-
-If an association references an entity name that has never appeared in the identity map for this channel (e.g. a typo like `"custmers"`), the engine surfaces this as a record-level `error` action and logs it. It does **not** defer — deferral means "wait for the target to arrive"; an unknown entity name is a configuration error that will never self-resolve.
+If the entity name derived from `@entity` or `FieldDescriptor.entity` is not registered for
+this connector in any channel (e.g. a typo like `"custmers"`), the engine surfaces a
+record-level `"error"` action and logs it. It does **not** defer — deferral means "wait for
+the target to arrive"; an unknown entity name is a configuration error that will never
+self-resolve.
 
 Distinguishing these cases:
-- `targetId` not yet in identity map → legitimate defer (target record hasn't synced yet)
-- `targetEntity` name unknown → configuration error → `"error"` action
+- `@id` not yet in identity map → legitimate defer (target record hasn’t synced yet)
+- entity name unknown → configuration error → `"error"` action
 
-### Rule 4: Duplicate predicates are deduplicated
+### Rule 2: Unresolvable target ID is deferred, not an error
 
-If a source record carries two `Association` entries with the same `predicate` value, the engine deduplicates them before remapping. Last-wins within the incoming array. Duplicates that survive into the target create referential ambiguity and are rejected upstream if the connector enforces uniqueness.
+When a `Ref['@id']` cannot be resolved in `identity_map` (the referenced record hasn't been
+synced yet), the engine dispatches the record immediately without that FK field in the write
+payload (eager mode, default). A `deferred_associations` row is written so the engine retries
+once the target record is seen in a future ingest cycle.
+
+See `specs/associations.md § 6.1` for eager dispatch semantics and `§ 6.2` for how circular
+references between two mutually-referencing new records resolve within two passes.
+
+### Rule 3: Source-inexpressible predicates are preserved on update
+
+A source connector can only express the predicates it has declared in its `assocMappings`
+chain. When it triggers an UPDATE to a target, predicates the source cannot express (e.g.
+`secondaryCompanyId` when the source only maps `primaryCompanyRef`) are preserved from the
+target's current shadow rather than cleared. See `specs/associations.md § 8.4`.
 
 ## Backend Architecture
 

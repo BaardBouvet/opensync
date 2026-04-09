@@ -284,7 +284,7 @@ interface ReadRecord {
 // Ref — an inline reference value embedded in data[fieldName]
 interface Ref {
   '@id': string;        // the referenced record's ID in this (source) system
-  '@entity'?: string;   // the entity name the target belongs to — omit only when the entity can be inferred from the field schema or associationSchema
+  '@entity'?: string;   // the entity name the target belongs to — omit when the entity can be inferred from the field's FieldDescriptor.entity in schema
 }
 ```
 
