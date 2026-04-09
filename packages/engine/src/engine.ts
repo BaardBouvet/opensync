@@ -322,111 +322,115 @@ export class SyncEngine {
     const channel = this.channels.get(channelId);
     if (!channel) throw new Error(`Unknown channel: ${channelId}`);
 
-    const sourceMember = channel.members.find((m) => m.connectorId === connectorId);
-    if (!sourceMember) throw new Error(`${connectorId} is not a member of channel ${channelId}`);
+    // A connector may contribute multiple entities to the same channel (e.g. orders + orderLines).
+    // Use filter so every entity is processed, not just the first match.
+    const sourceMembers = channel.members.filter((m) => m.connectorId === connectorId);
+    if (sourceMembers.length === 0) throw new Error(`${connectorId} is not a member of channel ${channelId}`);
 
     const source = this.wired.get(connectorId);
     if (!source) throw new Error(`Unknown connector: ${connectorId}`);
-
-    // Spec: specs/field-mapping.md §3.2 — for array child members, read from the inherited
-    // source entity (parent's entity). The watermark key always uses the logical entity name.
-    const readEntityName = sourceMember.sourceEntity ?? sourceMember.entity;
-    const sourceEntity = source.entities.find((e) => e.name === readEntityName);
-    if (!sourceEntity || !sourceEntity.read) return { channelId, connectorId, records: [] };
-    const sourceRead = sourceEntity.read;
 
     // ── collectOnly fast path ─────────────────────────────────────────────
     // Spec: specs/sync-engine.md § collectOnly mode
     if (opts?.collectOnly) {
       const snapshotAt = Date.now();
-      const ts = snapshotAt;
-      const since = opts.fullSync
-        ? undefined
-        : dbGetWatermark(this.db, connectorId, sourceMember.entity);
-
       if (source.batchIdRef) source.batchIdRef.current = batchId;
-      let connectorWatermark: string | undefined;
       try {
-        for await (const batch of sourceRead(source.ctx, since)) {
-          for (const record of batch.records) {
-            const raw = record.data as Record<string, unknown>;
-            // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
-            const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
-            const stripped = Object.fromEntries(
-              Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")),
-            );
+        for (const sourceMember of sourceMembers) {
+          // Spec: specs/field-mapping.md §3.2 — for array child members, read from the inherited
+          // source entity (parent's entity). The watermark key always uses the logical entity name.
+          const readEntityName = sourceMember.sourceEntity ?? sourceMember.entity;
+          const sourceEntity = source.entities.find((e) => e.name === readEntityName);
+          if (!sourceEntity || !sourceEntity.read) continue;
+          const sourceRead = sourceEntity.read;
 
-            if (sourceMember.expansionChain) {
-              // Spec: specs/field-mapping.md §3.2/§3.4 — array-expansion collectOnly:
-              // expand parent records into child shadows so discover() can match them.
-              const chain = sourceMember.expansionChain;
-              const parentShadowEntity = sourceMember.sourceEntity ?? sourceMember.entity;
-              const provisionalParentId = this._getOrCreateCanonical(connectorId, record.id);
+          const ts = snapshotAt;
+          const since = opts.fullSync
+            ? undefined
+            : dbGetWatermark(this.db, connectorId, sourceMember.entity);
 
-              // Write parent shadow for echo detection in subsequent normal ingest calls
-              const existingParentShadow = dbGetShadow(this.db, connectorId, parentShadowEntity, record.id);
-              const parentFd = buildFieldData(existingParentShadow, stripped, connectorId, ts, undefined);
-              dbSetShadow(this.db, connectorId, parentShadowEntity, record.id, provisionalParentId, parentFd);
+          let connectorWatermark: string | undefined;
+          for await (const batch of sourceRead(source.ctx, since)) {
+            for (const record of batch.records) {
+              const raw = record.data as Record<string, unknown>;
+              // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
+              const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
+              const stripped = Object.fromEntries(
+                Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")),
+              );
 
-              // Expand and store child shadows
-              const childRecords = expandArrayChain(record, chain, sourceMember.elementFilter);
-              for (const childRecord of childRecords) {
-                const childRaw = childRecord.data as Record<string, unknown>;
-                const childStripped = Object.fromEntries(
-                  Object.entries(childRaw).filter(([k]) => !k.startsWith("_")),
-                );
-                const childCanonical = applyMapping(childStripped, sourceMember.inbound, "inbound");
-                const hopKeys = extractHopKeys(childRecord.id, chain);
+              if (sourceMember.expansionChain) {
+                // Spec: specs/field-mapping.md §3.2/§3.4 — array-expansion collectOnly:
+                // expand parent records into child shadows so discover() can match them.
+                const chain = sourceMember.expansionChain;
+                const parentShadowEntity = sourceMember.sourceEntity ?? sourceMember.entity;
+                const provisionalParentId = this._getOrCreateCanonical(connectorId, record.id);
 
-                // Derive canonical IDs for every hop and write array_parent_map
-                let walkCanonId = provisionalParentId;
-                for (let i = 0; i < chain.length; i++) {
-                  const keyVal = hopKeys[i] ?? String(i);
-                  const nextCanonId = deriveChildCanonicalId(walkCanonId, chain[i]!.arrayPath, keyVal);
-                  dbUpsertArrayParentMap(this.db, nextCanonId, walkCanonId, chain[i]!.arrayPath, keyVal);
-                  walkCanonId = nextCanonId;
+                // Write parent shadow for echo detection in subsequent normal ingest calls
+                const existingParentShadow = dbGetShadow(this.db, connectorId, parentShadowEntity, record.id);
+                const parentFd = buildFieldData(existingParentShadow, stripped, connectorId, ts, undefined);
+                dbSetShadow(this.db, connectorId, parentShadowEntity, record.id, provisionalParentId, parentFd);
+
+                // Expand and store child shadows
+                const childRecords = expandArrayChain(record, chain, sourceMember.elementFilter);
+                for (const childRecord of childRecords) {
+                  const childRaw = childRecord.data as Record<string, unknown>;
+                  const childStripped = Object.fromEntries(
+                    Object.entries(childRaw).filter(([k]) => !k.startsWith("_")),
+                  );
+                  const childCanonical = applyMapping(childStripped, sourceMember.inbound, "inbound");
+                  const hopKeys = extractHopKeys(childRecord.id, chain);
+
+                  // Derive canonical IDs for every hop and write array_parent_map
+                  let walkCanonId = provisionalParentId;
+                  for (let i = 0; i < chain.length; i++) {
+                    const keyVal = hopKeys[i] ?? String(i);
+                    const nextCanonId = deriveChildCanonicalId(walkCanonId, chain[i]!.arrayPath, keyVal);
+                    dbUpsertArrayParentMap(this.db, nextCanonId, walkCanonId, chain[i]!.arrayPath, keyVal);
+                    walkCanonId = nextCanonId;
+                  }
+                  const childCanonId = walkCanonId;
+
+                  // Store child shadow under sourceMember.entity (the logical entity for this channel)
+                  const existingChildShadow = dbGetShadow(this.db, connectorId, sourceMember.entity, childRecord.id);
+                  const childFd = buildFieldData(existingChildShadow, childCanonical, connectorId, ts, undefined);
+                  dbSetShadow(this.db, connectorId, sourceMember.entity, childRecord.id, childCanonId, childFd);
                 }
-                const childCanonId = walkCanonId;
-
-                // Store child shadow under sourceMember.entity (the logical entity for this channel)
-                const existingChildShadow = dbGetShadow(this.db, connectorId, sourceMember.entity, childRecord.id);
-                const childFd = buildFieldData(existingChildShadow, childCanonical, connectorId, ts, undefined);
-                dbSetShadow(this.db, connectorId, sourceMember.entity, childRecord.id, childCanonId, childFd);
+              } else {
+                // Standard (non-expansion) collectOnly
+                // Spec: specs/field-mapping.md §5.1 — record filter on flat members
+                if (sourceMember.recordFilter && !sourceMember.recordFilter(stripped)) {
+                  // Record fails filter: clear any existing shadow so it no longer contributes.
+                  const existingForDelete = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
+                  if (existingForDelete) dbDeleteShadow(this.db, connectorId, sourceMember.entity, record.id);
+                  continue;
+                }
+                const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
+                // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
+                const entityDefCollect = this.wired.get(connectorId)?.entities.find((e) => e.name === sourceMember.entity);
+                const inboundAssocCollect = this._extractRefsFromData(record.data as Record<string, unknown>, entityDefCollect);
+                const filteredCollect = this._filterInboundAssociations(inboundAssocCollect, sourceMember);
+                const assocSentinel = filteredCollect.length
+                  ? JSON.stringify([...filteredCollect].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+                  : undefined;
+                const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
+                const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
+                const fd = buildFieldData(existing, canonical, connectorId, ts, assocSentinel);
+                dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
               }
-            } else {
-              // Standard (non-expansion) collectOnly
-              // Spec: specs/field-mapping.md §5.1 — record filter on flat members
-              if (sourceMember.recordFilter && !sourceMember.recordFilter(stripped)) {
-                // Record fails filter: clear any existing shadow so it no longer contributes.
-                const existingForDelete = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
-                if (existingForDelete) dbDeleteShadow(this.db, connectorId, sourceMember.entity, record.id);
-                continue;
-              }
-              const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
-              // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
-              const entityDefCollect = this.wired.get(connectorId)?.entities.find((e) => e.name === sourceMember.entity);
-              const inboundAssocCollect = this._extractRefsFromData(record.data as Record<string, unknown>, entityDefCollect);
-              const filteredCollect = this._filterInboundAssociations(inboundAssocCollect, sourceMember);
-              const assocSentinel = filteredCollect.length
-                ? JSON.stringify([...filteredCollect].sort((a, b) => a.predicate.localeCompare(b.predicate)))
-                : undefined;
-              const provisionalId = this._getOrCreateCanonical(connectorId, record.id);
-              const existing = dbGetShadow(this.db, connectorId, sourceMember.entity, record.id);
-              const fd = buildFieldData(existing, canonical, connectorId, ts, assocSentinel);
-              dbSetShadow(this.db, connectorId, sourceMember.entity, record.id, provisionalId, fd);
             }
+            if (batch.since) connectorWatermark = batch.since;
           }
-          if (batch.since) connectorWatermark = batch.since;
+
+          // Store the connector's watermark exactly as returned — watermarks are opaque.
+          // If the connector returned no batch.since (e.g. empty read), store nothing:
+          // the next poll will pass since=undefined (full sync), which is correct.
+          if (connectorWatermark !== undefined) {
+            dbSetWatermark(this.db, connectorId, sourceMember.entity, connectorWatermark);
+          }
         }
       } finally {
         if (source.batchIdRef) source.batchIdRef.current = undefined;
-      }
-
-      // Store the connector's watermark exactly as returned — watermarks are opaque.
-      // If the connector returned no batch.since (e.g. empty read), store nothing:
-      // the next poll will pass since=undefined (full sync), which is correct.
-      if (connectorWatermark !== undefined) {
-        dbSetWatermark(this.db, connectorId, sourceMember.entity, connectorWatermark);
       }
       return { channelId, connectorId, records: [], snapshotAt };
     }
@@ -450,91 +454,104 @@ export class SyncEngine {
     }
 
     try {
-      const ingestTs = Date.now();
-      const since = opts?.fullSync
-        ? undefined
-        : dbGetWatermark(this.db, connectorId, sourceMember.entity);
+      const allMemberResults: RecordSyncResult[] = [];
 
-      const allRecords: ReadRecord[] = [];
-      let newWatermark: string | undefined;
+      for (const sourceMember of sourceMembers) {
+        // Spec: specs/field-mapping.md §3.2 — for array child members, read from the inherited
+        // source entity (parent's entity). The watermark key always uses the logical entity name.
+        const readEntityName = sourceMember.sourceEntity ?? sourceMember.entity;
+        const sourceEntity = source.entities.find((e) => e.name === readEntityName);
+        if (!sourceEntity || !sourceEntity.read) continue;
+        const sourceRead = sourceEntity.read;
 
-      await Promise.race([
-        (async () => {
-          for await (const batch of sourceRead(source.ctx, since)) {
-            allRecords.push(...batch.records);
-            if (batch.since) newWatermark = batch.since;
-          }
-        })(),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`read() timeout after ${this.readTimeoutMs}ms (${connectorId})`)),
-            this.readTimeoutMs,
-          )
-        ),
-      ]);
+        const ingestTs = Date.now();
+        const since = opts?.fullSync
+          ? undefined
+          : dbGetWatermark(this.db, connectorId, sourceMember.entity);
 
-      const results = await this._processRecords(
-        channelId,
-        sourceMember,
-        allRecords,
-        batchId,
-        ingestTs,
-      );
+        const allRecords: ReadRecord[] = [];
+        let newWatermark: string | undefined;
 
-      // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.3
-      // Retry any previously-deferred records via lookup() so associations that
-      // couldn't be remapped at fan-out time are propagated once the identity
-      // link is established (typically the cycle after onboard).
-      const deferred = dbGetDeferred(this.db, connectorId, sourceMember.entity);
-      if (deferred.length > 0) {
-        const sourceEntityDef = source.entities.find((e) => e.name === sourceMember.entity);
-        if (sourceEntityDef?.lookup) {
-          const uniqueIds = [...new Set(deferred.map((d) => d.source_external_id))];
-          const alreadyProcessed = new Set(allRecords.map((r) => r.id));
-          const idsToLookup = uniqueIds.filter((id) => !alreadyProcessed.has(id));
-          if (idsToLookup.length > 0) {
-            const lookedUp = await sourceEntityDef.lookup(idsToLookup, source.ctx);
-            if (lookedUp.length > 0) {
-              // Pass the looked-up IDs as skipEchoFor so echo detection is bypassed for
-              // records whose source shadow was already written on the first deferred pass.
-              const retryIds = new Set(lookedUp.map((r) => r.id));
-              const retryResults = await this._processRecords(
-                channelId, sourceMember, lookedUp, batchId, ingestTs, retryIds,
-              );
-              results.push(...retryResults);
+        await Promise.race([
+          (async () => {
+            for await (const batch of sourceRead(source.ctx, since)) {
+              allRecords.push(...batch.records);
+              if (batch.since) newWatermark = batch.since;
             }
-            // Records that lookup returned nothing for → remove deferred rows (source deleted)
-            const returnedIds = new Set(lookedUp.map((r) => r.id));
-            for (const id of idsToLookup) {
-              if (!returnedIds.has(id)) {
-                for (const row of deferred.filter((d) => d.source_external_id === id)) {
-                  dbRemoveDeferred(this.db, connectorId, sourceMember.entity, id, row.target_connector);
+          })(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`read() timeout after ${this.readTimeoutMs}ms (${connectorId})`)),
+              this.readTimeoutMs,
+            )
+          ),
+        ]);
+
+        const results = await this._processRecords(
+          channelId,
+          sourceMember,
+          allRecords,
+          batchId,
+          ingestTs,
+        );
+
+        // Spec: plans/engine/PLAN_DEFERRED_ASSOCIATIONS.md §2.3
+        // Retry any previously-deferred records via lookup() so associations that
+        // couldn't be remapped at fan-out time are propagated once the identity
+        // link is established (typically the cycle after onboard).
+        const deferred = dbGetDeferred(this.db, connectorId, sourceMember.entity);
+        if (deferred.length > 0) {
+          const sourceEntityDef = source.entities.find((e) => e.name === sourceMember.entity);
+          if (sourceEntityDef?.lookup) {
+            const uniqueIds = [...new Set(deferred.map((d) => d.source_external_id))];
+            const alreadyProcessed = new Set(allRecords.map((r) => r.id));
+            const idsToLookup = uniqueIds.filter((id) => !alreadyProcessed.has(id));
+            if (idsToLookup.length > 0) {
+              const lookedUp = await sourceEntityDef.lookup(idsToLookup, source.ctx);
+              if (lookedUp.length > 0) {
+                // Pass the looked-up IDs as skipEchoFor so echo detection is bypassed for
+                // records whose source shadow was already written on the first deferred pass.
+                const retryIds = new Set(lookedUp.map((r) => r.id));
+                const retryResults = await this._processRecords(
+                  channelId, sourceMember, lookedUp, batchId, ingestTs, retryIds,
+                );
+                results.push(...retryResults);
+              }
+              // Records that lookup returned nothing for → remove deferred rows (source deleted)
+              const returnedIds = new Set(lookedUp.map((r) => r.id));
+              for (const id of idsToLookup) {
+                if (!returnedIds.has(id)) {
+                  for (const row of deferred.filter((d) => d.source_external_id === id)) {
+                    dbRemoveDeferred(this.db, connectorId, sourceMember.entity, id, row.target_connector);
+                  }
                 }
               }
             }
           }
         }
+
+        if (newWatermark && !opts?.fullSync) {
+          dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
+        }
+
+        const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0 };
+        for (const r of results) {
+          if (r.action === "insert") counts.inserted++;
+          else if (r.action === "update") counts.updated++;
+          else if (r.action === "skip") counts.skipped++;
+          else if (r.action === "defer") counts.deferred++;
+          else if (r.action === "error") counts.errors++;
+        }
+
+        dbLogSyncRun(this.db, {
+          batchId, channelId, connectorId, ...counts, startedAt,
+          finishedAt: new Date().toISOString(),
+        });
+
+        allMemberResults.push(...results);
       }
 
-      if (newWatermark && !opts?.fullSync) {
-        dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
-      }
-
-      const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0 };
-      for (const r of results) {
-        if (r.action === "insert") counts.inserted++;
-        else if (r.action === "update") counts.updated++;
-        else if (r.action === "skip") counts.skipped++;
-        else if (r.action === "defer") counts.deferred++;
-        else if (r.action === "error") counts.errors++;
-      }
-
-      dbLogSyncRun(this.db, {
-        batchId, channelId, connectorId, ...counts, startedAt,
-        finishedAt: new Date().toISOString(),
-      });
-
-      return { channelId, connectorId, records: results };
+      return { channelId, connectorId, records: allMemberResults };
     } finally {
       if (source.triggerRef) source.triggerRef.current = undefined;
       for (const t of pollTargets) {

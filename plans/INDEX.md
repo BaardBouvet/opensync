@@ -67,6 +67,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_FIELD_SOURCES_ENFORCEMENT.md](engine/PLAN_FIELD_SOURCES_ENFORCEMENT.md) | Enforce expression source scopes at runtime for all three expression types (`expression`/`sources`, `reverseExpression`/`reverseSources`, `defaultExpression`/`defaultSources`); `"id"` token injects connector record ID; opt-out when declaration absent | proposed | S |
 | [engine/PLAN_VALUE_MAP.md](engine/PLAN_VALUE_MAP.md) | Declarative per-field value maps (`value_map` / `reverse_value_map` / `value_map_fallback`): translate source-local enum codes to canonical codes and back; auto-inverts bijective maps; mutual exclusion with `expression` | proposed | S |
 | [engine/PLAN_CONNECTOR_HEALTH_CHECK.md](engine/PLAN_CONNECTOR_HEALTH_CHECK.md) | Engine-driven connector health checks: `checkHealth()` on-demand probe + optional `startHealthPolling`; `connector_health` table; `ConnectorHealthResult` type; closes the spec gap where `healthCheck` is promised but never called | draft | S |
+| [engine/PLAN_SCHEMA_ENFORCEMENT.md](engine/PLAN_SCHEMA_ENFORCEMENT.md) | `required` / `immutable` enforcement in `_dispatchToTarget`: immutable-strip + required-check passes before every `insert()`/`update()` call; recursive descent into `FieldType.object.properties` and `FieldType.array.items.properties` for nested enforcement; path-qualified error messages | backlog | M |
 ## connectors/ — Connector research and cleanup plans
 
 | File | What it covers | Status | Effort |
@@ -90,7 +91,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [connectors/PLAN_FIELD_TIMESTAMPS.md](connectors/PLAN_FIELD_TIMESTAMPS.md) | Add `fieldTimestamps?: Record<string, string>` to `ReadRecord`; connectors supply per-field modification timestamps directly, without requiring config; engine consumes as highest-priority source in per-field timestamp chain | complete | XS |
 | [connectors/PLAN_READ_RECORD_UPDATED_AT.md](connectors/PLAN_READ_RECORD_UPDATED_AT.md) | Add `updatedAt?: string` to `ReadRecord`; engine uses it as the per-record LWW timestamp instead of engine ingest time (`Date.now()`) | complete | S |
 | [connectors/PLAN_READ_RECORD_CREATED_AT.md](connectors/PLAN_READ_RECORD_CREATED_AT.md) | Add `createdAt?: string` to `ReadRecord`; shadow stores immutable origin timestamp; new `origin_wins` mapping-level strategy + stable `last_modified` tie-breaking via source age | complete | M |
-| [connectors/PLAN_ARRAY_ITEM_SCHEMA.md](connectors/PLAN_ARRAY_ITEM_SCHEMA.md) | Rich array item schema: introduce `FieldPropertyDescriptor` so object `properties` inside `FieldType` carry `description` + `example`; update playground `purchases.lines` fixture; improve lineage type label rendering | backlog | S |
+| [connectors/PLAN_ARRAY_ITEM_SCHEMA.md](connectors/PLAN_ARRAY_ITEM_SCHEMA.md) | Rich array item schema: `FieldType` object `properties` uses full `FieldDescriptor` (with `entity`, `description`, `example`, etc.) instead of bare `FieldType` scalars; update playground `purchases.lines` fixture; improve lineage type label rendering | backlog | S |
 
 ## demo/ — CLI demo runner plans
 

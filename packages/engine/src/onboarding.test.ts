@@ -2276,6 +2276,90 @@ describe("T46: record with empty data fans out and is linked in identity_map", (
   });
 });
 
+// ─── T48: ingest with two entities from same connector in one channel ──────────
+// Regression: ingest() used find() to locate a channel member, so only the FIRST
+// entity of a connector was collected. If a connector like "erp" mapped both
+// "orders" and "orderLines" to the same channel, collectOnly only wrote shadow
+// rows for "orders", causing discover() to throw about missing orderLines shadow.
+
+describe("T48: ingest collects all entities when a connector appears multiple times in a channel", () => {
+  it("collectOnly writes shadow_state for every entity of the connector", async () => {
+    const db = openDb(":memory:");
+    const dirErp = makeTempDir();
+    const dirShop = makeTempDir();
+
+    writeJson(join(dirErp, "orders.json"), [
+      { id: "ord1", data: { ref: "PO-001" } },
+    ]);
+    writeJson(join(dirErp, "orderLines.json"), [
+      { id: "ol1", data: { ref: "PO-001", sku: "SKU-1" } },
+    ]);
+    writeJson(join(dirShop, "purchases.json"), [
+      { id: "p1", data: { ref: "PO-001" } },
+    ]);
+
+    const erpConnector: ResolvedConfig["connectors"][0] = {
+      id: "erp",
+      connector: jsonfiles,
+      config: {
+        entities: {
+          orders:     { filePath: join(dirErp, "orders.json") },
+          orderLines: { filePath: join(dirErp, "orderLines.json") },
+        },
+      },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    };
+    const shopConnector: ResolvedConfig["connectors"][0] = {
+      id: "shop",
+      connector: jsonfiles,
+      config: { entities: { purchases: { filePath: join(dirShop, "purchases.json") } } },
+      auth: {},
+      batchIdRef: { current: undefined },
+      triggerRef: { current: undefined },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [erpConnector, shopConnector],
+      channels: [{
+        id: "ch",
+        members: [
+          { connectorId: "erp", entity: "orders" },
+          { connectorId: "erp", entity: "orderLines" },
+          { connectorId: "shop", entity: "purchases" },
+        ],
+        identityFields: ["ref"],
+      }],
+      conflict: { strategy: "lww" },
+      readTimeoutMs: 10_000,
+    };
+
+    const engine = new SyncEngine(config, db);
+
+    // ingest erp once — must collect BOTH orders and orderLines
+    await engine.ingest("ch", "erp", { collectOnly: true });
+
+    const ordersRows = db
+      .prepare<{ n: number }>(
+        "SELECT COUNT(*) as n FROM shadow_state WHERE connector_id = 'erp' AND entity_name = 'orders'",
+      )
+      .get()!.n;
+    const orderLinesRows = db
+      .prepare<{ n: number }>(
+        "SELECT COUNT(*) as n FROM shadow_state WHERE connector_id = 'erp' AND entity_name = 'orderLines'",
+      )
+      .get()!.n;
+
+    expect(ordersRows).toBe(1);
+    expect(orderLinesRows).toBe(1);
+
+    // After also collecting shop, discover() must not throw
+    await engine.ingest("ch", "shop", { collectOnly: true });
+    await expect(engine.discover("ch")).resolves.toBeDefined();
+  });
+});
+
 // ─── T47: channelStatus and onboardedConnectors with zero members ─────────────
 // Regression: building the SQL WHERE clause from an empty members array produced
 // "WHERE ()" and "IN ()", which are syntax errors in SQLite.
