@@ -12,6 +12,10 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Changed
+- **Sync Engine — `identity` key** — channel `identityFields` and `identityGroups` have been collapsed into a single polymorphic `identity` key. String list form (`identity: [email, taxId]`) is the shorthand; object list form (`identity: [{fields: [email]}, {fields: [first, last, dob]}]`) is the compound form. A mixed array is a parse-time error. The old two-key design with a silent runtime precedence rule is removed. Spec: `specs/identity.md`, `specs/agent-assistance.md §4`.
+- **Sync Engine — remove `conflict: strategy: lww`** — `"lww"` is removed from `ConflictConfig.strategy`; last-write-wins is the implicit default when no strategy is set. `strategy` is now optional and only needed when selecting `"field_master"` or `"origin_wins"`.
+
 ### Fixed
 - **Sync Engine — multi-entity ingest** — `ingest()` used `Array.find()` to locate a channel member, so when a connector mapped multiple entities to the same channel (e.g. `erp/orders` and `erp/orderLines` both in `global-order`), only the first entity was collected. Subsequent `discover()` calls threw `"has no shadow_state for orderLines"`. Fixed by iterating all matching members with `Array.filter()`. Regression test T48 added.
 
@@ -22,6 +26,10 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 - **Browser Playground — `empty` scenario** — new blank-canvas scenario with empty `channels: []` and `mappings: []`; every connector entity appears in the lineage unassigned pool.
 - **Browser Playground — lineage field preview** — unassigned pool entries are now expandable pills showing typed field descriptors with tooltips (`description · type · e.g. value`). FK fields are styled with a dashed border and italic label. Channel entity groups show a `— also available —` separator followed by dim unmapped field nodes from the schema. Field metadata is sourced from `FieldDescriptor.description`, `.type`, and the new `.example` field added to the SDK. Spec: `specs/playground.md §11.15`.
 - **Connector SDK — `FieldDescriptor.example`** — optional `example?: unknown` field added to `FieldDescriptor` for display-only metadata. The engine ignores this field.
+
+### Added
+- **Sync Engine — `splitCluster()`** — new `SyncEngine.splitCluster(canonicalId)` API breaks a linked cluster apart: each connector record gets its own fresh `canonical_id` in `identity_map`, `shadow_state`, `written_state`, and `array_parent_map`. The inverse of the merge performed by `onboard()` / `addConnector()`. Spec: `specs/sync-engine.md § splitCluster`.
+- **Browser Playground — cluster split button** — a ✂ button now floats on every linked cluster border (≥2 members). Clicking it immediately breaks the cluster, emits a `SPLIT` event to the log, and refreshes the UI. The `SPLIT` action is rendered in purple in the dev-tools event log.
 
 ### Fixed
 - **Sync Engine — SQL syntax error on memberless channel** — `channelStatus()` and `onboardedConnectors()` built `WHERE ()` / `IN ()` clauses when a channel had zero members (e.g. the playground `empty` scenario or a manually-typed `channels: [{id: foo}]` with no mappings). Now both methods return early with `"uninitialized"` / `[]` respectively. Regression test T47 added.

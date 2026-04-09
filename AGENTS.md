@@ -106,6 +106,9 @@ bun test packages/sdk/
 - Connectors connect to network services only. Embedded databases (SQLite, LevelDB, etc.)
   run inside the engine process and are inaccessible from a connector. Only
   network-accessible databases (PostgreSQL, MySQL, Redis, etc.) are valid connector targets.
+- **FAQ discipline:** When the user asks a question that would be useful to end users (not
+  just internal implementation curiosity), add a Q&A entry to `docs/faq.md`. Create the file
+  if it does not exist. Keep answers concise and user-facing; omit internal DB/SQL detail.
 
 ---
 
@@ -146,6 +149,12 @@ bun test packages/sdk/
   and internal contracts can be changed freely. Do not add fallback paths or shims to
   preserve compatibility with pre-release callers — remove the old shape and fix all call
   sites.
+- **Every field that crosses a connector boundary must be explicitly declared.** Omitting
+  `fields` in a mapping entry means nothing is synced — not everything. There is no
+  "passthrough" shortcut. Two connectors that happen to share field names still require
+  each field to be listed; the coincidence of naming is not a declaration of canonical
+  equivalence. This keeps the config the sole authority on what the canonical schema is
+  and prevents silent data movement from accidental name collisions.
 
 ---
 

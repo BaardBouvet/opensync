@@ -38,6 +38,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_DELETE_PROPAGATION.md](engine/PLAN_DELETE_PROPAGATION.md) | Opt-in delete propagation: explicit signal (record.deleted = true) + mark-and-sweep; per-channel config, circuit breaker integration | draft | — |
 | [engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md](engine/PLAN_CHANNEL_CANONICAL_SCHEMA.md) | Declare canonical field and association schema on channel definitions; validation that mapping targets match declared canonicals | draft | M |
 | [engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md](engine/PLAN_TRANSITIVE_CLOSURE_IDENTITY.md) | Per-field union-find identity matching: replace composite-key discover/addConnector/resolveCanonical with connected-components algorithm so A=B via email + B=C via taxId → A=B=C | complete | M |
+| [engine/PLAN_REVERSIBLE_CLUSTER_MERGE.md](engine/PLAN_REVERSIBLE_CLUSTER_MERGE.md) | Reversible cluster merges + split API: three options — A (merge log), B (full shadow snapshot in log), C (event-sourced identity layer, preferred long-term); enables playground break-cluster feature | backlog | L |
 | [engine/PLAN_LINK_GROUP.md](engine/PLAN_LINK_GROUP.md) | Confirm `link_group` (OSI-mapping §2 composite identity keys) is covered by `identityGroups`; close stale 🔶 entries in GAP_OSI_PRIMITIVES.md and field-mapping.md §10 | complete | XS |
 | [engine/REPORT_DB_ANALYSIS.md](engine/REPORT_DB_ANALYSIS.md) | Database usage analysis: schema, query inventory, hot paths, gaps, and storage-mechanism evaluation | reference | — |
 | [engine/PLAN_FIELD_EXPRESSIONS.md](engine/PLAN_FIELD_EXPRESSIONS.md) | Field expressions: `expression` / `reverseExpression` function fields on `FieldMapping` for combine, normalize, and decompose transforms in the embedded API | complete | S |
@@ -68,6 +69,7 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [engine/PLAN_VALUE_MAP.md](engine/PLAN_VALUE_MAP.md) | Declarative per-field value maps (`value_map` / `reverse_value_map` / `value_map_fallback`): translate source-local enum codes to canonical codes and back; auto-inverts bijective maps; mutual exclusion with `expression` | proposed | S |
 | [engine/PLAN_CONNECTOR_HEALTH_CHECK.md](engine/PLAN_CONNECTOR_HEALTH_CHECK.md) | Engine-driven connector health checks: `checkHealth()` on-demand probe + optional `startHealthPolling`; `connector_health` table; `ConnectorHealthResult` type; closes the spec gap where `healthCheck` is promised but never called | draft | S |
 | [engine/PLAN_SCHEMA_ENFORCEMENT.md](engine/PLAN_SCHEMA_ENFORCEMENT.md) | `required` / `immutable` enforcement in `_dispatchToTarget`: immutable-strip + required-check passes before every `insert()`/`update()` call; recursive descent into `FieldType.object.properties` and `FieldType.array.items.properties` for nested enforcement; path-qualified error messages | backlog | M |
+| [engine/PLAN_REQUIRE_EXPLICIT_FIELD_MAPPING.md](engine/PLAN_REQUIRE_EXPLICIT_FIELD_MAPPING.md) | Change default: `fields` absent = empty whitelist (nothing synced); add `passthrough: true` as opt-in for full verbatim forwarding; fixes silent implicit passthrough in playground | proposed | XS |
 ## connectors/ — Connector research and cleanup plans
 
 | File | What it covers | Status | Effort |
@@ -123,6 +125,8 @@ When a plan is completed, update its Status here and in the plan file itself.
 | [playground/PLAN_VISUAL_CONFIG_EDITOR.md](playground/PLAN_VISUAL_CONFIG_EDITOR.md) | Visual config editor: form-based tab alongside YAML editor; compares four approaches (form, editable lineage, node-graph, schema hints) | draft | L |
 | [playground/PLAN_YAML_EDITOR_FIDELITY.md](playground/PLAN_YAML_EDITOR_FIDELITY.md) | Full-fidelity YAML editor round-trip: fix lossy serialiser/parser in editor-pane.ts to cover identityGroups, array expansion, assocMappings, and conflict; reuse engine's MappingsFileSchema + buildChannelsFromEntries | complete | M |
 | [playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md](playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md) | Association cardinality mismatch demo: extend existing crm/erp scenario with predicate-as-type associations; CRM uses distinct predicates (`primaryCompanyId`, `secondaryCompanyId`), ERP uses a single FK (`orgId`); whitelist routing handles selectivity with no engine changes | complete | S |
+| [playground/PLAN_CONFIG_LOCALSTORAGE.md](playground/PLAN_CONFIG_LOCALSTORAGE.md) | Persist edited scenario YAML to localStorage keyed by scenario; survives page refresh; validation guard on load; Reset clears the persisted override | proposed | XS |
+| [playground/PLAN_CLUSTER_SPLIT.md](playground/PLAN_CLUSTER_SPLIT.md) | Break up a cluster: `SyncEngine.splitCanonical()` engine API + Break button on cluster cards in the playground; SPLIT event logged to event log and transaction_log | draft | M |
 
 ## performance/ — Performance and throughput optimisations
 
