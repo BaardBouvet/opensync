@@ -58,6 +58,28 @@ Switching to `lineage` does not alter state and does not trigger a reload. The d
 mounted. Selecting a channel tab or `unmapped` returns to the corresponding cluster view.
 Poll-tick refreshes do not rebuild the diagram while the `lineage` tab is active.
 
+### § 2.5 Topbar
+
+The topbar displays, left to right:
+
+- **Brand** — static text `OpenSync Playground`.
+- **Version badge** (`#app-version .version-badge`) — the playground's own version string,
+  e.g. `v0.1.0`, injected at build time from `playground/package.json` via Vite `define`.
+  Rendered in a dim monospace style so it is visible but unobtrusive.
+- **Scenario selector** — dropdown listing all available scenario keys.
+- **Status indicator** — shows `starting…`, `● running`, or an error message.
+- **Spacer** — pushes the remaining controls to the right.
+- **Poll countdown bar** — depleting bar indicating time until next auto-poll (§ 10).
+- **Auto toggle** and **poll hint** — `auto` checkbox and `Ns` label for the poll interval.
+- **Sync** button — manual poll trigger (active only when auto is off).
+- **Reset** button — reboots the current scenario.
+- **Update notification** (`#update-notification .update-notification`) — shown when the
+  GitHub Releases API reports a version newer than the current build. Displays
+  `<tag_name> available` and links to the GitHub Release page for that version.
+  Dismissible within the session via a small `✕` button (stored in `sessionStorage`
+  keyed to the latest release tag so a subsequent newer release re-shows the banner).
+  The fetch is fire-and-forget; network errors are silently swallowed.
+
 ---
 
 ## § 3 Scenario system
@@ -719,3 +741,70 @@ connector line.
 **Resolver badge.** When at least one inbound `FieldMapping` for a canonical field carries a
 `resolve` function, the canonical chip shows a small `ƒ` badge (class `ld-resolver-badge`).
 
+### § 11.14 Unmapped entity pool
+
+When `renderLineageDiagram` is called with an optional `allEntities: Map<string, string[]>`
+argument, it computes the set of `(connectorId, entity)` pairs that do not appear in any
+channel member. If this pool is non-empty, a `<div class="ld-unassigned-pool">` row is
+appended below the last channel swimlane.
+
+The pool row contains:
+
+- A muted `unassigned` label on the left.
+- One `.ld-pool-entity` pill per entry, labelled `connectorId / entity`.
+- Read-only; no interactivity.
+
+When the pool is empty (all connector entities are referenced in at least one channel
+member), the row is omitted entirely.
+
+`systems-pane.ts` builds `allEntities` from `conn.snapshot()` keys for each registered
+system and passes it to `renderLineageDiagram` when mounting the lineage tab.
+
+
+---
+
+## § 12 URL Anchors and Navigation History
+
+### § 12.1 Hash format
+
+The playground encodes view state in the URL hash:
+
+    #scenario=<scenarioKey>&tab=<tabId>
+
+Both parameters are URL-encoded. `scenario` defaults to `defaultScenarioKey` when absent.
+`tab` defaults to the first channel tab when absent. Unrecognised parameters are ignored.
+
+### § 12.2 History strategy
+
+| User action | History call | Rationale |
+|---|---|---|
+| Selects a scenario in the dropdown | `pushState` | Distinct "page" — Back should return here |
+| Clicks a channel tab (incl. `unmapped`, `lineage`) | `replaceState` | Tab switches are cheap; do not clog the history stack |
+| Config hot-reload (Apply button) | `replaceState` | Same scenario, not a distinct history entry |
+| Boot from URL hash (initial load) | `replaceState` | Normalise the URL without adding an entry |
+| `popstate` restores a scenario | no push/replace | Responding to the browser's own navigation |
+
+### § 12.3 Initial load from hash
+
+On `DOMContentLoaded`, `main.ts` reads `location.hash`, extracts `scenario` and `tab`,
+selects the matching scenario in the dropdown, boots the engine, then calls
+`systemsPane.setActiveTab()` to restore the tab. An unrecognised scenario key falls back to
+`defaultScenarioKey`. The URL is normalised via `replaceState` (not `pushState`) so the
+initial load does not add a redundant history entry.
+
+### § 12.4 popstate restoration
+
+A `window.addEventListener("popstate", ...)` handler re-runs `boot()` for the scenario
+named in the hash and then calls `systemsPane.setActiveTab()` to restore the tab.
+
+### § 12.5 Dirty-state guard
+
+`isDirty` is checked before allowing `popstate` to replace the current scenario, matching
+the existing behaviour for dropdown scenario switches. If the user cancels, the navigation
+is reversed by re-pushing the previous scenario's hash and restoring the dropdown selection.
+
+### § 12.6 setActiveTab
+
+`createSystemsPane` returns a `setActiveTab(tab: string)` method that sets `activeChannel`
+and re-renders tabs and content without emitting an `onTabChange` callback. This prevents
+re-entrant history calls when restoring state from a hash or popstate event.

@@ -12,7 +12,14 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Added
+- **Browser Playground — version badge** — the playground topbar now shows the current version (e.g. `v0.1.0`) injected at build time via Vite `define`. When the GitHub Releases API reports a newer version, a dismissible update notification (`v0.2.0 available`) appears linking to the release notes. Spec: `specs/playground.md §2.5`.
+- **Browser Playground — URL history** — the active scenario and channel tab are now reflected in the URL hash (`#scenario=<key>&tab=<id>`). Scenario switches push a history entry so Back/Forward work. Tab switches replace the entry. On load, the hash is restored. Shareable links and bookmarks work. Spec: `specs/playground.md §12`.
+- **Browser Playground — lineage unmapped entity pool** — the lineage diagram now shows an `unassigned` row at the bottom listing every connector entity not yet covered by any channel mapping. When all entities are mapped the row is omitted. Spec: `specs/playground.md §11.14`.
+- **Browser Playground — `empty` scenario** — new blank-canvas scenario with empty `channels: []` and `mappings: []`; every connector entity appears in the lineage unassigned pool.
+
 ### Fixed
+- **Sync Engine — SQL syntax error on memberless channel** — `channelStatus()` and `onboardedConnectors()` built `WHERE ()` / `IN ()` clauses when a channel had zero members (e.g. the playground `empty` scenario or a manually-typed `channels: [{id: foo}]` with no mappings). Now both methods return early with `"uninitialized"` / `[]` respectively. Regression test T47 added.
 - **Sync Engine — pre-flight FK warning** — the §8.2 warning now checks whether the target entity is registered for that connector in **any** channel, not just the same channel. Cross-channel FK targets (e.g. `contacts.companyId → companies`) are intentional and no longer produce a spurious warning.
 - **WaveApps connector — stale `associations` field** — `invoiceToRecord()` was still returning an `associations: [...]` array on `ReadRecord` (removed from the SDK). Replaced with `entity: 'customer'` on the `customer.id` `FieldDescriptor` so the engine auto-synthesises the Ref from the plain string value.
 - **Specs / docs / playground — stale association API references** — removed all remaining references to the old `ReadRecord.associations` / `InsertRecord.associations` / `UpdateRecord.associations` / `associationSchema` APIs across `specs/sync-engine.md`, `specs/connector-sdk.md`, `specs/playground.md`, `docs/connectors/guide.md`, `docs/connectors/advanced.md`, and the playground source. Dead `associations` parameter removed from `InMemoryConnector.insertRecord` / `updateRecord` and the `SystemsPaneCallbacks.onSave` signature. `RecordWithMeta` gains an explicit `associations?` field for UI badge display.

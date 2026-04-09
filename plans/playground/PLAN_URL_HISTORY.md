@@ -1,6 +1,6 @@
 # PLAN: URL Anchors and Browser History Navigation
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-06  
 **Effort:** S  
 **Domain:** playground  
