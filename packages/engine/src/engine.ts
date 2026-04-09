@@ -254,6 +254,8 @@ export class SyncEngine {
   channelStatus(channelId: string): ChannelStatus {
     const channel = this.channels.get(channelId);
     if (!channel) return "uninitialized";
+    // A channel with no members can never be ready or collected.
+    if (channel.members.length === 0) return "uninitialized";
 
     // Spec: specs/sync-engine.md — all shadow/identity queries must be scoped to these
     // channel members' (connectorId, entity) pairs, not just connectorId. Without entity
@@ -293,6 +295,7 @@ export class SyncEngine {
     const channel = this.channels.get(channelId);
     if (!channel) return [];
     const memberIds = channel.members.map((m) => m.connectorId);
+    if (memberIds.length === 0) return [];
     const ph = memberIds.map(() => "?").join(", ");
     return this.db
       .prepare<{ connector_id: string }>(

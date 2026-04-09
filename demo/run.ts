@@ -100,6 +100,10 @@ if (uninitChannels.length > 0) {
 
   for (const ch of uninitChannels) {
     console.log(`\nOnboarding channel "${ch.id}"…`);
+    if (ch.members.length < 2) {
+      console.log(`  skipped — channel has fewer than 2 members`);
+      continue;
+    }
 
     const collects = [];
     for (const member of ch.members) {

@@ -24,6 +24,7 @@
  * T25  full ingest of all 3 connectors after addConnector produces 0 writes
  * T26  collectOnly with integer watermarks stores integer since, not ISO timestamp
  * T46  record with empty data fans out and is linked in identity_map (zero-key guard regression)
+ * T47  channelStatus / onboardedConnectors with zero members returns uninitialized without SQL error
  */
 import { describe, it, expect } from "bun:test";
 import { tmpdir } from "node:os";
@@ -42,6 +43,7 @@ import {
   type DiscoveryReport,
 } from "./index.js";
 import type { Db } from "./db/index.js";
+import { createSchema } from "./db/migrations.js";
 import jsonfiles from "@opensync/connector-jsonfiles";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2271,5 +2273,28 @@ describe("T46: record with empty data fans out and is linked in identity_map", (
     // system-b output file must contain the new record
     const bRecords = readJson(join(dirB, "contacts.json")) as Array<{ id: string }>;
     expect(bRecords.some((r) => r.id === bRow!.external_id)).toBe(true);
+  });
+});
+
+// ─── T47: channelStatus and onboardedConnectors with zero members ─────────────
+// Regression: building the SQL WHERE clause from an empty members array produced
+// "WHERE ()" and "IN ()", which are syntax errors in SQLite.
+
+describe("T47: channel with zero members does not throw", () => {
+  it("channelStatus returns 'uninitialized' for a memberless channel", () => {
+    const db = openDb(":memory:");
+    createSchema(db);
+    const engine = new SyncEngine(
+      {
+        connectors: [],
+        channels: [{ id: "empty-ch", members: [], identityFields: [] }],
+        conflict: { strategy: "lww" },
+        readTimeoutMs: 10_000,
+      },
+      db,
+    );
+    expect(engine.channelStatus("empty-ch")).toBe("uninitialized");
+    expect(engine.onboardedConnectors("empty-ch")).toEqual([]);
+    db.close();
   });
 });

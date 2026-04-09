@@ -208,6 +208,8 @@ export async function startEngine(
   for (const ch of config.channels) {
     if (engine.channelStatus(ch.id) !== "uninitialized") continue;
     if (isArrayChannel(ch)) continue;
+    // A channel needs at least 2 members for collect→discover→onboard to make sense.
+    if (ch.members.length < 2) continue;
 
     const collects = [];
     for (const member of ch.members) {
