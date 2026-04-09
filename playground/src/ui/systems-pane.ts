@@ -8,7 +8,6 @@ import { linter } from "@codemirror/lint";
 import { keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { oneDark } from "@codemirror/theme-one-dark";
-import type { Association } from "@opensync/sdk";
 import type { InMemoryConnector, RecordWithMeta } from "../inmemory.js";
 import type { ChannelCluster } from "../engine-lifecycle.js";
 import type { ChannelConfig } from "@opensync/engine";
@@ -17,8 +16,8 @@ import { renderLineageDiagram } from "./lineage-diagram.js";
 // ─── Public types ──────────────────────────────────────────────────────────────
 
 export interface SystemsPaneCallbacks {
-  /** id === null for new records. associations is undefined when not changed. explicitId is set when user provided a custom ID in the new-record dialog. */
-  onSave: (systemId: string, entity: string, id: string | null, data: Record<string, unknown>, associations?: Association[], explicitId?: string) => void;
+  /** id === null for new records. explicitId is set when user provided a custom ID in the new-record dialog. */
+  onSave: (systemId: string, entity: string, id: string | null, data: Record<string, unknown>, explicitId?: string) => void;
   onSoftDelete: (systemId: string, entity: string, id: string) => void;
   onRestore:    (systemId: string, entity: string, id: string) => void;
 }
@@ -243,11 +242,11 @@ function buildCard(
         `Edit  ${systemId} / ${entity} / ${rec.id}`,
         JSON.stringify({ data: rec.data }, null, 2),
         (raw) => {
-          let parsed: { data?: Record<string, unknown>; associations?: Association[] };
+          let parsed: { data?: Record<string, unknown> };
           try { parsed = JSON.parse(raw) as typeof parsed; }
           catch (e) { alert(`Invalid JSON:\n${String(e)}`); return; }
           const data = parsed.data ?? (parsed as Record<string, unknown>);
-          callbacks.onSave(systemId, entity, rec.id, data as Record<string, unknown>, parsed.associations);
+          callbacks.onSave(systemId, entity, rec.id, data as Record<string, unknown>);
         },
       );
     });
@@ -420,11 +419,11 @@ export function createSystemsPane(
           `New  ${connectorId} / ${entity}`,
           '{\n  "data": {\n    \n  }\n}',
           (raw, explicitId) => {
-            let parsed: { data?: Record<string, unknown>; associations?: Association[] };
+              let parsed: { data?: Record<string, unknown> };
             try { parsed = JSON.parse(raw) as typeof parsed; }
             catch (err) { alert(`Invalid JSON:\n${String(err)}`); return; }
             const data = parsed.data ?? (parsed as Record<string, unknown>);
-            callbacks.onSave(connectorId, entity, null, data as Record<string, unknown>, parsed.associations, explicitId);
+            callbacks.onSave(connectorId, entity, null, data as Record<string, unknown>, explicitId);
           },
         );
       });
@@ -597,11 +596,11 @@ export function createSystemsPane(
           `New  ${m.connectorId} / ${m.entity}`,
           '{\n  "data": {\n    \n  }\n}',
           (raw, explicitId) => {
-            let parsed: { data?: Record<string, unknown>; associations?: Association[] };
+              let parsed: { data?: Record<string, unknown> };
             try { parsed = JSON.parse(raw) as typeof parsed; }
             catch (err) { alert(`Invalid JSON:\n${String(err)}`); return; }
             const data = parsed.data ?? (parsed as Record<string, unknown>);
-            callbacks.onSave(m.connectorId, m.entity, null, data as Record<string, unknown>, parsed.associations, explicitId);
+            callbacks.onSave(m.connectorId, m.entity, null, data as Record<string, unknown>, explicitId);
           },
         );
       });

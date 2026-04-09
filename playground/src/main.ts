@@ -200,15 +200,15 @@ document.addEventListener("DOMContentLoaded", () => {
   // ── Systems pane ──────────────────────────────────────────────────────────
   const systemsContainer = document.getElementById("systems-container")!;
   systemsPane = createSystemsPane(systemsContainer, {
-    onSave(systemId, entity, id, data, associations, explicitId) {
+    onSave(systemId, entity, id, data, explicitId) {
       if (!engineState) return;
       const conn = engineState.connectors.get(systemId);
       if (!conn) return;
       isDirty = true;
       if (id === null) {
-        conn.insertRecord(entity, data, associations, explicitId);
+        conn.insertRecord(entity, data, explicitId);
       } else {
-        conn.updateRecord(entity, id, data, associations);
+        conn.updateRecord(entity, id, data);
       }
       // In manual mode, only refresh the UI — do NOT run the engine.
       // The user explicitly controls when the engine runs via the Sync button.

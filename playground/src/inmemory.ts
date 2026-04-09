@@ -30,6 +30,8 @@ export interface RecordWithMeta extends ReadRecord {
   modifiedAt: number;   // Date.now() when last inserted or updated
   watermark: number;    // monotonic counter; changes on every write
   softDeleted: boolean; // true when UI-marked as deleted (hidden from engine read)
+  /** Derived from FK plain-string fields via FieldDescriptor.entity — for UI badge display. */
+  associations?: Association[];
 }
 
 export interface InMemoryConnector {
@@ -41,9 +43,9 @@ export interface InMemoryConnector {
   /** Snapshot enriched with modifiedAt + watermark + softDeleted — used by the UI. */
   snapshotFull(): Record<string, RecordWithMeta[]>;
   /** Insert a single record from the UI. Returns the assigned id. */
-  insertRecord(entity: string, data: Record<string, unknown>, associations?: Association[], explicitId?: string): string;
+  insertRecord(entity: string, data: Record<string, unknown>, explicitId?: string): string;
   /** Merge a data patch onto an existing record from the UI. */
-  updateRecord(entity: string, id: string, data: Record<string, unknown>, associations?: Association[]): void;
+  updateRecord(entity: string, id: string, data: Record<string, unknown>): void;
   /** Remove a single record from the UI (hard delete). */
   deleteRecord(entity: string, id: string): void;
   /** Mark a record as soft-deleted (hidden from engine; shown in UI with Restore). */
@@ -269,7 +271,7 @@ export function createInMemoryConnector(
       return out;
     },
 
-    insertRecord(entity: string, data: Record<string, unknown>, _associations?: Association[], explicitId?: string): string {
+    insertRecord(entity: string, data: Record<string, unknown>, explicitId?: string): string {
       const id = explicitId ?? (data["id"] as string | undefined) ?? crypto.randomUUID();
       const { wms, mods } = ensureMaps(entity);
       const existing = store.get(entity) ?? [];
@@ -279,7 +281,7 @@ export function createInMemoryConnector(
       return id;
     },
 
-    updateRecord(entity: string, id: string, data: Record<string, unknown>, _associations?: Association[]): void {
+    updateRecord(entity: string, id: string, data: Record<string, unknown>): void {
       const { wms, mods } = ensureMaps(entity);
       const existing = store.get(entity) ?? [];
       const idx = existing.findIndex((r) => r.id === id);
