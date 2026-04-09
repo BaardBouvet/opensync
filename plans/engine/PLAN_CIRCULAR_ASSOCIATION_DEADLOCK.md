@@ -25,8 +25,8 @@ Strict mode introduces a failure mode that cannot occur in eager mode: two recor
 mutually reference each other, both new to the target, will stall permanently.
 
 ```
-sa/contacts/c1  associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c2" }]
-sa/contacts/c2  associations: [{ predicate: "reportId",  targetEntity: "contacts", targetId: "c1" }]
+sa/contacts/c1  data.managerId = { '@id': 'c2', '@entity': 'contacts' }
+sa/contacts/c2  data.reportId  = { '@id': 'c1', '@entity': 'contacts' }
 ```
 
 | Step | What happens |
@@ -172,8 +172,8 @@ This requires adding `break_requested INTEGER NOT NULL DEFAULT 0` to `deferred_a
 ### § 1.1 Concrete example
 
 ```
-sa/contacts/c1  associations: [{ predicate: "managerId", targetEntity: "contacts", targetId: "c2" }]
-sa/contacts/c2  associations: [{ predicate: "reportId",  targetEntity: "contacts", targetId: "c1" }]
+sa/contacts/c1  data.managerId = { '@id': 'c2', '@entity': 'contacts' }
+sa/contacts/c2  data.reportId  = { '@id': 'c1', '@entity': 'contacts' }
 ```
 
 Both c1 and c2 are unique to `sa` (not yet in `sb`). Processing order:

@@ -1,6 +1,6 @@
 # PLAN: Config-Declared Association Synthesis
 
-**Status:** proposed  
+**Status:** stale — needs rewrite  
 **Date:** 2026-04-08  
 **Effort:** S  
 **Domain:** packages/engine  
@@ -8,6 +8,13 @@
 **Spec:** specs/associations.md, specs/field-mapping.md §3.2, specs/config.md  
 **Depends on:** PLAN_DEFERRED_ASSOCIATIONS.md (complete), PLAN_PREDICATE_MAPPING.md (complete)  
 **Related:** PLAN_ARRAY_ELEMENT_ASSOCIATIONS.md (connector-supplied element associations via `ElementRecord`)
+
+> **Note (2026-04-09):** This plan was written before the connector API changed. The problem
+> it describes — most connectors not populating `ReadRecord.associations` — no longer applies
+> because `ReadRecord.associations` itself has been removed. The kernel of the idea (declaring
+> FK targets in YAML without modifying the connector) is still worthwhile for computed or
+> path-navigated FK values, but the mechanism must be redesigned around `Ref` inference rather
+> than synthesising `Association[]` objects.
 
 ---
 

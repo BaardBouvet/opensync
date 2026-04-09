@@ -1,6 +1,6 @@
 # PLAN: Associations on Nested Array Elements (`ElementRecord`)
 
-**Status:** proposed  
+**Status:** stale — needs rewrite  
 **Date:** 2026-04-08  
 **Effort:** S  
 **Domain:** packages/sdk, packages/engine  
@@ -9,6 +9,13 @@
 **Depends on:** PLAN_NESTED_ARRAY_PIPELINE.md (complete), PLAN_DEFERRED_ASSOCIATIONS.md (complete),
   PLAN_PREDICATE_MAPPING.md (complete)  
 **Related:** PLAN_CONFIG_DECLARED_ASSOCIATIONS.md (config synthesis — covers element-level and root)
+
+> **Note (2026-04-09):** This plan was written before `ReadRecord.associations?: Association[]` was
+> removed from the connector API. The proposed `ElementRecord.associations` field and the
+> `element()` factory examples in § 3 reference the old parallel-array API. The underlying
+> need — letting connectors signal computed FK references on individual array elements — is
+> still valid and unimplemented, but any redesign must use `Ref` objects in `data` and
+> `FieldDescriptor.entity` in `schema` rather than a separate `associations` field.
 
 ---
 

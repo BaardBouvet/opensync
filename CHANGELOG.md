@@ -12,6 +12,11 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Fixed
+- **Sync Engine — pre-flight FK warning** — the §8.2 warning now checks whether the target entity is registered for that connector in **any** channel, not just the same channel. Cross-channel FK targets (e.g. `contacts.companyId → companies`) are intentional and no longer produce a spurious warning.
+- **WaveApps connector — stale `associations` field** — `invoiceToRecord()` was still returning an `associations: [...]` array on `ReadRecord` (removed from the SDK). Replaced with `entity: 'customer'` on the `customer.id` `FieldDescriptor` so the engine auto-synthesises the Ref from the plain string value.
+- **Specs / docs / playground — stale association API references** — removed all remaining references to the old `ReadRecord.associations` / `InsertRecord.associations` / `UpdateRecord.associations` / `associationSchema` APIs across `specs/sync-engine.md`, `specs/connector-sdk.md`, `specs/playground.md`, `docs/connectors/guide.md`, `docs/connectors/advanced.md`, and the playground source. Dead `associations` parameter removed from `InMemoryConnector.insertRecord` / `updateRecord` and the `SystemsPaneCallbacks.onSave` signature. `RecordWithMeta` gains an explicit `associations?` field for UI badge display.
+
 ### Changed
 - **jsonfiles connector — `entities` dict config** — replaced `filePaths: string[]` + `schemas: Record<entityName, …>` with a single `entities: Record<entityName, { filePath: string; schema?: … }>` dict, co-locating each entity's file path and FK schema in one entry. All tests, demo configs, and specs updated.
 - **Connector SDK — `associationSchema` removed** — `EntityDefinition.associationSchema` and `AssociationDescriptor` are removed. FK declarations now live exclusively on `FieldDescriptor.entity` in `EntityDefinition.schema`. The engine write-side filter and pre-flight warning now derive FK field set from `schema[field].entity`. SPARQL connector updated: `entity` is now included in the `FieldDescriptor` for `refEntity` props. Specs updated: `specs/connector-sdk.md §EntityDefinition`, `specs/associations.md §8`.

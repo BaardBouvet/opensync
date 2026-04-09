@@ -34,13 +34,16 @@ channel: events
 A record from the `events` channel might carry:
 
 ```typescript
-associations: [
-  {
-    predicate: 'https://schema.org/organizer',
-    targetEntity: 'organization',          // sparql-a's local entity name
-    targetId: 'https://dbpedia.org/resource/CERN'
+// ReadRecord from sparql-a, events channel
+{
+  id: 'https://example.com/event/1',
+  data: {
+    'https://schema.org/organizer': {
+      '@id': 'https://dbpedia.org/resource/CERN',
+      '@entity': 'organization',   // sparql-a's local entity name
+    }
   }
-]
+}
 ```
 
 In the RDF world `targetId` is a URI — globally unambiguous, the same URI that

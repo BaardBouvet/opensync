@@ -45,7 +45,7 @@ The longest offenders:
 
 | Layer | Identifiers |
 |-------|-------------|
-| SDK type | `Association`, `associations?: Association[]` on `ReadRecord`, `InsertRecord`, `UpdateRecord` |
+| SDK type | `Association`, `Ref` (`{ '@id', '@entity'? }` inline in `ReadRecord.data`); `FieldDescriptor.entity` for FK declarations |
 | Engine fields | `sourceAssociations`, `sourceShadowAssociations`, `beforeAssociations`, `afterAssociations` |
 | Engine methods | `_remapAssociations`, `_remapAssociationsPartial`, `parseSentinelAssociations`, `matchSideAssoc`, `matchAssocCache` |
 | DB table | `deferred_associations` |
