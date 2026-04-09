@@ -585,7 +585,46 @@ function buildEntityGroup(
       scheduleRedraw();
     });
   } else {
-    header.classList.add("ld-entity-header-passthrough");
+    // Passthrough entity (no explicit field mappings in config).
+    if (allEntityFields && allEntityFields.length > 0) {
+      // Has schema fields: make expandable showing all fields as "available" (none are mapped)
+      const fieldsList = document.createElement("div");
+      fieldsList.className = "ld-fields-list";
+      fieldsList.dataset.memberKey = mk;
+      for (const fp of allEntityFields) {
+        const node = document.createElement("div");
+        node.className = "ld-field-node ld-field-node-unmapped";
+        if (fp.isFK) node.classList.add("ld-field-node-fk");
+        node.dataset.unmapped = "true";
+        const nameSpan = document.createElement("span");
+        nameSpan.textContent = fp.name;
+        node.appendChild(nameSpan);
+        const metaParts: string[] = [];
+        if (fp.description) metaParts.push(fp.description);
+        if (fp.type)        metaParts.push(fp.type);
+        if (fp.example != null) metaParts.push(`e.g. ${String(fp.example)}`);
+        if (metaParts.length > 0) {
+          const meta = document.createElement("span");
+          meta.className = "ld-field-node-meta";
+          meta.textContent = metaParts.join(" \u00b7 ");
+          node.appendChild(meta);
+        }
+        fieldsList.appendChild(node);
+      }
+      fieldsList.classList.add("ld-hidden");
+      group.appendChild(fieldsList);
+      header.addEventListener("click", () => {
+        if (colElRef.el) {
+          setEntityExpanded(colElRef.el, mk, expandedSet, !expandedSet.has(mk), autoExpandedSet);
+        }
+        scheduleRedraw();
+      });
+    } else {
+      // No schema fields: truly non-interactive passthrough
+      header.classList.add("ld-entity-header-passthrough");
+      header.title = "";
+      header.querySelector<HTMLElement>(".ld-chevron")?.remove();
+    }
   }
 
   return group;
