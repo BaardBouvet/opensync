@@ -11,6 +11,7 @@ import type {
   Connector,
   ConnectorContext,
   EntityDefinition,
+  FieldDescriptor,
   ReadBatch,
   ReadRecord,
   InsertRecord,
@@ -42,6 +43,8 @@ export interface InMemoryConnector {
   snapshot(): EntitySeed;
   /** Snapshot enriched with modifiedAt + watermark + softDeleted — used by the UI. */
   snapshotFull(): Record<string, RecordWithMeta[]>;
+  /** EntityDefinition[] for all entities in this connector — used by the UI for field preview. */
+  getEntityDefs(): EntityDefinition[];
   /** Insert a single record from the UI. Returns the assigned id. */
   insertRecord(entity: string, data: Record<string, unknown>, explicitId?: string): string;
   /** Merge a data patch onto an existing record from the UI. */
@@ -63,7 +66,7 @@ function makeEntity(
   modifiedAt: Map<string, number>,  // shared with connector level — id → ts
   softDeleted: Set<string>,         // ids to exclude from engine read
   bump: () => number,               // monotonic counter shared across all entities
-  entitySchema?: Record<string, { entity: string }>,
+  entitySchema?: Record<string, FieldDescriptor>,
 ): EntityDefinition {
   // Assign initial watermarks and timestamps to seed records.
   const seedTs = Date.now();
@@ -74,14 +77,7 @@ function makeEntity(
 
   return {
     name: entityName,
-    schema: entitySchema
-      ? Object.fromEntries(
-          Object.entries(entitySchema).map(([field, desc]) => [
-            field,
-            { type: "string" as const, entity: desc.entity },
-          ]),
-        )
-      : undefined,
+    schema: entitySchema,
 
     async *read(_ctx: ConnectorContext, since?: string): AsyncIterable<ReadBatch> {
       const records = store.get(entityName) ?? [];
@@ -182,7 +178,7 @@ function makeEntity(
 export function createInMemoryConnector(
   systemId: string,
   seed: EntitySeed,
-  schemas?: Record<string, Record<string, { entity: string }>>,
+  schemas?: Record<string, Record<string, FieldDescriptor>>,
 ): InMemoryConnector {
   const store = new Map<string, ReadRecord[]>();
   // Deep-copy the seed so resets don't mutate the original
@@ -257,7 +253,7 @@ export function createInMemoryConnector(
           const derivedAssoc: Association[] = entitySchema
             ? Object.entries(entitySchema)
                 .filter(([field, desc]) => desc.entity && typeof r.data[field] === "string" && r.data[field])
-                .map(([field, desc]) => ({ predicate: field, targetEntity: desc.entity, targetId: r.data[field] as string }))
+                .map(([field, desc]) => ({ predicate: field, targetEntity: desc.entity!, targetId: r.data[field] as string }))
             : [];
           return {
             ...r,
@@ -324,6 +320,10 @@ export function createInMemoryConnector(
         wms.set(id, bump());
         mods.set(id, Date.now());
       }
+    },
+
+    getEntityDefs(): EntityDefinition[] {
+      return entities;
     },
 
   };

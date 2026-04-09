@@ -9,6 +9,29 @@ import {
   type ConnectorFieldNode,
 } from "./lineage-model.js";
 
+// ─── Field preview ───────────────────────────────────────────────────────────
+
+/** Displayable metadata for one field on a connector entity.
+ *  Derived from FieldDescriptor in getEntityDefs(); used by the pool and unmapped
+ *  sections in the lineage diagram. Spec: specs/playground.md § 11.15 */
+export interface FieldPreview {
+  name: string;
+  isFK: boolean;
+  description?: string;
+  /** Human-readable type string: "string", "number", "array", "→ accounts", … */
+  type?: string;
+  example?: unknown;
+}
+
+/** Build a hover tooltip string from FieldPreview metadata. */
+function buildFieldTitle(fp: FieldPreview): string {
+  const parts: string[] = [];
+  if (fp.description) parts.push(fp.description);
+  if (fp.type)        parts.push(fp.type);
+  if (fp.example != null) parts.push(`e.g. ${fp.example}`);
+  return parts.join(" · ");
+}
+
 
 // ─── Per-channel state ────────────────────────────────────────────────────────
 
@@ -262,7 +285,7 @@ function drawSide(
       for (const f of mFields) {
         const fieldPill = Array.from(
           colEl.querySelectorAll<HTMLElement>(".ld-field-node"),
-        ).find((n) => n.dataset.memberKey === mk && n.dataset.sourceField === f.sourceField) ?? null;
+        ).find((n) => n.dataset.memberKey === mk && n.dataset.sourceField === f.sourceField && !n.dataset.unmapped) ?? null;
         const chip = canonicalChips.get(f.canonicalField);
         if (!fieldPill || !chip) continue;
         const pillRect = relRect(fieldPill, graphEl);
@@ -508,6 +531,7 @@ function buildEntityGroup(
   autoExpandedSet: Set<string>,
   colElRef: { el: HTMLElement | null },
   scheduleRedraw: () => void,
+  allEntityFields: FieldPreview[] | null,  // Spec: specs/playground.md § 11.15
 ): HTMLElement {
   const group = document.createElement("div");
   group.className = "ld-entity-group";
@@ -518,6 +542,29 @@ function buildEntityGroup(
   const passthrough = fields.length === 1 && fields[0]!.canonicalField === "*";
   if (!passthrough) {
     const fieldsList = buildFieldsList(fields, mk);
+
+    // Append unmapped fields below the mapped ones. Spec: specs/playground.md § 11.15
+    if (allEntityFields && allEntityFields.length > 0) {
+      const mappedSourceFields = new Set(fields.map((f) => f.sourceField));
+      const unmappedFields = allEntityFields.filter((fp) => !mappedSourceFields.has(fp.name));
+      if (unmappedFields.length > 0) {
+        const sep = document.createElement("div");
+        sep.className = "ld-fields-separator";
+        sep.textContent = "— also available —";
+        fieldsList.appendChild(sep);
+        for (const fp of unmappedFields) {
+          const node = document.createElement("div");
+          node.className = "ld-field-node ld-field-node-unmapped";
+          if (fp.isFK) node.classList.add("ld-field-node-fk");
+          node.dataset.unmapped = "true";
+          const t = buildFieldTitle(fp);
+          if (t) node.title = t;
+          node.textContent = fp.name;
+          fieldsList.appendChild(node);
+        }
+      }
+    }
+
     fieldsList.classList.add("ld-hidden"); // always start collapsed
     group.appendChild(fieldsList);
 
@@ -539,6 +586,7 @@ function buildColumn(
   expandedSet: Set<string>,
   autoExpandedSet: Set<string>,
   scheduleRedraw: () => void,
+  allEntities?: Map<string, Map<string, FieldPreview[]>>,
 ): HTMLElement {
   const col = document.createElement("div");
   col.className = "ld-col";
@@ -553,7 +601,8 @@ function buildColumn(
 
   for (const [mk, mFields] of byMember) {
     const { connectorId, entity } = mFields[0]!;
-    col.appendChild(buildEntityGroup(connectorId, entity, mFields, mk, expandedSet, autoExpandedSet, colElRef, scheduleRedraw));
+    const allEntityFields = allEntities?.get(connectorId)?.get(entity) ?? null;
+    col.appendChild(buildEntityGroup(connectorId, entity, mFields, mk, expandedSet, autoExpandedSet, colElRef, scheduleRedraw, allEntityFields));
   }
 
   colElRef.el = col;
@@ -638,6 +687,7 @@ function buildFlowHeader(channelId: string): HTMLElement {
 function buildChannelSection(
   channel: ChannelConfig,
   lineage: ChannelLineage,
+  allEntities?: Map<string, Map<string, FieldPreview[]>>,
 ): HTMLElement {
   const state: ChannelState = {
     expandedLeft: new Set(),
@@ -674,12 +724,12 @@ function buildChannelSection(
   }
 
   // Build 3 columns
-  const leftCol = buildColumn(lineage.inboundFields, state.expandedLeft, state.autoExpandedLeft, scheduleRedraw);
+  const leftCol = buildColumn(lineage.inboundFields, state.expandedLeft, state.autoExpandedLeft, scheduleRedraw, allEntities);
   leftCol.classList.add("ld-col-left");
 
   const centreCol = buildCentreColumn(lineage);
 
-  const rightCol = buildColumn(lineage.outboundFields, state.expandedRight, state.autoExpandedRight, scheduleRedraw);
+  const rightCol = buildColumn(lineage.outboundFields, state.expandedRight, state.autoExpandedRight, scheduleRedraw, allEntities);
   rightCol.classList.add("ld-col-right");
 
   // SVG overlay
@@ -779,16 +829,17 @@ function buildChannelSection(
 export function renderLineageDiagram(
   container: HTMLElement,
   channels: ChannelConfig[],
-  allEntities?: Map<string, string[]>,
+  allEntities?: Map<string, Map<string, FieldPreview[]>>,
 ): void {
   container.innerHTML = "";
 
   for (const channel of channels) {
     const lineage = buildChannelLineage(channel);
-    container.appendChild(buildChannelSection(channel, lineage));
+    container.appendChild(buildChannelSection(channel, lineage, allEntities));
   }
 
   // Spec: specs/playground.md § 11.14 — unmapped entity pool
+  // Spec: specs/playground.md § 11.15 — expandable field preview in pool
   if (allEntities) {
     const mapped = new Set<string>();
     for (const ch of channels) {
@@ -798,15 +849,16 @@ export function renderLineageDiagram(
         mapped.add(`${m.connectorId}/${entityName}`);
       }
     }
-    const pool: { connectorId: string; entity: string }[] = [];
-    for (const [connectorId, entities] of allEntities) {
-      for (const entity of entities) {
+    const pool: { connectorId: string; entity: string; fields: FieldPreview[] }[] = [];
+    for (const [connectorId, entityMap] of allEntities) {
+      for (const [entity, fields] of entityMap) {
         if (!mapped.has(`${connectorId}/${entity}`)) {
-          pool.push({ connectorId, entity });
+          pool.push({ connectorId, entity, fields });
         }
       }
     }
     if (pool.length > 0) {
+      const expandedPool = new Set<string>();
       const poolEl = document.createElement("div");
       poolEl.className = "ld-unassigned-pool";
       const label = document.createElement("span");
@@ -815,16 +867,47 @@ export function renderLineageDiagram(
       poolEl.appendChild(label);
       const pills = document.createElement("div");
       pills.className = "ld-pool-pills";
-      for (const { connectorId, entity } of pool) {
-        const pill = document.createElement("span");
-        pill.className = "ld-pool-entity";
-        pill.textContent = `${connectorId} / ${entity}`;
-        pills.appendChild(pill);
+      for (const { connectorId, entity, fields } of pool) {
+        const key = `${connectorId}/${entity}`;
+        const group = document.createElement("div");
+        group.className = "ld-pool-entity-group";
+        const header = document.createElement("div");
+        header.className = "ld-pool-entity-header";
+        const entityLabel = document.createElement("span");
+        entityLabel.className = "ld-pool-entity-label";
+        entityLabel.textContent = `${connectorId} / ${entity}`;
+        header.appendChild(entityLabel);
+        if (fields.length > 0) {
+          const chevron = document.createElement("span");
+          chevron.className = "ld-chevron";
+          chevron.textContent = "▸";
+          header.appendChild(chevron);
+          const fieldsList = document.createElement("div");
+          fieldsList.className = "ld-pool-fields-list ld-hidden";
+          for (const fp of fields) {
+            const pill = document.createElement("span");
+            pill.className = "ld-pool-field";
+            if (fp.isFK) pill.classList.add("ld-pool-field-fk");
+            pill.textContent = fp.name;
+            const t = buildFieldTitle(fp);
+            if (t) pill.title = t;
+            fieldsList.appendChild(pill);
+          }
+          group.appendChild(header);
+          group.appendChild(fieldsList);
+          header.addEventListener("click", () => {
+            const isExpanded = expandedPool.has(key);
+            expandedPool[isExpanded ? "delete" : "add"](key);
+            chevron.textContent = isExpanded ? "▸" : "▾";
+            fieldsList.classList.toggle("ld-hidden", isExpanded);
+          });
+        } else {
+          group.appendChild(header);
+        }
+        pills.appendChild(group);
       }
       poolEl.appendChild(pills);
       container.appendChild(poolEl);
     }
   }
 }
-
-

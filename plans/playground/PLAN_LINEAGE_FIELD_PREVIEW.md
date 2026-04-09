@@ -1,6 +1,6 @@
 # PLAN: Lineage Diagram — Entity Field Preview
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-09  
 **Effort:** S  
 **Domain:** playground  

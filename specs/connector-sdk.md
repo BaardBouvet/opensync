@@ -47,7 +47,7 @@ interface EntityDefinition {
 }
 ```
 
-`schema` on an entity declares the shape of the records it *produces* — static metadata evaluated at channel setup time. Each entry is a `FieldDescriptor` with optional `description`, `type`, `required`, and `immutable`. Fields marked `required: true` are enforced: the engine produces a synthetic error result for any record missing a required field before it reaches `insert()` or `update()`. Fields marked `immutable: true` are frozen after creation: the engine strips them from `UpdateRecord.data` before calling `update()`, so the connector never sees an attempt to overwrite them. No naming convention to follow — just describe what the field contains in whatever language makes sense.
+`schema` on an entity declares the shape of the records it *produces* — static metadata evaluated at channel setup time. Each entry is a `FieldDescriptor` with optional `description`, `type`, `required`, `immutable`, and `example`. Fields marked `required: true` are enforced: the engine produces a synthetic error result for any record missing a required field before it reaches `insert()` or `update()`. Fields marked `immutable: true` are frozen after creation: the engine strips them from `UpdateRecord.data` before calling `update()`, so the connector never sees an attempt to overwrite them. No naming convention to follow — just describe what the field contains in whatever language makes sense.
 
 Uses: agents read `description` to understand non-obvious field names; the engine and tooling use `type` to warn at channel setup if a source field type is incompatible with what the target entity expects.
 
@@ -139,6 +139,7 @@ interface FieldDescriptor {
   entity?: string;      // FK ref to this connector-local entity name; engine synthesizes association from plain string value
   required?: boolean;   // field must be present; engine enforces before insert()/update() and execute()
   immutable?: boolean;  // field cannot be changed after creation; engine rejects updates that include it
+  example?: unknown;    // illustrative example value; display-only — engine ignores it
 }
 
 // EntityCapabilities removed — insert/update/delete presence on EntityDefinition is the capability declaration.

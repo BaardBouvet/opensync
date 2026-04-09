@@ -1,30 +1,77 @@
 // Fixed CRM / ERP / HR seed used by every browser-demo scenario.
 // Scenarios define only channels + conflict; the connector data is always
 // this fixture so the user can focus on experimenting with channel configs.
-import type { ReadRecord } from "@opensync/sdk";
+import type { ReadRecord, FieldDescriptor } from "@opensync/sdk";
 
 export type EntitySeedMap = Record<string, Record<string, ReadRecord[]>>;
 
-/** Per-entity FK field declarations — mirrors the connector SDK `FieldDescriptor.entity` pattern.
- *  The engine auto-synthesises associations from plain string values in `data` when the field
- *  has `entity` declared here.  Spec: plans/connectors/PLAN_SCHEMA_REF_AUTOSYNTH.md §3.1 */
-export type EntitySchemaMap = Record<string, Record<string, Record<string, { entity: string }>>>;
+/** Per-entity field declarations — full FieldDescriptor including description, type, and example.
+ *  FK fields also carry `entity` so the engine auto-synthesises associations from plain string
+ *  values in `data`.  Spec: plans/connectors/PLAN_SCHEMA_REF_AUTOSYNTH.md §3.1 */
+export type EntitySchemaMap = Record<string, Record<string, Record<string, FieldDescriptor>>>;
 
+// Spec: specs/playground.md §11.15 — explicit schema used by the lineage field preview
 export const FIXED_SCHEMAS: EntitySchemaMap = {
   crm: {
+    companies: {
+      name:   { type: "string", description: "Company display name", example: "Acme Corp" },
+      domain: { type: "string", description: "Primary web domain", example: "acme.com" },
+    },
     contacts: {
-      primaryCompanyId:   { entity: "companies" },
-      secondaryCompanyId: { entity: "companies" },
+      name:               { type: "string", description: "Full name", example: "Alice Liddell" },
+      email:              { type: "string", description: "Work email address", example: "alice@example.com" },
+      primaryCompanyId:   { type: "string", entity: "companies", description: "Main company this contact belongs to", example: "co1" },
+      secondaryCompanyId: { type: "string", entity: "companies", description: "Secondary company affiliation", example: "co2" },
     },
   },
   erp: {
+    accounts: {
+      accountName: { type: "string", description: "Account display name", example: "Acme Corp" },
+      website:     { type: "string", description: "Account website", example: "acme.com" },
+    },
     employees: {
-      orgId: { entity: "accounts" },
+      fullName: { type: "string", description: "Employee full name", example: "Alice Liddell" },
+      email:    { type: "string", description: "Work email address", example: "alice@example.com" },
+      orgId:    { type: "string", entity: "accounts", description: "Parent account reference", example: "acc1" },
+    },
+    orders: {
+      orderRef: { type: "string", description: "Human-readable order reference", example: "ORD-1001" },
+      total:    { type: "number", description: "Order total in account currency", example: 299.90 },
+      status:   { type: "string", description: "Order lifecycle status", example: "shipped" },
+      date:     { type: "string", description: "ISO 8601 order date", example: "2026-03-15" },
+    },
+    orderLines: {
+      lineNo:    { type: "string", description: "Line item identifier within the order", example: "L01" },
+      sku:       { type: "string", description: "Product stock-keeping unit code", example: "SKU-001" },
+      qty:       { type: "number", description: "Quantity ordered", example: 5 },
+      unitPrice: { type: "number", description: "Unit price at time of purchase", example: 29.99 },
+      orderRef:  { type: "string", description: "Parent order reference", example: "ORD-1001" },
+    },
+    items: {
+      sku:      { type: "string", description: "Product stock-keeping unit code", example: "SKU-001" },
+      itemName: { type: "string", description: "Product display name", example: "Widget A" },
+      price:    { type: "number", description: "List price", example: 29.99 },
     },
   },
   hr: {
+    orgs: {
+      orgName: { type: "string", description: "Organisation display name", example: "Globex Inc" },
+      site:    { type: "string", description: "Organisation website", example: "globex.com" },
+    },
     people: {
-      orgRef: { entity: "orgs" },
+      displayName: { type: "string", description: "Person display name", example: "Bob Martin" },
+      email:       { type: "string", description: "Work email address", example: "bob@example.com" },
+      orgRef:      { type: "string", entity: "orgs", description: "Organisation this person belongs to", example: "org1" },
+    },
+  },
+  webshop: {
+    purchases: {
+      purchaseRef:   { type: "string", description: "Purchase reference code", example: "ORD-1001" },
+      accountDomain: { type: "string", description: "Buyer account domain", example: "acme.com" },
+      amount:        { type: "number", description: "Total purchase amount", example: 299.90 },
+      state:         { type: "string", description: "Purchase lifecycle state", example: "shipped" },
+      couponCode:    { type: "string", description: "Applied discount coupon code (null if none)", example: "SAVE10" },
+      lines:         { type: { type: "array" }, description: "Individual line items in this purchase" },
     },
   },
 };

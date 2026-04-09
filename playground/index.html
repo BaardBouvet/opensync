@@ -674,11 +674,36 @@
     .ld-pool-pills {
       display: flex; flex-wrap: wrap; gap: 6px;
     }
-    .ld-pool-entity {
-      background: #151520; border: 1px solid #252535;
-      border-radius: 4px; padding: 3px 10px;
+    /* ── Pool entity groups with expandable fields — Spec: specs/playground.md § 11.15 ── */
+    .ld-pool-entity-group {
+      display: inline-flex; flex-direction: column;
+      border: 1px solid #252535; border-radius: 4px; overflow: hidden;
+    }
+    .ld-pool-entity-header {
+      display: flex; align-items: center; gap: 4px; padding: 3px 10px;
+      background: #151520; cursor: pointer; user-select: none;
+      font-size: 10px; font-family: monospace; color: #5a5a80; font-style: italic;
+    }
+    .ld-pool-entity-header:hover { background: #1c1c2c; }
+    .ld-pool-entity-label { white-space: nowrap; }
+    .ld-pool-fields-list {
+      display: flex; flex-wrap: wrap; gap: 3px;
+      padding: 4px 8px 6px;
+      background: #111118; border-top: 1px solid #1e1e2e;
+    }
+    .ld-pool-field {
       font-size: 10px; font-family: monospace; color: #5a5a80;
-      white-space: nowrap; font-style: italic;
+      background: #1a1a28; border: 1px solid #252535; border-radius: 3px;
+      padding: 1px 5px; white-space: nowrap; cursor: default;
+    }
+    .ld-pool-field-fk { font-style: italic; border-style: dashed; }
+    /* ── Unmapped fields in channel entity groups — Spec: specs/playground.md § 11.15 ── */
+    .ld-fields-separator {
+      font-size: 10px; color: #4a4a6a; padding: 4px 6px 2px;
+      width: 100%; text-align: center; letter-spacing: 0.5px;
+    }
+    .ld-field-node-unmapped {
+      opacity: 0.38; pointer-events: none; font-style: italic; border-style: dashed;
     }
   </style>
 </head>

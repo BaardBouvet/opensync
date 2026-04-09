@@ -743,23 +743,75 @@ connector line.
 
 ### § 11.14 Unmapped entity pool
 
-When `renderLineageDiagram` is called with an optional `allEntities: Map<string, string[]>`
-argument, it computes the set of `(connectorId, entity)` pairs that do not appear in any
-channel member. If this pool is non-empty, a `<div class="ld-unassigned-pool">` row is
-appended below the last channel swimlane.
+When `renderLineageDiagram` is called with an optional
+`allEntities: Map<string, Map<string, FieldPreview[]>>` argument, it computes the set of
+`(connectorId, entity)` pairs that do not appear in any channel member. If this pool is
+non-empty, a `<div class="ld-unassigned-pool">` row is appended below the last channel
+swimlane.
 
 The pool row contains:
 
 - A muted `unassigned` label on the left.
-- One `.ld-pool-entity` pill per entry, labelled `connectorId / entity`.
-- Read-only; no interactivity.
+- One `.ld-pool-entity-group` per entry (see §11.15).
 
 When the pool is empty (all connector entities are referenced in at least one channel
 member), the row is omitted entirely.
 
-`systems-pane.ts` builds `allEntities` from `conn.snapshot()` keys for each registered
-system and passes it to `renderLineageDiagram` when mounting the lineage tab.
+`systems-pane.ts` builds `allEntities` by calling `conn.getEntityDefs()` for each
+registered system and mapping each `EntityDefinition.schema` entry to a `FieldPreview`.
 
+---
+
+### § 11.15 Entity field preview
+
+Pool entity groups and channel entity groups (expanded) both show field-level metadata
+sourced from `EntityDefinition.schema`.
+
+**`FieldPreview`** — local type used by `lineage-diagram.ts` and `systems-pane.ts`:
+
+```ts
+interface FieldPreview {
+  name: string;
+  isFK: boolean;
+  description?: string;
+  type?: string;    // "string", "number", "array", "→ accounts", …
+  example?: unknown;
+}
+```
+
+`type` is a simplified string: scalar `FieldType` values use their name; an `entity`
+reference renders as `→ <entityName>`; complex object/array types render as `"object"` /
+`"array"`.
+
+**Pool entity groups (`.ld-pool-entity-group`)** — replace static pills for entities not
+yet assigned to any channel. Each group has:
+
+- A `.ld-pool-entity-header` with the `connectorId / entity` label and a `▸/▾` chevron.
+  If the entity has no schema fields, the chevron is omitted and the header is non-interactive.
+- A `.ld-pool-fields-list` (hidden until expanded) containing one `.ld-pool-field` pill
+  per field. FK reference fields additionally carry `.ld-pool-field-fk` (italic, dashed).
+- Each pill's `title` attribute holds the tooltip: pieces of `description`, `type`, and
+  `e.g. <example>` joined by ` · ` (only non-empty parts are included).
+
+Expand/collapse state is tracked in an `expandedPool: Set<string>` local to the pool
+rendering block; keys are `"connectorId/entity"` strings.
+
+**Unmapped fields in channel entity groups** — when a channel entity group is expanded, a
+dim `— also available —` separator is appended after the mapped field nodes, followed by
+`.ld-field-node-unmapped` pills for fields present in the schema but absent from the
+current `mappings:` config. These nodes:
+
+- Carry `data-unmapped="true"` and are excluded from SVG line drawing.
+- Have `pointer-events: none` (no click, no focus).
+- Are visually dim (38% opacity) and italic with a dashed border.
+- FK fields receive `.ld-field-node-fk` in addition.
+- Each node's `title` attribute uses the same `description · type · e.g. example` format.
+
+**Data source** — `FIXED_SCHEMAS` in `playground/src/lib/systems.ts` declares explicit
+`FieldDescriptor` entries (with `description`, `type`, `example`, and `entity` where
+applicable) for every field in every seed entity. `makeEntity` in `inmemory.ts` passes
+the schema through directly to `EntityDefinition.schema`. `getEntityDefs()` on
+`InMemoryConnector` returns the entity list without requiring a `ConnectorContext`.
 
 ---
 

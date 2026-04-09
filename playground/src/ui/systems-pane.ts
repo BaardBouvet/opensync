@@ -11,7 +11,7 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import type { InMemoryConnector, RecordWithMeta } from "../inmemory.js";
 import type { ChannelCluster } from "../engine-lifecycle.js";
 import type { ChannelConfig } from "@opensync/engine";
-import { renderLineageDiagram } from "./lineage-diagram.js";
+import { renderLineageDiagram, type FieldPreview } from "./lineage-diagram.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -766,11 +766,24 @@ export function createSystemsPane(
     const container = document.createElement("div");
     container.className = "ld-map-host";
     channelArea.appendChild(container);
-    // Build allEntities: connectorId → entity names from snapshot keys.
-    // Spec: specs/playground.md § 11.14
-    const allEntities = new Map<string, string[]>();
+    // Build allEntities: connectorId → entity name → FieldPreview[] from getEntityDefs().
+    // Spec: specs/playground.md § 11.14, § 11.15
+    const allEntities = new Map<string, Map<string, FieldPreview[]>>();
     for (const [sysId, conn] of systems) {
-      allEntities.set(sysId, Object.keys(conn.snapshot()));
+      const entityMap = new Map<string, FieldPreview[]>();
+      for (const entityDef of conn.getEntityDefs()) {
+        const fields = Object.entries(entityDef.schema ?? {}).map(([name, desc]) => ({
+          name,
+          isFK: desc.entity !== undefined,
+          description: desc.description,
+          type: desc.entity
+            ? `→ ${desc.entity}`
+            : typeof desc.type === "string" ? desc.type : desc.type?.type,
+          example: desc.example,
+        } satisfies FieldPreview));
+        entityMap.set(entityDef.name, fields);
+      }
+      allEntities.set(sysId, entityMap);
     }
     renderLineageDiagram(container, channels, allEntities);
   }

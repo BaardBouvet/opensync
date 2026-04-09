@@ -44,6 +44,11 @@ export interface FieldDescriptor {
    *  from UpdateRecord.data before calling update(), so the connector never sees an attempt
    *  to overwrite them. */
   immutable?: boolean;
+
+  /** Illustrative example value for this field. Used by UIs and agents to convey what the
+   *  field typically contains without needing to read live data.
+   *  Any serialisable JSON value; rendered as a string in display contexts. */
+  example?: unknown;
 }
 
 // ─── Records ─────────────────────────────────────────────────────────────────
