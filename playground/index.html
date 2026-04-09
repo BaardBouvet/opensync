@@ -581,6 +581,15 @@
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       cursor: pointer; transition: border-color 0.12s, color 0.12s;
     }
+    /* Multi-line field nodes (mapped with meta, or unmapped) */
+    .ld-field-node.ld-field-node-flex {
+      display: flex; flex-direction: column; align-items: flex-start;
+      white-space: normal; overflow: visible; text-overflow: unset;
+    }
+    .ld-field-node-name { } /* inherits parent font */
+    .ld-field-node-meta {
+      font-size: 9px; color: #55556a; margin-top: 1px;
+    }
     .ld-field-node:hover { border-color: #4a4a7a; color: #a0a0c0; }
     /* Selected field — border only (one at a time) */
     .ld-field-node-focused { border-color: #a78bfa; color: #d0c0ff; }
@@ -708,12 +717,7 @@
       width: 100%; text-align: center; letter-spacing: 0.5px;
     }
     .ld-field-node-unmapped {
-      opacity: 0.65; pointer-events: none; font-style: italic; border-style: dashed;
-      display: flex; flex-direction: column; align-items: flex-start;
-      white-space: normal; overflow: visible; text-overflow: unset;
-    }
-    .ld-field-node-meta {
-      font-size: 9px; color: #55556a; font-style: normal; margin-top: 1px;
+      opacity: 0.80; pointer-events: none; border-style: dashed;
     }
   </style>
 </head>

@@ -471,7 +471,7 @@ function buildEntityHeader(
   return header;
 }
 
-function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
+function buildFieldNode(f: ConnectorFieldNode, preview?: FieldPreview): HTMLElement {
   const node = document.createElement("div");
   node.className = "ld-field-node";
   if (f.isAssoc)                  node.classList.add("ld-field-node-assoc");
@@ -492,18 +492,34 @@ function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
     em.textContent = f.sourceField; // "(expression)"
     node.appendChild(em);
   } else {
-    node.textContent = f.sourceField;
+    node.classList.add("ld-field-node-flex"); // allow multi-line meta
+    const nameRow = document.createElement("span");
+    nameRow.className = "ld-field-node-name";
+    nameRow.textContent = f.sourceField;
     if (f.isParentField) {
       const suffix = document.createElement("span");
       suffix.className = "ld-parent-marker";
       suffix.textContent = " ↑";
-      node.appendChild(suffix);
+      nameRow.appendChild(suffix);
     }
     if (f.hasExpression) {
       const marker = document.createElement("span");
       marker.className = "ld-expr-marker";
       marker.textContent = " ƒ";
-      node.appendChild(marker);
+      nameRow.appendChild(marker);
+    }
+    node.appendChild(nameRow);
+    if (preview) {
+      const metaParts: string[] = [];
+      if (preview.description) metaParts.push(preview.description);
+      if (preview.type)        metaParts.push(preview.type);
+      if (preview.example != null) metaParts.push(`e.g. ${String(preview.example)}`);
+      if (metaParts.length > 0) {
+        const meta = document.createElement("span");
+        meta.className = "ld-field-node-meta";
+        meta.textContent = metaParts.join(" \u00b7 ");
+        node.appendChild(meta);
+      }
     }
   }
   return node;
@@ -512,12 +528,14 @@ function buildFieldNode(f: ConnectorFieldNode): HTMLElement {
 function buildFieldsList(
   fields: ConnectorFieldNode[],
   mk: string,
+  allEntityFields?: FieldPreview[] | null,
 ): HTMLElement {
   const list = document.createElement("div");
   list.className = "ld-fields-list";
   list.dataset.memberKey = mk;
+  const previewByName = new Map(allEntityFields?.map((fp) => [fp.name, fp]) ?? []);
   for (const f of fields) {
-    list.appendChild(buildFieldNode(f));
+    list.appendChild(buildFieldNode(f, previewByName.get(f.sourceField)));
   }
   return list;
 }
@@ -541,7 +559,7 @@ function buildEntityGroup(
 
   const passthrough = fields.length === 1 && fields[0]!.canonicalField === "*";
   if (!passthrough) {
-    const fieldsList = buildFieldsList(fields, mk);
+    const fieldsList = buildFieldsList(fields, mk, allEntityFields);
 
     // Append unmapped fields below the mapped ones. Spec: specs/playground.md § 11.15
     if (allEntityFields && allEntityFields.length > 0) {
@@ -554,10 +572,11 @@ function buildEntityGroup(
         fieldsList.appendChild(sep);
         for (const fp of unmappedFields) {
           const node = document.createElement("div");
-          node.className = "ld-field-node ld-field-node-unmapped";
+          node.className = "ld-field-node ld-field-node-flex ld-field-node-unmapped";
           if (fp.isFK) node.classList.add("ld-field-node-fk");
           node.dataset.unmapped = "true";
           const nameSpan = document.createElement("span");
+          nameSpan.className = "ld-field-node-name";
           nameSpan.textContent = fp.name;
           node.appendChild(nameSpan);
           const metaParts: string[] = [];
@@ -593,10 +612,11 @@ function buildEntityGroup(
       fieldsList.dataset.memberKey = mk;
       for (const fp of allEntityFields) {
         const node = document.createElement("div");
-        node.className = "ld-field-node ld-field-node-unmapped";
+        node.className = "ld-field-node ld-field-node-flex ld-field-node-unmapped";
         if (fp.isFK) node.classList.add("ld-field-node-fk");
         node.dataset.unmapped = "true";
         const nameSpan = document.createElement("span");
+        nameSpan.className = "ld-field-node-name";
         nameSpan.textContent = fp.name;
         node.appendChild(nameSpan);
         const metaParts: string[] = [];
