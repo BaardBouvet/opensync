@@ -1,6 +1,6 @@
 # Plan: Lineage — Nested Array Field Preview
 
-**Status:** proposed  
+**Status:** complete  
 **Date:** 2026-04-09  
 **Effort:** S  
 **Domain:** Playground  

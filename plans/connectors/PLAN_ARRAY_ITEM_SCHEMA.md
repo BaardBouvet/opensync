@@ -1,6 +1,6 @@
 # PLAN: Rich Array Item Schema
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-09  
 **Effort:** S  
 **Domain:** packages/sdk, specs/connector-sdk.md, playground  

@@ -71,7 +71,21 @@ export const FIXED_SCHEMAS: EntitySchemaMap = {
       amount:        { type: "number", description: "Total purchase amount", example: 299.90 },
       state:         { type: "string", description: "Purchase lifecycle state", example: "shipped" },
       couponCode:    { type: "string", description: "Applied discount coupon code (null if none)", example: "SAVE10" },
-      lines:         { type: { type: "array" }, description: "Individual line items in this purchase" },
+      lines: {
+        type: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              lineNo:    { type: "string", description: "Line item identifier within the purchase", example: "L01" },
+              sku:       { type: "string", description: "Product stock-keeping unit code",          example: "SKU-001" },
+              quantity:  { type: "number", description: "Quantity ordered",                          example: 5 },
+              linePrice: { type: "number", description: "Unit price at time of purchase",            example: 29.99 },
+            },
+          },
+        },
+        description: "Individual line items in this purchase",
+      },
     },
   },
 };

@@ -6,14 +6,17 @@
  *
  * Examples:
  *   'string'
- *   { type: 'array', items: { type: 'object', properties: { sku: 'string', qty: 'number' } } }
+ *   { type: 'array', items: { type: 'object', properties: { sku: { type: 'string', description: 'Stock-keeping unit' }, qty: { type: 'number' } } } }
+ *
+ * Object `properties` values use the full `FieldDescriptor` shape, enabling `description`,
+ * `example`, and FK `entity` annotations on nested fields.
  */
 export type FieldType =
   | "string"
   | "number"
   | "boolean"
   | "null"
-  | { type: "object"; properties?: Record<string, FieldType> }
+  | { type: "object"; properties?: Record<string, FieldDescriptor> }
   | { type: "array"; items?: FieldType };
 
 /**

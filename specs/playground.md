@@ -819,8 +819,28 @@ interface FieldPreview {
 ```
 
 `type` is a simplified string: scalar `FieldType` values use their name; an `entity`
-reference renders as `→ <entityName>`; complex object/array types render as `"object"` /
-`"array"`.
+reference renders as `→ <entityName>`; array types with an item type render as `"array[<itemType>]"`
+(e.g. `"array[object]"` or `"array[string]"`); bare arrays without an item type render as `"array"`.
+
+**`FieldPreview`** interface (extended with § 11.16 `subFields`):
+
+```ts
+interface FieldPreview {
+  name: string;
+  isFK: boolean;
+  description?: string;
+  type?: string;    // "string", "number", "array[object]", "→ accounts", …
+  example?: unknown;
+  /** Present when type is "array" and items is an object with named properties. */
+  subFields?: FieldPreview[];
+}
+```
+
+`subFields` is populated when the raw `FieldDescriptor.type` is
+`{ type: "array", items: { type: "object", properties: Record<string, FieldDescriptor> } }`.
+All other array shapes (scalar items, no items, unknown items) produce `subFields: undefined`.
+The mapping is done by `descriptorToPreview()` in `systems-pane.ts`, which is called
+recursively on each sub-field's `FieldDescriptor`.
 
 **Pool entity groups (`.ld-pool-entity-group`)** — replace static pills for entities not
 yet assigned to any channel. Each group has:
@@ -851,6 +871,78 @@ current `mappings:` config. These nodes:
 applicable) for every field in every seed entity. `makeEntity` in `inmemory.ts` passes
 the schema through directly to `EntityDefinition.schema`. `getEntityDefs()` on
 `InMemoryConnector` returns the entity list without requiring a `ConnectorContext`.
+
+---
+
+### § 11.16 Array sub-field expansion
+
+Array-typed fields whose item type is a named-property object become expandable sub-sections
+inside pool entity groups and channel entity group unmapped sections. Expanding reveals one
+row per element-object property. Default state is collapsed; a single click toggles open/shut.
+
+**Scope:** only fields where `subFields` is non-empty (see §11.15). Scalar arrays,
+bare arrays with no `items`, and non-object items remain flat. Multi-level deep nesting
+(array of array, object of array) renders the outer layer only; inner structure is shown in
+the tooltip. Channel *mapped* field nodes are unaffected — array sub-field expansion is
+display-only metadata; SVG line drawing is not affected.
+
+**Pool — `.ld-pool-entity-group` fields list:**
+
+Array fields with sub-fields render as:
+```html
+<div class="ld-pool-field-array-group">
+  <div class="ld-pool-field-array-header" data-array-key="connectorId/entity/fieldName">
+    <div class="ld-pool-field-row ld-pool-field-array-row">
+      <span class="ld-pool-field-name">lines</span>
+      <span class="ld-pool-field-meta">Individual line items · array[object]</span>
+    </div>
+    <span class="ld-array-chevron">▸</span>
+  </div>
+  <div class="ld-pool-subfield-list ld-hidden">
+    <div class="ld-pool-field-row ld-pool-subfield">…</div>
+    …
+  </div>
+</div>
+```
+
+Expand state is tracked in an `expandedArrayFields: Set<string>` (keys: `"connectorId/entity/fieldName"`)
+local to each pool entity group. Clicking `.ld-pool-field-array-header` toggles the key and
+updates the chevron (`▸`↔`▾`) and `ld-hidden` on the sub-list.
+
+**Channel entity group unmapped section:**
+
+Array fields with sub-fields render as:
+```html
+<div class="ld-field-node ld-field-node-flex ld-field-node-unmapped ld-field-node-array-group"
+     data-unmapped="true">
+  <div class="ld-field-node-array-header" data-array-key="memberKey/fieldName">…
+    <span class="ld-array-chevron">▸</span>
+  </div>
+  <div class="ld-field-node-subfield-list ld-hidden">
+    <div class="ld-field-node-subfield">…</div>
+    …
+  </div>
+</div>
+```
+
+Expand state is tracked in an `expandedArrayFields: Set<string>` (keys: `"memberKey/fieldName"`)
+local to each call to `buildEntityGroup`. Sub-field pills carry no `data-source-field` or
+`data-canonical-field` attributes and are never included in SVG line drawing.
+
+**CSS classes:**
+
+| Class | Purpose |
+|-------|---------|
+| `.ld-pool-field-array-group` | Wrapper div for expandable array field in pool |
+| `.ld-pool-field-array-header` | Clickable row with label + chevron |
+| `.ld-pool-field-array-row` | The label row inside the header |
+| `.ld-array-chevron` | Inline chevron; text changes `▸`↔`▾` on expand |
+| `.ld-pool-subfield-list` | Container for sub-field rows; `ld-hidden` when collapsed |
+| `.ld-pool-subfield` | Additional class on sub-field `.ld-pool-field-row` items |
+| `.ld-field-node-array-group` | Channel unmapped equivalent of pool array group |
+| `.ld-field-node-array-header` | Clickable row inside channel unmapped array group |
+| `.ld-field-node-subfield-list` | Sub-field list inside channel entity group |
+| `.ld-field-node-subfield` | Individual sub-field inside channel entity group |
 
 ---
 

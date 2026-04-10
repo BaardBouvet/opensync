@@ -125,12 +125,15 @@ interface OAuthConfig {
 // Field metadata for entity fields and action payloads.
 // FieldType is a JSON Schema subset — scalars as string literals, object and array compose recursively:
 //   'string' | 'number' | 'boolean' | 'null'
-//   { type: 'object'; properties?: Record<string, FieldType> }
+//   { type: 'object'; properties?: Record<string, FieldDescriptor> }
 //   { type: 'array'; items?: FieldType }
-//   { type: 'array', items: { type: 'object', properties: { sku: 'string', qty: 'number' } } }
+//   { type: 'array', items: { type: 'object', properties: { sku: { type: 'string', description: 'Stock-keeping unit' }, qty: { type: 'number' } } } }
+//
+// Object `properties` values use the full FieldDescriptor shape, enabling description,
+// example, and FK entity annotations on nested fields.
 type FieldType =
   | 'string' | 'number' | 'boolean' | 'null'
-  | { type: 'object'; properties?: Record<string, FieldType> }
+  | { type: 'object'; properties?: Record<string, FieldDescriptor> }
   | { type: 'array'; items?: FieldType };
 
 interface FieldDescriptor {
