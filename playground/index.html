@@ -254,6 +254,7 @@
       background: #1e1e22; border: 1px solid #2e2e2e; border-radius: 5px;
       padding: 8px 10px; margin-bottom: 6px;
       transition: border-color 0.2s;
+      position: relative;
     }
     .record-card:hover { border-color: #3a3a46; }
     .record-id { font-size: 10px; color: #444; display: block; margin-bottom: 4px; }
@@ -339,9 +340,14 @@
     }
     .btn-new-record:hover { background: #1e301e; color: #4ec94e; }
 
-    /* ── Break button on per-card footer ────────────────────────────────── */
-    .btn-break { color: #c08020; border-color: #5a3a00; background: #2a1e00; }
-    .btn-break:hover { background: #33260a; color: #d49030; border-color: #7a4a00; }
+    /* ── Break button on per-card top-right corner ────────────────────────── */
+    .btn-break {
+      position: absolute; top: 0; right: 6px; transform: translateY(-50%);
+      background: #16161a; border: 1px solid #2a2a3a; border-radius: 3px;
+      color: #484870; font-size: 11px; padding: 0 5px;
+      cursor: pointer; line-height: 1.6;
+    }
+    .btn-break:hover { color: #e07070; border-color: #6a2a2a; }
 
     /* ── No-link (anti-affinity) badge + popover ─────────────────────────── */
     .no-link-badge {
@@ -765,6 +771,34 @@
     }
     .ld-field-node-unmapped {
       opacity: 0.80; pointer-events: none; border-style: dashed;
+    }
+    /* ── Array sub-field expansion — Spec: specs/playground.md § 11.16 ── */
+    /* Pool array groups */
+    .ld-pool-field-array-group { display: flex; flex-direction: column; }
+    .ld-pool-field-array-header {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      cursor: pointer; padding: 3px 6px; border-radius: 2px;
+    }
+    .ld-pool-field-array-header:hover { background: #1a1a28; }
+    .ld-pool-field-array-row { flex: 1; }
+    .ld-array-chevron { font-size: 9px; color: #6060a0; margin-left: 4px; flex-shrink: 0; }
+    .ld-pool-subfield-list {
+      display: flex; flex-direction: column;
+      padding: 2px 0 4px 14px; border-left: 1px solid #2a2a3a;
+      margin-left: 8px;
+    }
+    .ld-pool-subfield { padding: 2px 4px; }
+    /* Channel entity group array groups — Spec: specs/playground.md § 11.16 */
+    .ld-field-node-array-group { pointer-events: auto; flex-direction: column; }
+    .ld-field-node-array-header { cursor: pointer; width: 100%; }
+    .ld-field-node-subfield-list {
+      display: flex; flex-direction: column;
+      padding: 2px 0 4px 14px; border-left: 1px solid #2a2a3a;
+      margin-left: 8px;
+    }
+    .ld-field-node-subfield {
+      display: flex; flex-direction: column;
+      padding: 2px 4px; font-size: 11px; color: #7878a0;
     }
   </style>
 </head>

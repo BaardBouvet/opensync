@@ -12,6 +12,7 @@ import type { InMemoryConnector, RecordWithMeta } from "../inmemory.js";
 import type { ChannelCluster, NoLinkEntry } from "../engine-lifecycle.js";
 import type { ChannelConfig } from "@opensync/engine";
 import { renderLineageDiagram, type FieldPreview } from "./lineage-diagram.js";
+import type { FieldDescriptor, FieldType } from "@opensync/sdk";
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -151,6 +152,18 @@ function buildCard(
   if (flash) card.classList.add("record-flash");
   if (isHighlight) card.classList.add("record-highlight");
   if (rec.softDeleted) card.classList.add("record-deleted");
+
+  // Break button — top-right corner, only for records in linked clusters.
+  if (isLinkedCluster && canonicalId && !embeddedIn && !rec.softDeleted) {
+    const breakBtn = document.createElement("button");
+    breakBtn.className = "btn-break";
+    breakBtn.textContent = "✂";
+    breakBtn.title = "Detach this record from the cluster \u2014 writes no_link for all siblings";
+    breakBtn.addEventListener("click", () => {
+      callbacks.onSplitCanonical(canonicalId, systemId, entity, rec.id);
+    });
+    card.appendChild(breakBtn);
+  }
 
   // ID badge
   const idBadge = document.createElement("code");
@@ -329,18 +342,6 @@ function buildCard(
       callbacks.onSoftDelete(systemId, entity, rec.id);
     });
     actions.appendChild(delBtn);
-
-    // Break button — only for records in linked clusters with ≥2 members.
-    if (isLinkedCluster && canonicalId) {
-      const breakBtn = document.createElement("button");
-      breakBtn.className = "btn-card btn-break";
-      breakBtn.textContent = "Break";
-      breakBtn.title = "Detach this record from the cluster \u2014 writes no_link for all siblings";
-      breakBtn.addEventListener("click", () => {
-        callbacks.onSplitCanonical(canonicalId, systemId, entity, rec.id);
-      });
-      actions.appendChild(breakBtn);
-    }
   } else {
     const restoreBtn = document.createElement("button");
     restoreBtn.className = "btn-card btn-restore";
@@ -723,7 +724,6 @@ export function createSystemsPane(
     // ── Scrollable cluster body ──────────────────────────────────────────
     const body = document.createElement("div");
     body.className = "cluster-body";
-    body.scrollTop = savedScroll;  // restore immediately to prevent jump
     view.appendChild(body);
 
     if (clusters.length === 0) {
@@ -814,6 +814,8 @@ export function createSystemsPane(
       group.appendChild(cardsRow);
       body.appendChild(group);
     }
+    // Restore after content is in the DOM so scrollHeight > 0.
+    body.scrollTop = savedScroll;
   }
 
   function renderTabs(channels: ChannelConfig[]): void {
@@ -876,6 +878,49 @@ export function createSystemsPane(
     tabBar.appendChild(lineageBtn);
   }
 
+  /** Build a human-readable type label for a FieldType.
+   *  Spec: specs/playground.md § 11.15 */
+  function typeLabel(ft: FieldType | undefined): string | undefined {
+    if (!ft) return undefined;
+    if (typeof ft === "string") return ft;
+    if (ft.type === "array") {
+      if (!ft.items) return "array";
+      if (typeof ft.items === "string") return `array[${ft.items}]`;
+      return `array[${ft.items.type}]`;
+    }
+    if (ft.type === "object") {
+      const keys = Object.keys(ft.properties ?? {});
+      return keys.length ? `object{${keys.join(", ")}}` : "object";
+    }
+    return ft.type;
+  }
+
+  /** Map a FieldDescriptor to a FieldPreview (recursive for array-of-object fields).
+   *  Spec: specs/playground.md § 11.15, § 11.16 */
+  function descriptorToPreview(name: string, desc: FieldDescriptor): FieldPreview {
+    const base: FieldPreview = {
+      name,
+      isFK: desc.entity !== undefined,
+      description: desc.description,
+      type: desc.entity ? `→ ${desc.entity}` : typeLabel(desc.type),
+      example: desc.example,
+    };
+    if (
+      desc.type &&
+      typeof desc.type === "object" &&
+      desc.type.type === "array" &&
+      desc.type.items &&
+      typeof desc.type.items === "object" &&
+      desc.type.items.type === "object" &&
+      desc.type.items.properties
+    ) {
+      base.subFields = Object.entries(desc.type.items.properties).map(([k, subdesc]) =>
+        descriptorToPreview(k, subdesc)
+      );
+    }
+    return base;
+  }
+
   function renderLineageContent(channels: ChannelConfig[], systems: Map<string, InMemoryConnector>): void {
     channelArea.innerHTML = "";
     const container = document.createElement("div");
@@ -887,15 +932,9 @@ export function createSystemsPane(
     for (const [sysId, conn] of systems) {
       const entityMap = new Map<string, FieldPreview[]>();
       for (const entityDef of conn.getEntityDefs()) {
-        const fields = Object.entries(entityDef.schema ?? {}).map(([name, desc]) => ({
-          name,
-          isFK: desc.entity !== undefined,
-          description: desc.description,
-          type: desc.entity
-            ? `→ ${desc.entity}`
-            : typeof desc.type === "string" ? desc.type : desc.type?.type,
-          example: desc.example,
-        } satisfies FieldPreview));
+        const fields = Object.entries(entityDef.schema ?? {}).map(([name, desc]) =>
+          descriptorToPreview(name, desc)
+        );
         entityMap.set(entityDef.name, fields);
       }
       allEntities.set(sysId, entityMap);
