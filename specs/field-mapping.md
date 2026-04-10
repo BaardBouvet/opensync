@@ -54,9 +54,11 @@ fields:
     target: email       # same name — still required to opt-in
 ```
 
-`fields` is a **whitelist**. Only listed fields are synced; unlisted fields are dropped. If `fields`
-is omitted, all fields pass through verbatim (no rename, no filtering) — useful for connectors that
-already speak the canonical schema.
+`fields` is a **whitelist**. Only listed fields are synced; unlisted fields are dropped.
+**If `fields` is omitted, no fields are forwarded** — the entry still participates in identity
+linking (its records create or join canonical entities), but writes nothing to and reads nothing
+from the canonical field store. Every field that crosses a connector boundary must be explicitly
+declared; omitting `fields` is never a shortcut for "sync everything".
 
 On the reverse pass the rename is inverted: `firstName` → `firstname` when writing back to the
 same connector.
@@ -191,40 +193,39 @@ canonical record and can reference other fields.
 
 ---
 
-### 1.6 Passthrough columns
+### 1.6 Unmapped fields on full-replace connectors
 
-```yaml
-- connector: erp
-  channel: contacts
-  entity: customers
-  passthrough: [raw_segment_code, internal_account_ref]
-  fields:
-    - source: name
-      target: customerName
+The engine sends only mapped fields to `update()`. Connectors that use a full-replace (PUT) write
+API and need to preserve unmapped fields must handle this themselves:
+
+```typescript
+async *update(records, ctx) {
+  for await (const record of records) {
+    // Merge engine's partial payload over the full current record.
+    const [current] = await ctx.lookup([record.id], ctx);
+    const merged = { ...current?.data, ...record.data };
+    await api.put(`/records/${record.id}`, merged);
+    yield { id: record.id };
+  }
+}
 ```
 
-Fields listed under `passthrough` are **preserved for same-source roundtrip write-back only**.
-They do not enter the canonical record, do not participate in resolution, and are never dispatched
-to any other connector.
+The engine populates `UpdateRecord.snapshot` when it has already fetched a live copy of the
+record in the current dispatch pass (e.g. during ETag pre-fetch). Connectors may use `snapshot`
+to avoid the extra `lookup()` round-trip:
 
-**Use case:** connectors that use a full-replace (PUT) write API require all fields to be present
-in the update payload, even fields that are not part of the canonical schema. Without `passthrough`,
-the engine's outbound payload only contains mapped fields — the connector would silently zero any
-unmapped field on write-back.
+```typescript
+const base = record.snapshot ?? (await fetchOne(record.id));
+const merged = { ...base, ...record.data };
+```
 
-**Forward pass:** passthrough fields are read from `record.data` and stored in the source
-connector's `shadow_state` row under a `_pt.<fieldName>` reserved key. They are not added to the
-canonical record.
+This is a **connector responsibility**, not an engine config option. A config-driven
+`passthrough:` list was considered and rejected: the operator would have to enumerate every
+unmapped field, and a forgotten field would be silently zeroed — the exact failure mode it was
+meant to prevent. The connector already knows its own field surface; it is the right place to
+apply the merge.
 
-**Reverse pass:** when the engine dispatches an update back to **the same connector**, the `_pt.*`
-shadow entries are merged into the outbound `UpdateRecord.data` after the reverse field mapping,
-so the connector receives its own fields back unchanged. They are stripped from outbound payloads
-to all other connectors.
-
-**If you want a field to reach a different connector**, declare it in the channel mapping with
-appropriate `direction`. Passthrough is a same-source preservation mechanism, not a routing tool.
-
-**Status: designed, not yet implemented (OSI-mapping §3 "Passthrough columns"). See `plans/engine/PLAN_PASSTHROUGH_COLUMNS.md`.**
+**Status: handled in connector layer. No engine feature needed. See `specs/connector-sdk.md` §"Patch semantics for `update()`".**
 
 ---
 
@@ -331,6 +332,61 @@ Priority chain used by the engine for each field:
 
 ---
 
+### 1.10 Value maps
+
+Per-field translation tables that map source-local codes to canonical codes on the inbound pass,
+and back on the outbound pass. Solves the common case where two systems use different codes for
+the same concept (e.g. `"a"` in CRM vs `"1"` in ERP both meaning _active_).
+
+```yaml
+fields:
+  - source: status
+    target: status
+    # Source-local code → canonical code (inbound pass).
+    # Keys are coerced to string before lookup.
+    value_map:
+      'a': 'active'
+      'b': 'inactive'
+      'c': 'closed'
+
+    # Optional: canonical code → source-local code (outbound pass).
+    # Auto-derived from value_map when absent (requires bijective map).
+    # Must be declared explicitly when value_map is many-to-one.
+    reverse_value_map:
+      'active':   'a'
+      'inactive': 'b'
+      'closed':   'c'
+
+    # Optional: behaviour when a value is not found in the map.
+    # 'passthrough' (default): keep the original value unchanged.
+    # 'null': return null (treat unknown code as absent).
+    value_map_fallback: 'passthrough'
+```
+
+**Rules:**
+
+- VM1–VM3: `value_map` is applied after `default` on the inbound pass. Null / undefined values
+  bypass the map entirely and propagate as-is.
+- VM5–VM6: `reverse_value_map` (or its auto-derived form) is applied on the outbound pass.
+  Null / undefined values bypass the reverse map.
+- VM7: When `value_map` is not bijective and `reverse_value_map` is absent, the engine auto-derives
+  the reverse with last-key-wins tie-break and emits a console warning.
+- VM9: `value_map` and `expression` are mutually exclusive. A config error is thrown at load time.
+- VM10–VM11: The `direction` guard applies before the value map step. A `forward_only` field
+  never has its reverse map evaluated; a `reverse_only` field never has its forward map evaluated.
+- VM12: `normalize` and `value_map` are independent: `normalize` is a diff-time function (see §1.4)
+  that never transforms the value stored in the canonical record. `value_map` operates on the
+  raw source value during the inbound mapping pass. Declaring both on the same field is valid —
+  `value_map` translates the raw value; `normalize` ensures diff comparison ignores representation
+  differences.
+- YAML anchors (`&name` / `*name`) can eliminate repetition when the same connector uses identical
+  codes across multiple entities — no engine feature needed; the YAML parser expands anchors
+  before validation.
+
+**Status: implemented.**
+
+---
+
 ## 2. Resolution Strategies
 
 Resolution determines how the canonical value for a field is chosen when multiple connectors in the
@@ -357,7 +413,7 @@ mappings:
         priority: 0       # field-level override — CRM is authoritative for email
 ```
 
-**Status: implemented.**
+**Status: implemented. Mapping-level `priority:` on a `mappings[]` entry is promoted into channel-scoped `connectorPriorities` at load time. Field-level `priority:` on a `FieldMappingEntry` overrides the connector-level default for that single canonical field, resolved via the `allChannelMappings` index in `resolveConflicts`. Neither is settable via the `conflict:` YAML block (removed — channels are connector-agnostic). Tests: `packages/engine/src/core/conflict.test.ts` PR1–PR4.**
 
 ---
 
@@ -1476,7 +1532,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Deep nesting | §3 | ✅ implemented — `expansionChain`, multi-hop `array_parent_map`, cross-join |
 | Scalar arrays (`scalar: true`) | §3.3 | ✅ forward + reverse collapse implemented; cascade element-absence deletion; `_value` preserved through pipeline. Tests: SA1–SA9, SC1–SC8 |
 | `source_path` extraction | §1.7 | ✅ implemented — dotted path + `[N]` index; forward pass extraction; reverse pass nested-path reconstruction; array-index restricted to `forward_only`; `element_fields` support. Tests: SP1–SP10 |
-| Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
+| Passthrough columns | §3 | ✅ connector responsibility — full-replace connectors use `lookup()` + merge (§1.6) |
 | Atomic arrays (`sort_elements`, `element_fields`) | §3.5 | ✅ `sort_elements`/`unordered` schema-guided sort; `element_fields` per-element rename; Tests: AA1–AA5, EF1–EF8 |
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
 | FK reverse resolution | §4 | ✅ `direction: forward_only` excludes injected PK from outbound dispatch |
@@ -1509,7 +1565,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Multi-entity mapping files | §10 | ✅ implemented |
 | `sources:` / `primary_key` metadata | §10 | ✅ `sources:` in field entries (lineage hint); entity schema from `getEntities()` |
 | Mapping-level priority / `last_modified` | §10 | 🔶 field-level works; mapping-level default not in config |
-| `passthrough` config | §10 | ❌ not in config spec |
+| `passthrough` config | §10 | N/A — rejected; handled in connector layer (§1.6) |
 | Inline test cases | §11 | ❌ no inline testing infrastructure |
 | `_cluster_id` seed format | §11 | ❌ depends on inline testing |
 
@@ -1538,7 +1594,7 @@ Most OSI-mapping primitives are now implemented. Remaining gaps:
   linkage feed mechanism; not yet designed.
 - **Embedded objects** (`parent:` flat syntax, §3.1) — child entity from columns on the same row;
   distinct from array expansion. Designed, not yet implemented.
-- **`passthrough` config** (§3) — named passthrough columns forwarded to delta output.
+
 - **`references_field`** (§4) — alternate-representation FK (e.g. ISO code instead of UUID).
 - **Vocabulary targets** (§4) — read-only seeded lookup tables for FK translation.
 - **`defaultExpression`** (§5) — dynamic fallback; TypeScript API only.

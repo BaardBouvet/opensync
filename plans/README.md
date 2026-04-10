@@ -28,11 +28,21 @@ or in `ESSENCE.md` for project-wide design choices.
 | Directory | Contains |
 |-----------|----------|
 | `poc/` | Pre-POC design intent documents (`PLAN_POC_VN.md`) |
-| `engine/` | Gap analyses and research about the sync engine |
+| `engine/` | Sync engine plans — split into subsystem subfolders: |
+| `engine/arrays/` | Array expansion, element sets, scalar arrays, ordering, collapse |
+| `engine/associations/` | Associations, identity matching, cluster merges, predicates |
+| `engine/fields/` | Field transforms, expressions, defaults, value maps, embedded objects |
+| `engine/conflict/` | Conflict resolution strategies, priority, concurrent-edit detection |
+| `engine/sync-loop/` | Core ingest/dispatch loop, deletes, routing, written state |
+| `engine/config-api/` | Config validation, API ergonomics, schema enforcement, health, testing |
+| `engine/rename/` | Pending cross-cutting terminology renames |
+| `engine/research/` | GAP analyses, REPORT documents, DB analysis |
+| `engine/performance/` | Performance and scalability analyses |
 | `connectors/` | Gap analyses and research about connectors |
+| `demo/` | Plans for the CLI demo runner (`@opensync/demo`) |
+| `playground/` | Plans for the Vite browser playground (`@opensync/playground`) |
 | `ecosystem/` | Scout reports and comparisons with adjacent tools and standards |
-| `infra/` | Deployment, tooling, and infrastructure plans |
-| `testing/` | Test strategy and coverage plans |
+| `meta/` | Cross-cutting project plans (releases, tooling, repo structure) |
 
 ## Historical document policy
 

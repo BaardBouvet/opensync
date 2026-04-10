@@ -74,6 +74,7 @@ by the new `deep-nesting` scenario (§ 5.3); rows 7–22 (field-level) are cover
 | 22 | Soft delete | §8.2 | `soft_delete: { strategy, field }` | ✗ |
 | 23 | JSON sub-field extraction | §1.7 | `source_path` | ✓ mapping-showcase |
 | 24 | Embedded objects | §3.1 | `parent:` (no `array_path`), child `entity` | ✓ mapping-showcase |
+| 25 | Value maps | §1.10 | `value_map`, `reverse_value_map`, `value_map_fallback` | ✓ mapping-showcase |
 
 Items 1–3 and 6 are already covered; items 4–5 and 7–24 are addressed by this plan.
 

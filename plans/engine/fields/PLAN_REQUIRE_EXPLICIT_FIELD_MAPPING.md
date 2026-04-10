@@ -1,6 +1,6 @@
 # PLAN: Require Explicit Field Mapping
 
-**Status:** proposed  
+**Status:** complete  
 **Date:** 2026-04-09  
 **Effort:** XS  
 **Domain:** Engine — field mapping  

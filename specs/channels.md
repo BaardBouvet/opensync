@@ -100,8 +100,7 @@ resolution determines which value wins. Resolution runs per-target before dispat
 
 The resolution pipeline evaluates strategies in this priority order:
 
-1. **Field master** — if `fieldMasters[field]` names a connector, only that connector's value
-   is accepted for that field. All other sources are dropped.
+1. **Field master** — if `fieldMasters[field]` names a connector (built from `master: true` on a mapping field entry), only that connector's value is accepted. All other sources are dropped.
 2. **Per-field strategy** — a field entry under `fields:` on the channel (e.g. `phone: { strategy: last_modified }`) selects `coalesce`, `last_modified`, `collect`, or `bool_or`.
 3. **Field-level `resolve` expression** — a `resolve:` key on the `FieldMapping` entry
    provides a custom incremental reducer.
@@ -178,24 +177,44 @@ source with the **later** `createdAt` loses — the older source is treated as t
 
 ### § 3.2 `coalesce`
 
-Pick the first non-null value by source priority. Lower `connectorPriorities` number wins.
-Per-field `priority` on a `FieldMapping` entry overrides the connector-level default. When all
+Pick the first non-null value by source priority. Lower priority number wins. When all
 sources for a field are null, the field is absent from the canonical record.
 
+Priority is declared on the mapping entry — never on the channel (channels are
+connector-agnostic):
+
+- **Mapping-level `priority:`** — sets the default coalesce priority for all fields from this
+  connector in this channel. Promoted into `ChannelConfig.conflict.connectorPriorities` at
+  load time (channel-scoped; does not affect other channels).
+- **Field-level `priority:`** on a `FieldMappingEntry` — overrides the mapping-level default
+  for a single canonical field.
+
 ```yaml
-# opensync.json
-"conflict": {
-  "connectorPriorities": { "crm": 1, "erp": 2 }
-}
+mappings:
+  - connector: crm
+    channel: persons
+    entity: contacts
+    priority: 1           # mapping-level: CRM is default authority for all coalesce fields
+  - connector: erp
+    channel: persons
+    entity: employees
+    priority: 2           # mapping-level: ERP is secondary by default…
+    fields:
+      - source: firstName
+        target: firstName
+        priority: 0       # …except name fields where ERP is authoritative
 ```
 
-Declared in `fieldStrategies` to apply coalesce to a specific field only:
+Declared via `fields:` on the channel to apply coalesce to a specific field:
 
 ```yaml
-"fieldStrategies": { "email": { "strategy": "coalesce" } }
+channels:
+  - id: persons
+    fields:
+      email: { strategy: coalesce }
 ```
 
-**Status: implemented. Tests: `packages/engine/src/core/conflict.test.ts` CO1–CO8.**
+**Status: implemented. Tests: `packages/engine/src/core/conflict.test.ts` CO1–CO8, PR1–PR4.**
 
 ### § 3.3 `last_modified`
 
@@ -251,19 +270,30 @@ TypeScript embedded API accepts a function value for the same key. Takes precede
 
 ### § 3.7 `field_master`
 
-A named connector always wins for declared fields. Patches from all other connectors for those
-fields are dropped before resolution. Unmastered fields fall back to the global strategy.
+A named connector is the sole authority for a canonical field. Patches from all other
+connectors for that field are dropped before resolution. Unmastered fields fall back to the
+channel strategy.
 
-```json
-{
-  "conflict": {
-    "strategy": "field_master",
-    "fieldMasters": { "price": "erp", "email": "crm" }
-  }
-}
+Declared on the mapping entry via `master: true` on a field entry. At load time the loader
+promotes these into `ChannelConfig.conflict.fieldMasters` (channel-scoped).
+
+```yaml
+mappings:
+  - connector: crm
+    channel: persons
+    entity: contacts
+    fields:
+      - source: email
+        target: email
+        master: true    # CRM is the sole authority for email in this channel
+      - source: phone
+        target: phone
 ```
 
-Also applies inside element-set resolution — see § 4.
+Validation: declaring two connectors as master for the same canonical field in the same
+channel is a config error.
+
+Also applies inside element-set resolution — see § 5.
 
 **Status: implemented.**
 
@@ -313,25 +343,26 @@ to targets.
 Element patches from all sources are grouped by leaf `elementKey`. For each element key a
 winner is chosen field-by-field using this priority chain:
 
-1. **`fieldMasters`** — only the declared master connector may contribute that field's value.
-   Patches from non-master sources have the field stripped before application, even for
-   single-patch batches.
-2. **`connectorPriorities`** — source with the numerically lowest priority number wins.
+1. **`master: true`** (field entry on a mapping) — only the declared master connector may
+   contribute that field's value. Patches from non-master sources have the field stripped
+   before application, even for single-patch batches.
+2. **Mapping-level `priority:`** — source with the numerically lowest priority number wins.
 3. **Per-field `last_modified` timestamps** — if both sources provide `record.fieldTimestamps`,
    the source with the more-recent timestamp for that field wins.
 
 ```yaml
-channels:
-  - name: order-lines
-    conflict:
-      connectorPriorities:
-        erp: 1
-        marketplace: 2
-      fieldStrategies:
-        qty:
-          strategy: coalesce
-      fieldMasters:
-        price: erp
+mappings:
+  - connector: erp
+    channel: order-lines
+    parent: erp_orders
+    array_path: lines
+    priority: 1
+    fields:
+      - source: price
+        target: price
+        master: true    # ERP always owns price
+      - source: qty
+        target: qty
 ```
 
 **Status: implemented. Tests: `packages/engine/src/scalar-route-element.test.ts` ES1–ES7.**
@@ -340,16 +371,18 @@ channels:
 
 ## § 6 Connector Priorities
 
-`connectorPriorities` assigns a numeric rank to each connector. Lower = higher priority.
-Used by `coalesce`, element-set resolution, and as a tiebreaker when field timestamps are
-equal in `last_modified` resolution.
+Connector priority is declared on the mapping entry, not on the channel. Two levels:
 
-```json
-{ "connectorPriorities": { "crm": 1, "erp": 2, "hr": 3 } }
-```
+- **Mapping-level `priority:`** on a `mappings[]` entry — sets the default coalesce priority
+  for all fields from this connector in this channel. Lower number = higher priority.
+  Promoted into `ChannelConfig.conflict.connectorPriorities` at load time (channel-scoped).
+- **Field-level `priority:`** on a `FieldMappingEntry` — overrides the mapping-level default
+  for a single canonical field.
 
-Connectors not listed in `connectorPriorities` are treated as equal to each other and lower
-priority than any listed connector.
+Connectors without a declared `priority:` are treated as equal to each other and as lower
+priority than any connector with a declared value.
+
+See `specs/field-mapping.md §2.1` for examples.
 
 ---
 
@@ -372,11 +405,9 @@ channels:
 
 ---
 
-## § 8 Per-Channel Conflict Config (Future)
+## § 8 Per-Channel Conflict Config
 
-As of 0.3.x, `ConflictConfig` is global — it applies to all channels. Per-channel conflict
-overrides are planned but not yet implemented. The anticipated YAML form is a `conflict:` block
-nested inside the channel definition, as shown in the element-set resolution example in § 5.
-The TypeScript `ChannelConfig` type will gain an optional `conflict?: ConflictConfig` field.
-
-See `plans/engine/` for the implementation plan when this is prioritised.
+Per-channel field strategies are declared under `channels[].fields:`. The internal
+`ConflictConfig` type has `fieldMasters` and `connectorPriorities` properties that are
+populated at load time from mapping entries (`master: true` and `priority:` respectively)
+and are never written directly in YAML.

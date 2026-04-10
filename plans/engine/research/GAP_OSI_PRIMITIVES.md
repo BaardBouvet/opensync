@@ -310,7 +310,7 @@ When source data lacks per-field timestamps (e.g. CSV imports), derive them by c
 ### Concurrent detection (`include_base`)
 Detect concurrent edits — when two sources both changed a field since the last sync, the current value in one source differs from the `_base` captured at the last forward pass. Used to trigger conflict review rather than silent last-write-wins.
 
-**Foundation: 🔶** The engine tracks prior values in shadow state, which enables detecting that both sources diverged from a known baseline. An explicit concurrent-edit detection signal and workflow is not designed but the data is available.
+**Foundation: ✅** Shadow state per source is the `_base` per source: the diff step already detects "source A changed field X, source B also changed field X" because both differ from their respective shadow rows. The conflict resolver (§1: `last_modified`, `coalesce`, `expression`, etc.) picks a winner from the concurrent contributions — the concurrent-edit case is handled by the same resolution pipeline as any other conflict. At write time, the ETag pre-fetch (`lookup` → `liveVersion`) detects target-side concurrent modification between sync cycles and retries on conflict. No distinct "concurrent-edit alert" workflow beyond automatic resolution is designed, but the full detection and resolution path is present.
 
 ---
 
@@ -379,7 +379,7 @@ Declares physical table/view names and primary keys per source dataset. Composit
 ### Mapping-level priority and `last_modified`
 A single `priority` or `last_modified` timestamp column applied to all fields in a mapping, overridable per field.
 
-**Foundation: 🔶** The current conflict resolution in the engine is field-level. Mapping-level priority as a default for all fields in that mapping is not in the config spec yet.
+**Foundation: ✅** Implemented. `priority:` on a `mappings[]` entry promotes into `ChannelConfig.conflict.connectorPriorities` at load time (channel-scoped; does not affect other channels). `priority:` on a `FieldMappingEntry` stores a per-field override on `FieldMapping.priority`, resolved via the `allChannelMappings` index threaded into `resolveConflicts`. Loader validates that the same connector does not declare conflicting priority values within one channel. Tests: `packages/engine/src/core/conflict.test.ts` PR1–PR4. Plan: `plans/engine/PLAN_MAPPING_LEVEL_PRIORITY.md`.
 
 ---
 

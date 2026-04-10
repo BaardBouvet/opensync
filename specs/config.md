@@ -213,8 +213,10 @@ mappings:
 `fields` is a **whitelist**. Only listed fields are synced. Unlisted fields on the source record are
 dropped before writing to the target.
 
-If `fields` is omitted entirely, all fields pass through verbatim (no rename, no filtering). This
-is a convenience for connectors that already speak the canonical field names.
+**If `fields` is omitted entirely, no fields are forwarded.** The mapping entry still participates in
+identity linking (its records create or join canonical entities), but writes nothing to and reads
+nothing from the canonical field store. Every field that crosses a connector boundary must be
+explicitly declared — omitting `fields` is never a shortcut for forwarding everything.
 
 ### Field direction
 
@@ -274,6 +276,7 @@ available on a mapping entry:
 |-----|------|---------|
 | `name` | `string` | Stable identifier for this mapping entry. Required when another entry references it via `parent:`. Must be unique across all mapping files. |
 | `parent` | `string` | Name of the parent mapping entry. The child inherits the parent's `connector` and reads from the parent's `entity`. `array_path` must also be set. |
+| `priority` | `number` | Channel-scoped coalesce priority for this connector. Lower number wins. Promotes into `ChannelConfig.conflict.connectorPriorities` at load time (channel-scoped; does not affect other channels). Declaring conflicting values for the same connector within a channel is a config error. See `specs/field-mapping.md §2.1`. |
 | `array_path` | `string` | Dotted path to the JSON array column on the source record (`lines`, `order.lines`). Required when `parent` is set. |
 | `parent_fields` | `object` | Parent source fields to bring into scope for element field mapping. Key = local alias used in the child's `source:` entries; value = parent field name (string) or `{ path?, field }` for deep nesting. |
 | `element_key` | `string` | Field within each array element providing a stable identity. Falls back to element index when absent. |
@@ -461,8 +464,13 @@ All keys are optional unless noted.
 | `reverse_expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full canonical record). Return a plain object to decompose into multiple source fields; any other value is assigned to `source ?? target`. |
 | `normalize` | `string` | JS expression compiled via `new Function`. Binding: `v` (the raw field value). Applied to both the incoming value and the shadow before the noop diff check — prevents precision-loss connectors from triggering spurious updates. See `specs/field-mapping.md §1.4`. |
 | `resolve` | `string` | JS expression compiled via `new Function`. Bindings: `incoming`, `existing` (prior canonical value, `undefined` on first ingest). Returns the new canonical value. Takes precedence over a per-field strategy entry when both are set. See `specs/field-mapping.md §2.3`. |
+| `priority` | `number` | Per-field coalesce priority override. Overrides the connector-level value for this single canonical field. Lower number wins. See `specs/field-mapping.md §2.1`. |
+| `master` | `boolean` | Declare this connector as the sole authority for this canonical field in this channel. Patches from other connectors are dropped. Promotes into `ChannelConfig.conflict.fieldMasters` at load time. Only one connector may declare `master: true` for the same canonical field per channel. See `specs/channels.md §3.7`. |
 | `sort_elements` | `boolean` | When `true`, array elements are sorted before the noop diff check so that reordering alone does not trigger a re-sync. Equivalent to declaring `unordered: true` on the field's connector schema type. See `specs/field-mapping.md §3.5`. |
 | `element_fields` | `FieldMappingEntry[]` | Per-element field mappings applied to each object inside an array field. Supports all the same sub-keys; self-referential for nested arrays. See `specs/field-mapping.md §3.5`. |
+| `value_map` | `Record<string, unknown>` | Forward value map: source-local code → canonical code. Applied on the inbound pass after `default`. Keys coerced to string. Mutually exclusive with `expression`. See `specs/field-mapping.md §1.10`. |
+| `reverse_value_map` | `Record<string, unknown>` | Reverse value map: canonical code → source-local code. Applied on the outbound pass. Auto-derived from `value_map` when absent (requires a bijective map). See `specs/field-mapping.md §1.10`. |
+| `value_map_fallback` | `"passthrough" \| "null"` | Behaviour when a lookup key is absent from the map. `"passthrough"` (default): keep the original value. `"null"`: return null. See `specs/field-mapping.md §1.10`. |
 
 **TypeScript-only field functions** — `defaultExpression` is available only in the TypeScript
 embedded API (receives the partial canonical record; cannot be expressed as a simple expression

@@ -67,7 +67,9 @@ interface FieldMapping {
 
 interface ConflictConfig {
   strategy?:            "field_master" | "origin_wins";
+  /** Loader-internal — built from `master: true` on field entries in mappings. Not YAML-settable. */
   fieldMasters?:        Record<string, string>;   // field → connectorId
+  /** Loader-internal — built from `priority:` on mapping entries. Not YAML-settable. */
   connectorPriorities?: Record<string, number>;   // connectorId → priority (lower wins)
   fieldStrategies?:     Record<string, { strategy: "coalesce" | "last_modified" | "collect" }>;
 }
@@ -294,7 +296,9 @@ Declared in `ConflictConfig.fieldStrategies` to override the global strategy for
 ```typescript
 interface ConflictConfig {
   strategy?:          "field_master" | "origin_wins";
+  /** Loader-internal — built from `master: true` on field entries in mappings. Not YAML-settable. */
   fieldMasters?:      Record<string, string>;    // field → connectorId
+  /** Loader-internal — built from `priority:` on mapping entries. Not YAML-settable. */
   connectorPriorities?: Record<string, number>;  // connectorId → priority (lower = wins)
   fieldStrategies?:   Record<string, FieldStrategy>;
 }

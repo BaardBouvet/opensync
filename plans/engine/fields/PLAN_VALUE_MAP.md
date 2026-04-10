@@ -1,7 +1,7 @@
 # Value Maps — Declarative Enum / Code Translation
 
-**Status:** proposed  
-**Date:** 2026-04-08  
+**Status:** complete  
+**Date:** 2026-04-10  
 **Effort:** S  
 **Domain:** Engine — field mapping  
 **Scope:** `packages/engine/src/config/loader.ts`, `packages/engine/src/config/schema.ts`, `packages/engine/src/core/mapping.ts`, `specs/field-mapping.md`, `specs/config.md`  
@@ -137,7 +137,41 @@ The engine raises a config error at load time when both are declared.
 
 ---
 
-### § 3.5 YAML config syntax (full reference)
+### § 3.5 Deduplication with YAML anchors
+
+When the same connector exposes the same status codes on multiple entities (e.g. `contacts.status`
+and `leads.status` both use `a/b/c`), YAML's built-in anchor/alias syntax eliminates repetition
+without any engine involvement:
+
+```yaml
+mappings:
+  - connector: crm
+    entity: contacts
+    channel: persons
+    fields:
+      - source: status
+        target: status
+        value_map: &crm_status      # define anchor here
+          'a': 'active'
+          'b': 'inactive'
+          'c': 'closed'
+
+  - connector: crm
+    entity: leads
+    channel: leads
+    fields:
+      - source: status
+        target: status
+        value_map: *crm_status      # reuse — no engine feature needed
+```
+
+YAML parsers (including the `yaml` package used by the engine) expand anchors before the schema
+validator runs, so the engine sees two identical inline maps.  This replaces any need for a
+top-level `value_maps:` registry or a `use_map:` reference key.
+
+---
+
+### § 3.6 YAML config syntax (full reference)
 
 ```yaml
 fields:
@@ -309,7 +343,7 @@ Test IDs are prefixed `VM` to avoid collisions.
 | VM9 | Mutual exclusivity: expression + value_map at config load → error |
 | VM10 | direction=reverse_only: value_map skipped on forward pass; applied on reverse |
 | VM11 | direction=forward_only: reverse map skipped on outbound |
-| VM12 | normalize + value_map: normalize applied first, value_map translates normalised result |
+| VM12 | `normalize` + `value_map` independence: both declared on same field; `value_map` translates the raw source value; `normalize` is diff-only and does not pre-process the `value_map` input |
 
 Tests live in `packages/engine/src/core/mapping.test.ts`.
 
@@ -338,8 +372,10 @@ Auto-inversion, mutual exclusion with expression, and fallback semantics are des
 ## § 7 Out of Scope (Future)
 
 - **Named / shared maps** — define a `value_maps:` block at the top of a mappings file and
-  reference maps by name inside field entries.  This avoids repeating the same code table across
-  multiple connector entries.  Scope this as a follow-on once the core primitive is live.
+  reference maps by name inside field entries.  Not worth the added config surface: the realistic
+  reuse case (same connector, multiple entities) is better handled with YAML anchors (`&anchor` /
+  `*alias`), which the engine's YAML parser expands before validation so no engine feature is
+  needed.  See §3.5.
 
 - **Case-insensitive lookup** — a `value_map_case_insensitive: true` flag.  Trivially layered on
   top once the base feature exists.
