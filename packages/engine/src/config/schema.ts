@@ -27,15 +27,65 @@ export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>;
 
 export const ConflictStrategySchema = z.enum(["field_master", "origin_wins"]);
 
-export const ConflictConfigSchema = z.object({
-  strategy: ConflictStrategySchema.optional(),
-  fieldMasters: z.record(z.string(), z.string()).optional(),
-  connectorPriorities: z.record(z.string(), z.number()).optional(),
-  fieldStrategies: z.record(
-    z.string(),
-    z.object({ strategy: z.enum(["coalesce", "last_modified", "collect", "bool_or", "origin_wins"]) }),
-  ).optional(),
+const FieldStrategyEntrySchema = z.object({
+  strategy: z.enum(["coalesce", "last_modified", "collect", "bool_or", "origin_wins"]),
 });
+
+// Reserved keys at the top level of a conflict: block (cannot be used as field names).
+const CONFLICT_RESERVED = new Set(["strategy", "fieldMasters", "connectorPriorities"]);
+
+/**
+ * Conflict config schema. Spec: specs/channels.md §2.1.
+ *
+ * Field strategies are declared as direct keys under `conflict:` — no `fieldStrategies`
+ * wrapper. Each field entry is an object starting with `strategy:` and may carry additional
+ * metadata (description, type, …) in future versions.
+ *
+ * Reserved words (`strategy`, `fieldMasters`, `connectorPriorities`) cannot be used as
+ * field names. All other keys are treated as per-field conflict config.
+ *
+ * The transform normalises the parsed flat representation into the internal ConflictConfig
+ * shape (keeping `fieldStrategies` internally so engine + resolvers need not change).
+ */
+export const ConflictConfigSchema = z
+  .record(z.string(), z.unknown())
+  .superRefine((data, ctx) => {
+    if ("strategy" in data && data.strategy !== undefined) {
+      const r = ConflictStrategySchema.safeParse(data.strategy);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.strategy: ${r.error.issues[0]?.message ?? "invalid"}` });
+    }
+    if ("fieldMasters" in data && data.fieldMasters !== undefined) {
+      const r = z.record(z.string(), z.string()).safeParse(data.fieldMasters);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.fieldMasters: ${r.error.issues[0]?.message ?? "invalid"}` });
+    }
+    if ("connectorPriorities" in data && data.connectorPriorities !== undefined) {
+      const r = z.record(z.string(), z.number()).safeParse(data.connectorPriorities);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.connectorPriorities: ${r.error.issues[0]?.message ?? "invalid"}` });
+    }
+    for (const [key, value] of Object.entries(data)) {
+      if (CONFLICT_RESERVED.has(key)) continue;
+      const r = FieldStrategyEntrySchema.safeParse(value);
+      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.${key}: expected { strategy: coalesce|last_modified|collect|bool_or|origin_wins }`, path: [key] });
+    }
+  })
+  .transform((data) => {
+    type FieldStrategy = { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" | "origin_wins" };
+    const result: {
+      strategy?: "field_master" | "origin_wins";
+      fieldMasters?: Record<string, string>;
+      connectorPriorities?: Record<string, number>;
+      fieldStrategies?: Record<string, FieldStrategy>;
+    } = {};
+    if (data.strategy !== undefined) result.strategy = data.strategy as "field_master" | "origin_wins";
+    if (data.fieldMasters !== undefined) result.fieldMasters = data.fieldMasters as Record<string, string>;
+    if (data.connectorPriorities !== undefined) result.connectorPriorities = data.connectorPriorities as Record<string, number>;
+    const fieldEntries: Record<string, FieldStrategy> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (!CONFLICT_RESERVED.has(key)) fieldEntries[key] = value as FieldStrategy;
+    }
+    if (Object.keys(fieldEntries).length > 0) result.fieldStrategies = fieldEntries;
+    return result;
+  });
 
 export const IdentityGroupSchema = z.object({
   fields: z.array(z.string()).min(1),
@@ -55,6 +105,11 @@ export const ChannelDefSchema = z.object({
   identity: IdentitySchema.optional(),
   /** Spec: specs/field-mapping.md §8 — opt-in delete propagation (default: false). */
   propagateDeletes: z.boolean().optional(),
+  /** Spec: specs/channels.md §2.1 — per-channel canonical field declarations.
+   *  Each key is a canonical field name; the value is a field config entry (at minimum
+   *  a `strategy:` for conflict resolution). Entries here apply only to this channel and
+   *  take precedence over the global conflict: block for any matching field. */
+  fields: ConflictConfigSchema.optional(),
 });
 
 export type IdentityGroup = z.infer<typeof IdentityGroupSchema>;
@@ -123,13 +178,13 @@ const FieldMappingEntrySchemaBase = z.object({
   (f) => {
     if (!f.source_path) return true;
     // Array-index write-back is not supported on the outbound (canonical→source) pass.
-    // forward_only runs only outbound; bidirectional runs both.
-    // Only reverse_only (inbound only, no write-back) is safe with array-index tokens.
+    // reverse_only runs only outbound; bidirectional runs both.
+    // Only forward_only (inbound only, no write-back) is safe with array-index tokens.
     // Spec: specs/field-mapping.md §1.7
-    if (f.direction === "reverse_only") return true;
+    if (f.direction === "forward_only") return true;
     return !/\[\d+\]/.test(f.source_path);
   },
-  { message: "source_path with an array index ([N]) is only allowed on reverse_only fields (array-index write-back is not supported)" },
+  { message: "source_path with an array index ([N]) is only allowed on forward_only fields (array-index write-back is not supported)" },
 );
 
 // element_fields is self-referential, so define the full schema using z.lazy.

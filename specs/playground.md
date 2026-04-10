@@ -96,9 +96,9 @@ runtime objects back to YAML — config flows one way only (YAML → engine).
 
 ### § 3.2 Default seed
 
-The playground uses a fixed set of three systems (`crm`, `erp`, `hr`) with a shared seed
-defined in `lib/systems.ts`. Individual scenarios may override specific entity slices.
-The seed is deep-copied on boot so resets return to the original state.
+The playground uses a fixed set of systems (`crm`, `erp`, `hr`, `webshop`, `warehouse`) with
+a shared seed defined in `lib/systems.ts`. Individual scenarios may override specific entity
+slices. The seed is deep-copied on boot so resets return to the original state.
 
 ### § 3.3 Scenario switching and reset
 
@@ -133,6 +133,19 @@ mappings:
       - source: email_address
         target: email
 ```
+
+### § 3.5 Bundled scenarios
+
+Registered in `playground/src/scenarios/index.ts`.
+
+| Key | Label | Primary purpose |
+|-----|-------|-----------------|
+| `associations-demo` | associations-demo | Field renames + FK associations across 3 systems |
+| `assoc-cardinality` | assoc-cardinality | N:M association cardinality |
+| `array-demo` | array-demo (webshop nested lines → erp flat orderLines) | §3.2 array expansion, §3.3 scalar arrays |
+| `mapping-showcase` | Mapping Showcase (all mapping primitives) | §1–§5 + §8 field primitives; §3.4 deep nesting + §3.2 cross-channel |
+| `minimal` | minimal (crm ↔ erp, companies) | Simplest possible 2-system sync |
+| `empty` | empty | Blank canvas for manual exploration |
 
 ---
 

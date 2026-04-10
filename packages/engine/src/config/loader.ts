@@ -183,6 +183,9 @@ export interface ChannelConfig {
   /** Spec: specs/field-mapping.md §8 — opt-in delete propagation.
    * When true, records with deleted=true are fanned out to target connectors via entity.delete(). */
   propagateDeletes?: boolean;
+  /** Spec: specs/channels.md §2.1 — per-channel canonical field declarations.
+   * When set, field strategy entries declared here take precedence over the global conflict: block. */
+  conflict?: ConflictConfig;
 }
 
 /** A resolved connector instance — plugin loaded, context wired, entities retrieved. */
@@ -249,7 +252,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
     // mappings/ is optional if no channels are configured
   }
 
-  const allChannelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean }> = [];
+  const allChannelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean; conflict?: ConflictConfig }> = [];
   const allMappingEntries: MappingEntry[] = [];
 
   for (const filePath of mappingFiles) {
@@ -268,7 +271,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 
     if (result.data.channels) {
       for (const ch of result.data.channels) {
-        allChannelDefs.push({ id: ch.id, identity: ch.identity, propagateDeletes: ch.propagateDeletes });
+        allChannelDefs.push({ id: ch.id, identity: ch.identity, propagateDeletes: ch.propagateDeletes, conflict: ch.fields });
       }
     }
     if (result.data.mappings) {
@@ -324,7 +327,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 // the browser playground (which parses YAML directly, without file I/O).
 
 export function buildChannelsFromEntries(
-  channelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean }>,
+  channelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean; conflict?: ConflictConfig }>,
   mappingEntries: MappingEntry[],
 ): ChannelConfig[] {
   // Spec: specs/field-mapping.md §3.2 — build a global index of named mappings so
@@ -356,9 +359,13 @@ export function buildChannelsFromEntries(
   // Determine which named entries are same-channel source descriptors — i.e. named entries
   // that are referenced as `parent` by another entry in the SAME channel.
   // Source descriptors live in namedMappings only; they are NOT added as channel members.
+  // Spec: specs/field-mapping.md §3.2 — only array-expansion children (array_path set)
+  // turn their parent into a source descriptor. Embedded-object children (§3.1, no
+  // array_path) read from the same parent connector row but the parent IS still a real
+  // channel member — it must not be skipped.
   const sameChannelDescriptors = new Set<string>();
   for (const entry of mappingEntries) {
-    if (entry.parent) {
+    if (entry.parent && entry.array_path) {
       const parentEntry = namedMappings.get(entry.parent);
       if (parentEntry && parentEntry.channel === entry.channel) {
         sameChannelDescriptors.add(entry.parent);
@@ -374,6 +381,7 @@ export function buildChannelsFromEntries(
       members: [],
       identity: chDef.identity,
       propagateDeletes: chDef.propagateDeletes,
+      conflict: chDef.conflict,
     });
   }
 

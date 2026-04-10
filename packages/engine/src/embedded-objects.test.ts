@@ -12,11 +12,14 @@
  * EO5   Reverse pass — child canonical change triggers update on parent row
  * EO6   Parent deletion cascades to child shadow tombstone
  * EO7   Unchanged child row → noop (no update dispatched)
+ * EO8   buildChannelsFromEntries: embedded-object parent stays a channel member (regression)
+ * EO9   discover() / onboard() skip embedded children — no "has no shadow_state" error
  */
 
 import { describe, it, expect, beforeEach } from "bun:test";
 import { SyncEngine } from "./engine.js";
 import { openDb } from "./db/index.js";
+import { buildChannelsFromEntries } from "./config/loader.js";
 import type {
   Connector,
   EntityDefinition,
@@ -445,5 +448,175 @@ describe("EO6: parent deletion cascades child shadow tombstone", () => {
     // Child shadow also tombstoned (derived: C-001#addresses)
     const addrAfter = getShadowRow(db, "crm", "addresses", "C-001#addresses");
     expect(addrAfter!.deleted_at).not.toBeNull();
+  });
+});
+
+// ─── EO8: buildChannelsFromEntries regression ─────────────────────────────────
+// Regression guard: when an embedded-object child references a named parent in the
+// same channel, buildChannelsFromEntries must NOT drop the parent as a "source
+// descriptor". The parent must remain a channel member so engine.ingest() can find
+// it. If this test fails, the playground throws "crm is not a member of channel persons".
+// Spec: specs/field-mapping.md §3.1
+
+describe("EO8: buildChannelsFromEntries keeps embedded-object parent as a channel member", () => {
+  it("named embedded-object parent is not dropped from channel.members", () => {
+    const channels = buildChannelsFromEntries(
+      [{ id: "persons", identity: ["email"] }],
+      [
+        // Named parent — must survive as a channel member
+        {
+          name: "crm_contacts",
+          connector: "crm",
+          entity: "contacts",
+          channel: "persons",
+          fields: [{ source: "email", target: "email" }],
+        },
+        // Embedded child with parent: — must NOT cause parent to be skipped
+        {
+          connector: "crm",
+          parent: "crm_contacts",
+          entity: "addresses",
+          channel: "persons",
+          fields: [{ source: "ship_street", target: "street" }],
+        },
+      ],
+    );
+
+    const persons = channels.find((c) => c.id === "persons");
+    expect(persons).toBeTruthy();
+
+    const memberEntities = persons!.members.map((m) => m.entity);
+    // Parent must be present
+    expect(memberEntities).toContain("contacts");
+    // Child must also be present (as embeddedChild)
+    expect(memberEntities).toContain("addresses");
+
+    const parentMember = persons!.members.find((m) => m.entity === "contacts");
+    expect(parentMember?.embeddedChild).toBeFalsy();
+
+    const childMember = persons!.members.find((m) => m.entity === "addresses");
+    expect(childMember?.embeddedChild).toBe(true);
+  });
+
+  it("engine.ingest does not throw after buildChannelsFromEntries with embedded child", async () => {
+    const channels = buildChannelsFromEntries(
+      [{ id: "persons", identity: ["email"] }],
+      [
+        {
+          name: "crm_contacts",
+          connector: "crm",
+          entity: "contacts",
+          channel: "persons",
+          fields: [{ source: "email", target: "email" }],
+        },
+        {
+          connector: "crm",
+          parent: "crm_contacts",
+          entity: "addresses",
+          channel: "persons",
+          fields: [{ source: "ship_street", target: "street" }],
+        },
+      ],
+    );
+
+    const crmConnector: Connector = {
+      metadata: { name: "crm", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() { yield { records: [{ id: "C-1", data: { email: "a@b.com", ship_street: "1 Main St" } }], since: "t1" }; },
+          async *insert(recs): AsyncIterable<InsertResult> { for await (const r of recs) yield { id: `c-${r.data.email}`, data: r.data }; },
+          async *update(recs): AsyncIterable<UpdateResult> { for await (const r of recs) yield { id: r.id }; },
+        }];
+      },
+    };
+
+    const config: ResolvedConfig = {
+      connectors: [{ id: "crm", connector: crmConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } }],
+      channels,
+      conflict: {},
+      readTimeoutMs: 5000,
+    };
+
+    const engine = new SyncEngine(config, openDb(":memory:"));
+    // This must not throw "crm is not a member of channel persons"
+    await expect(engine.ingest("persons", "crm")).resolves.toBeDefined();
+  });
+});
+
+// ─── EO9: discover() / onboard() skip embedded children ──────────────────────
+// Regression guard: discover() and onboard() must not iterate embedded-child members
+// because those members have no shadow_state from collectOnly. If this test fails,
+// the playground throws "Connector crm has no shadow_state for contact_addresses".
+// Spec: specs/field-mapping.md §3.1
+
+describe("EO9: discover and onboard skip embedded-object children", () => {
+  function makeEo9Config(): ResolvedConfig {
+    const channels = buildChannelsFromEntries(
+      [{ id: "persons", identity: ["email"] }],
+      [
+        { name: "crm_contacts", connector: "crm", entity: "contacts", channel: "persons",
+          fields: [{ source: "email", target: "email" }, { source: "name", target: "name" }] },
+        { connector: "crm", parent: "crm_contacts", entity: "addresses", channel: "persons",
+          fields: [{ source: "ship_street", target: "street" }] },
+        { connector: "erp", entity: "employees", channel: "persons",
+          fields: [{ source: "email", target: "email" }, { source: "fullName", target: "name" }] },
+      ],
+    );
+
+    const makeCrm = (): Connector => ({
+      metadata: { name: "crm", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "contacts",
+          async *read() { yield { records: [{ id: "C-1", data: { email: "a@b.com", name: "Alice", ship_street: "1 Main St" } }], since: "t1" }; },
+          async *insert(recs): AsyncIterable<InsertResult> { for await (const r of recs) yield { id: `c-new`, data: r.data }; },
+          async *update(recs): AsyncIterable<UpdateResult> { for await (const r of recs) yield { id: r.id }; },
+        }];
+      },
+    });
+    const makeErp = (): Connector => ({
+      metadata: { name: "erp", version: "0.0.0", auth: { type: "none" } },
+      getEntities(): EntityDefinition[] {
+        return [{
+          name: "employees",
+          async *read() { yield { records: [{ id: "E-1", data: { email: "a@b.com", fullName: "Alice" } }], since: "t1" }; },
+          async *insert(recs): AsyncIterable<InsertResult> { for await (const r of recs) yield { id: `e-new`, data: r.data }; },
+          async *update(recs): AsyncIterable<UpdateResult> { for await (const r of recs) yield { id: r.id }; },
+        }];
+      },
+    });
+
+    return {
+      connectors: [
+        { id: "crm", connector: makeCrm(), config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+        { id: "erp", connector: makeErp(), config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
+      ],
+      channels,
+      conflict: {},
+      readTimeoutMs: 5000,
+    };
+  }
+
+  it("discover() does not throw 'has no shadow_state' for embedded child", async () => {
+    const config = makeEo9Config();
+    const engine = new SyncEngine(config, openDb(":memory:"));
+
+    // collectOnly for each non-embedded connector
+    await engine.ingest("persons", "crm", { collectOnly: true });
+    await engine.ingest("persons", "erp", { collectOnly: true });
+
+    // Must not throw "has no shadow_state for contact_addresses"
+    await expect(engine.discover("persons")).resolves.toBeDefined();
+  });
+
+  it("full collect→discover→onboard cycle completes without error", async () => {
+    const config = makeEo9Config();
+    const engine = new SyncEngine(config, openDb(":memory:"));
+
+    await engine.ingest("persons", "crm", { collectOnly: true });
+    await engine.ingest("persons", "erp", { collectOnly: true });
+    const report = await engine.discover("persons");
+    await expect(engine.onboard("persons", report)).resolves.toBeDefined();
   });
 });

@@ -273,6 +273,21 @@ export class SyncEngine {
     }
   }
 
+  // ─── Per-channel conflict resolution ──────────────────────────────────────
+  // Spec: specs/channels.md §2.1 — channel-level conflict config overrides global.
+  // fieldStrategies, fieldMasters, connectorPriorities, and strategy are merged;
+  // channel-level entries take precedence over global ones of the same key.
+  private _effectiveConflict(channel: ChannelConfig): ConflictConfig {
+    const ch = channel.conflict;
+    if (!ch) return this.conflictConfig;
+    return {
+      strategy: ch.strategy ?? this.conflictConfig.strategy,
+      fieldMasters: { ...this.conflictConfig.fieldMasters, ...ch.fieldMasters },
+      connectorPriorities: { ...this.conflictConfig.connectorPriorities, ...ch.connectorPriorities },
+      fieldStrategies: { ...this.conflictConfig.fieldStrategies, ...ch.fieldStrategies },
+    };
+  }
+
   // ─── Channel status ───────────────────────────────────────────────────────
 
   channelStatus(channelId: string): ChannelStatus {
@@ -640,14 +655,18 @@ export class SyncEngine {
   async discover(channelId: string, snapshotAt?: number): Promise<DiscoveryReport> {
     const channel = this.channels.get(channelId);
     if (!channel) throw new Error(`Unknown channel: ${channelId}`);
-    if (channel.members.length < 2) throw new Error(`discover() needs at least 2 members`);
+    // Spec: specs/field-mapping.md §3.1 — embedded-object children share their parent's
+    // connector row and have no independent shadow_state from collectOnly. Exclude them
+    // from discovery; they are handled by the parent's ingest pass.
+    const discoveryMembers = channel.members.filter((m) => !m.embeddedChild);
+    if (discoveryMembers.length < 2) throw new Error(`discover() needs at least 2 members`);
 
-    const entity = channel.members[0].entity;
+    const entity = discoveryMembers[0].entity;
 
     type Side = { connectorId: string; records: Array<{ id: string; canonical: Record<string, unknown> }> };
     const sides: Side[] = [];
 
-    for (const member of channel.members) {
+    for (const member of discoveryMembers) {
       const rows = dbGetAllShadowForEntity(this.db, member.connectorId, member.entity);
       if (rows.length === 0) {
         throw new Error(
@@ -763,7 +782,11 @@ export class SyncEngine {
     // Spec: specs/sync-engine.md § Onboard — per-connector entity name lookup.
     // report.entity = channel.members[0].entity, which is wrong for connectors
     // with a different entity name. Use memberByConnector for all entity lookups.
-    const memberByConnector = new Map(channel.members.map((m) => [m.connectorId, m]));
+    // Embedded-object children share connectorId with their parent; exclude them so
+    // the map always resolves to the flat (readable) entity for each connector.
+    const memberByConnector = new Map(
+      channel.members.filter((m) => !m.embeddedChild).map((m) => [m.connectorId, m]),
+    );
 
     // 1. Merge matched provisional canonicals
     // Build a map of match index → final canonical ID so step 1b can propagate
@@ -874,6 +897,7 @@ export class SyncEngine {
       }
 
       for (const targetMember of channel.members) {
+        if (targetMember.embeddedChild) continue; // written via parent ingest, not direct insert
         if (matchedConnectors.has(targetMember.connectorId)) continue;
         if (dbGetExternalId(this.db, canonicalId, targetMember.connectorId)) continue;
 
@@ -976,7 +1000,7 @@ export class SyncEngine {
       const sourceCanonId = dbGetCanonicalId(this.db, unique.connectorId, unique.externalId);
       if (!sourceCanonId) continue;
 
-      for (const targetMember of channel.members.filter((m) => m.connectorId !== unique.connectorId)) {
+      for (const targetMember of channel.members.filter((m) => m.connectorId !== unique.connectorId && !m.embeddedChild)) {
         if (dbGetExternalId(this.db, sourceCanonId, targetMember.connectorId)) continue;
 
         const targetWired = this.wired.get(targetMember.connectorId);
@@ -2051,7 +2075,7 @@ export class SyncEngine {
               ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId)
               : undefined;
 
-            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound, undefined, undefined, undefined);
+            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this._effectiveConflict(channel), sourceMember.inbound, undefined, undefined, undefined);
             if (!Object.keys(resolved).length && existingTargetId !== undefined) {
               results.push({ entity: sourceMember.entity, action: "skip", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
               continue;
@@ -2292,7 +2316,8 @@ export class SyncEngine {
       const fieldTimestamps = computeFieldTimestamps(canonical, existingShadow, record, ingestTs);
       // Spec: specs/field-mapping.md §2.N origin_wins / last_modified tie-breaking
       const incomingCreatedAt = record.createdAt ? (Date.parse(record.createdAt) || undefined) : undefined;
-      const needsCreatedAts = !this.conflictConfig.strategy || this.conflictConfig.strategy === "origin_wins";
+      const effectiveConflict = this._effectiveConflict(channel);
+      const needsCreatedAts = !effectiveConflict.strategy || effectiveConflict.strategy === "origin_wins";
       const createdAtBySrc = needsCreatedAts ? dbGetSourceCreatedAts(this.db, canonId) : undefined;
 
       type Outcome = { result: RecordSyncResult; localData: Record<string, unknown>; shadowData: { connectorId: string; entity: string; externalId: string; canonId: string; fd: FieldData; action: "insert" | "update" }; txEntry: Parameters<typeof dbLogTransaction>[1] };
@@ -2330,7 +2355,7 @@ export class SyncEngine {
         const existingTargetId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
         const targetShadow = existingTargetId ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId) : undefined;
 
-        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, this.conflictConfig, sourceMember.inbound, fieldTimestamps, incomingCreatedAt, createdAtBySrc);
+        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, effectiveConflict, sourceMember.inbound, fieldTimestamps, incomingCreatedAt, createdAtBySrc);
         // Zero-key guard: suppress dispatch only when updating an *existing* target record
         // with no field changes.  When existingTargetId is undefined this is a brand-new
         // INSERT — dispatch must run even for empty canonical data so the record is created
