@@ -70,21 +70,21 @@ same connector.
 | `direction`       | Forward (source → canonical) | Reverse (canonical → source) |
 |-------------------|------------------------------|------------------------------|
 | `bidirectional`   | ✓ (default)                  | ✓                            |
-| `reverse_only`    | ✓                            | ✗                            |
-| `forward_only`    | ✗                            | ✓                            |
+| `reverse_only`    | ✗                            | ✓                            |
+| `forward_only`    | ✓                            | ✗                            |
 
 ```yaml
 fields:
   - source: internalNotes
     target: notes
-    direction: reverse_only   # read from this source; never write back
+    direction: forward_only   # read from this source; never written back to connector
   - source: syncedFrom
     target: _origin
-    direction: forward_only   # injected when writing to this connector; ignored on read
+    direction: reverse_only   # injected when writing to this connector; not read on ingest
 ```
 
-`reverse_only` is used for read-only audit connectors. `forward_only` is used for constant
-injections, computed fields the connector provides itself, or schema-asymmetric situations.
+`forward_only` is used for read-only audit connectors or any field the engine should never write back. `reverse_only` is used for constant
+injections, computed fields that must appear in the outbound payload but are never read from the source.
 
 **Status: implemented (OSI-mapping §5).**
 
@@ -123,8 +123,8 @@ In the TypeScript embedded API the same fields accept typed function values:
 Note: the TypeScript API uses camelCase (`reverseExpression`); the YAML key uses snake_case
 (`reverse_expression`). Both compile to the same `FieldMapping.reverseExpression` function.
 
-The `direction` guard applies before expressions: `forward_only` entries are skipped on inbound
-(expression never runs); `reverse_only` entries are skipped on outbound (reverseExpression never runs).
+The `direction` guard applies before expressions: `forward_only` entries are skipped on outbound
+(reverseExpression never runs); `reverse_only` entries are skipped on inbound (expression never runs).
 
 When `expression` is present, `source` is ignored on the inbound pass.
 
@@ -236,9 +236,9 @@ fields:
     target: street
   - source_path: address.city
     target: city
-  - source_path: metadata.tags[0]   # array index — reverse_only only (see below)
+  - source_path: metadata.tags[0]   # array index — forward_only only (see below)
     target: primaryTag
-    direction: reverse_only
+    direction: forward_only
 ```
 
 `source_path` extracts a value from a nested path within the source record without requiring
@@ -261,8 +261,8 @@ in the write payload by reconstructing the path. Multiple fields sharing the sam
 merged into the same nested object (`address.street` + `address.city` → `{ address: { street, city } }`).
 
 **Array-index write-back restriction:** `source_path` with an `[N]` token is only allowed on
-`reverse_only` fields (inbound only, no write-back). Using an array-index token on a
-`bidirectional` or `forward_only` field raises a config validation error at load time, since
+`forward_only` fields (inbound only, no write-back). Using an array-index token on a
+`bidirectional` or `reverse_only` field raises a config validation error at load time, since
 writing to a positional index within an existing array is not supported. Use `array_path`
 expansion or `reverse_expression` for that case.
 
@@ -436,7 +436,7 @@ fields:
     resolve: collect
 ```
 
-In YAML config, set `strategy: collect` inside `fieldStrategies`. In the TypeScript embedded API,
+In YAML config, set `strategy: collect` as a direct field entry under `conflict:`. In the TypeScript embedded API,
 use the `resolve` function (§2.3) for custom collection logic.
 
 **Status: implemented (OSI-mapping §1 "Collect"). Tests: `packages/engine/src/core/conflict.test.ts` RS1–RS4.**
@@ -453,10 +453,11 @@ or `null` does not overwrite a prior `true`. Resetting the flag requires removin
 sources' shadow states (outside scope of this strategy).
 
 ```yaml
-conflict_resolution:
-  fieldStrategies:
-    isDeleted:
-      strategy: bool_or
+channels:
+  - id: my-channel
+    fields:
+      isDeleted:
+        strategy: bool_or
 ```
 
 **Status: implemented (OSI-mapping §1 "Bool_or"). Tests: `packages/engine/src/core/conflict.test.ts` BO1–BO6.**
@@ -856,7 +857,7 @@ entities and without any per-element canonical ID allocation.
   fields:
     - source: lines
       target: lines
-      direction: forward_only    # CRM receives the canonical array; never writes it upstream
+      direction: reverse_only    # CRM receives the canonical array on write-back; not read from CRM on ingest
       sort_elements: true
       element_fields:
         - source: lineNum
@@ -919,7 +920,7 @@ connector value wins (`{ ...idBase, ...raw }` — data overwrites the injection)
 
 **Direction:** to prevent the injected PK from being written back as a data field
 when the engine dispatches updates to the same connector, add
-`direction: reverse_only` on the mapping entry. `reverse_only` reads the field into
+`direction: forward_only` on the mapping entry. `forward_only` reads the field into
 canonical on the forward pass but excludes it from the outbound payload.
 
 **Status: implemented (specs/field-mapping.md §4.1).**
@@ -1106,13 +1107,12 @@ Config example:
 ```yaml
 channels:
   - name: order-lines
-    conflict:
+    fields:
       connectorPriorities:
         erp: 1
         marketplace: 2
-      fieldStrategies:
-        qty:
-          strategy: coalesce
+      qty:
+        strategy: coalesce
       fieldMasters:
         price: erp          # only ERP may set price; marketplace patches have price stripped
     members:
@@ -1464,8 +1464,8 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | `coalesce` resolution | §1 | ✅ implemented |
 | `last_modified` resolution | §1 | ✅ implemented (config key not yet wired) |
 | `expression` resolver | §1 | ✅ implemented — YAML `expression`/`reverse_expression` + TypeScript function form |
-| `collect` resolver | §1 | ✅ implemented — `resolve: collect` in fieldStrategies |
-| `bool_or` resolver | §1 | ✅ implemented — `strategy: bool_or` in fieldStrategies |
+| `collect` resolver | §1 | ✅ implemented — `fieldName: { strategy: collect }` under `conflict:` |
+| `bool_or` resolver | §1 | ✅ implemented — `fieldName: { strategy: bool_or }` under `conflict:` |
 | Composite keys (`link_group`) | §2 | ✅ `identityGroups` (AND-within-group, OR-across-groups); tests T-LG-1–T-LG-4 |
 | Transitive closure | §2 | ✅ union-find (connected-components) algorithm; see `specs/identity.md` |
 | External link tables | §2 | ❌ no third-party linkage feed |
@@ -1475,11 +1475,11 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Nested arrays (`array` / `array_path`) | §3 | ✅ implemented — forward expand + reverse collapse; same-channel + cross-channel |
 | Deep nesting | §3 | ✅ implemented — `expansionChain`, multi-hop `array_parent_map`, cross-join |
 | Scalar arrays (`scalar: true`) | §3.3 | ✅ forward + reverse collapse implemented; cascade element-absence deletion; `_value` preserved through pipeline. Tests: SA1–SA9, SC1–SC8 |
-| `source_path` extraction | §1.7 | ✅ implemented — dotted path + `[N]` index; forward pass extraction; reverse pass nested-path reconstruction; array-index restricted to `reverse_only`; `element_fields` support. Tests: SP1–SP10 |
+| `source_path` extraction | §1.7 | ✅ implemented — dotted path + `[N]` index; forward pass extraction; reverse pass nested-path reconstruction; array-index restricted to `forward_only`; `element_fields` support. Tests: SP1–SP10 |
 | Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
 | Atomic arrays (`sort_elements`, `element_fields`) | §3.5 | ✅ `sort_elements`/`unordered` schema-guided sort; `element_fields` per-element rename; Tests: AA1–AA5, EF1–EF8 |
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
-| FK reverse resolution | §4 | ✅ `direction: reverse_only` excludes injected PK from outbound dispatch |
+| FK reverse resolution | §4 | ✅ `direction: forward_only` excludes injected PK from outbound dispatch |
 | Reference preservation after merge | §4 | ✅ identity_map preserves all connector IDs; association predicate remapping implemented |
 | `references_field` | §4 | ❌ no alternate-representation FK |
 | Vocabulary targets | §4 | ❌ no vocabulary entity concept |

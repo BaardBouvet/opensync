@@ -9,8 +9,8 @@
  * FE2  forward expression overrides source-key lookup
  * FE3  reverseExpression scalar → assigns to source ?? target
  * FE4  reverseExpression object → decomposed into multiple source keys
- * FE5  direction: forward_only + expression → no reverse output
- * FE6  direction: reverse_only + reverseExpression → no forward output
+ * FE5  direction: forward_only + expression → no outbound output
+ * FE6  direction: reverse_only + reverseExpression → no inbound output
  * FE7  expression + plain-rename entries in same mapping list coexist
  * FE8  enum mapping: expression (bool→string) + reverseExpression (string→bool)
  * FE9  expression receives full record (can reference multiple fields)
@@ -21,14 +21,14 @@
  * AT5  applyMapping integrates element_fields automatically (Spec: §3.5)
  * SP1  source_path: single-level dotted path inbound
  * SP2  source_path: multi-level dotted path inbound
- * SP3  source_path: array index inbound (reverse_only — no write-back)
+ * SP3  source_path: array index inbound (forward_only — no write-back)
  * SP4  source_path: missing intermediate resolves to undefined → default fires
  * SP5  source_path: expression takes precedence over source_path
  * SP6  source_path + expression coexist in same mapping list
  * SP7  source_path inside element_fields
  * SP8  source_path reverse: reconstruct nested path
  * SP9  source_path reverse: multiple entries with shared prefix merge
- * SP10 source_path reverse_only: produces no outbound key
+ * SP10 source_path forward_only: produces no outbound key
  */
 import { describe, it, expect } from "bun:test";
 import { applyMapping, applyElementFields, resolveSourcePath, parseTs, computeFieldTimestamps } from "./mapping.js";
@@ -99,8 +99,7 @@ describe("FE4: reverseExpression object decomposition", () => {
   it("splits fullName back into firstName + lastName", () => {
     const mappings: FieldMappingList = [{
       target: "fullName",
-      direction: "forward_only",
-      expression: (r) => `${r["firstName"]} ${r["lastName"]}`,
+      direction: "reverse_only",
       reverseExpression: (r) => ({
         firstName: String(r["fullName"] ?? "").split(" ")[0] ?? "",
         lastName:  String(r["fullName"] ?? "").split(" ").slice(1).join(" "),
@@ -116,7 +115,7 @@ describe("FE4: reverseExpression object decomposition", () => {
       { source: "email_addr", target: "email" },
       {
         target: "fullName",
-        direction: "forward_only",
+        direction: "reverse_only",
         reverseExpression: (r) => ({
           first_name: String(r["fullName"] ?? "").split(" ")[0] ?? "",
           last_name:  String(r["fullName"] ?? "").split(" ").slice(1).join(" "),
@@ -129,20 +128,20 @@ describe("FE4: reverseExpression object decomposition", () => {
 });
 
 // ─── FE5: direction forward_only ────────────────────────────────────────────
-// Spec table: forward_only → Forward (source→canonical) ✗, Reverse (canonical→source) ✓
-// i.e. skip on inbound; include on outbound (write TO connector).
+// Spec table: forward_only → Forward (source→canonical) ✓, Reverse (canonical→source) ✗
+// i.e. include on inbound (read FROM connector); skip on outbound (no write-back).
 
-describe("FE5: direction forward_only — skipped on inbound, included on outbound", () => {
-  it("inbound: entry is skipped entirely", () => {
+describe("FE5: direction forward_only — included on inbound, skipped on outbound", () => {
+  it("inbound: expression runs", () => {
     const mappings: FieldMappingList = [{
       target: "fullName",
       direction: "forward_only",
       expression: (r) => `${r["first"]} ${r["last"]}`,
     }];
-    // forward_only = skip on inbound, so expression does NOT run
-    expect(applyMapping({ first: "A", last: "B" }, mappings, "inbound")).toEqual({});
+    // forward_only = included on inbound, expression runs
+    expect(applyMapping({ first: "A", last: "B" }, mappings, "inbound")).toEqual({ fullName: "A B" });
   });
-  it("outbound: reverseExpression runs when present", () => {
+  it("outbound: entry is skipped entirely", () => {
     const mappings: FieldMappingList = [{
       target: "fullName",
       direction: "forward_only",
@@ -151,39 +150,40 @@ describe("FE5: direction forward_only — skipped on inbound, included on outbou
         last_name:  String(r["fullName"] ?? "").split(" ").slice(1).join(" "),
       }),
     }];
-    expect(applyMapping({ fullName: "Alice Smith" }, mappings, "outbound"))
-      .toEqual({ first_name: "Alice", last_name: "Smith" });
+    // forward_only = skip on outbound, reverseExpression does NOT run
+    expect(applyMapping({ fullName: "Alice Smith" }, mappings, "outbound")).toEqual({});
   });
-  it("outbound: falls back to plain rename when no reverseExpression", () => {
+  it("outbound: no plain rename output either", () => {
     const mappings: FieldMappingList = [{ target: "code", direction: "forward_only" }];
-    // No reverseExpression: plain target→source rename runs
-    expect(applyMapping({ code: "ABC" }, mappings, "outbound")).toEqual({ code: "ABC" });
+    // forward_only = skip on outbound even for plain renames
+    expect(applyMapping({ code: "ABC" }, mappings, "outbound")).toEqual({});
   });
 });
 
 // ─── FE6: direction reverse_only ─────────────────────────────────────────────
-// Spec table: reverse_only → Forward (source→canonical) ✓, Reverse (canonical→source) ✗
-// i.e. include on inbound (read FROM connector); skip on outbound (no write-back).
+// Spec table: reverse_only → Forward (source→canonical) ✗, Reverse (canonical→source) ✓
+// i.e. skip on inbound; include on outbound (write TO connector).
 
-describe("FE6: direction reverse_only — included on inbound, skipped on outbound", () => {
-  it("inbound: expression runs", () => {
+describe("FE6: direction reverse_only — skipped on inbound, included on outbound", () => {
+  it("inbound: entry is skipped entirely", () => {
     const mappings: FieldMappingList = [{
       source: "raw_score",
       target: "score",
       direction: "reverse_only",
       expression: (r) => Number(r["raw_score"]) * 100,
     }];
-    expect(applyMapping({ raw_score: 0.9 }, mappings, "inbound")).toEqual({ score: 90 });
+    // reverse_only = skip on inbound, so expression does NOT run
+    expect(applyMapping({ raw_score: 0.9 }, mappings, "inbound")).toEqual({});
   });
-  it("outbound: entry is skipped entirely", () => {
+  it("outbound: reverseExpression runs when present", () => {
     const mappings: FieldMappingList = [{
       source: "raw_score",
       target: "score",
       direction: "reverse_only",
       reverseExpression: (r) => Number(r["score"]) / 100,
     }];
-    // reverse_only = skip on outbound, so reverseExpression does NOT run
-    expect(applyMapping({ score: 90 }, mappings, "outbound")).toEqual({});
+    // reverse_only = included on outbound, reverseExpression runs
+    expect(applyMapping({ score: 90 }, mappings, "outbound")).toEqual({ raw_score: 0.9 });
   });
 });
 
@@ -656,17 +656,17 @@ describe("SP2: source_path multi-level dotted path", () => {
 });
 
 // ─── SP3: array index forward pass ───────────────────────────────────────────
-// array-index source_path is only allowed on reverse_only (inbound read, no write-back)
+// array-index source_path is only allowed on forward_only (inbound read, no write-back)
 
-describe("SP3: source_path array index inbound (reverse_only)", () => {
+describe("SP3: source_path array index inbound (forward_only)", () => {
   it("extracts value at index 0", () => {
-    const mappings: FieldMappingList = [{ sourcePath: "metadata.tags[0]", target: "primaryTag", direction: "reverse_only" }];
+    const mappings: FieldMappingList = [{ sourcePath: "metadata.tags[0]", target: "primaryTag", direction: "forward_only" }];
     expect(applyMapping({ metadata: { tags: ["vip", "lead"] } }, mappings, "inbound"))
       .toEqual({ primaryTag: "vip" });
   });
 
   it("out of bounds index resolves to undefined → no output key", () => {
-    const mappings: FieldMappingList = [{ sourcePath: "lines[5].sku", target: "sku", direction: "reverse_only" }];
+    const mappings: FieldMappingList = [{ sourcePath: "lines[5].sku", target: "sku", direction: "forward_only" }];
     expect(applyMapping({ lines: [{ sku: "A" }] }, mappings, "inbound")).toEqual({});
   });
 });
@@ -748,17 +748,17 @@ describe("SP9: multiple source_path with shared prefix merge into same object", 
   });
 });
 
-// ─── SP10: reverse_only field produces no outbound key ─────────────────────
-// Spec: §1.2 — reverse_only skips the outbound (canonical→source) pass
+// ─── SP10: forward_only field produces no outbound key ─────────────────────
+// Spec: §1.2 — forward_only skips the outbound (canonical→source) pass
 
-describe("SP10: reverse_only source_path field skipped on outbound pass", () => {
+describe("SP10: forward_only source_path field skipped on outbound pass", () => {
   it("produces no key in outbound result", () => {
     const mappings: FieldMappingList = [
-      { sourcePath: "meta.score", target: "score", direction: "reverse_only" },
+      { sourcePath: "meta.score", target: "score", direction: "forward_only" },
       { source: "name", target: "name" },
     ];
     expect(applyMapping({ score: 99, name: "Alice" }, mappings, "outbound"))
-      .toEqual({ name: "Alice" }); // score not present — reverse_only skipped on outbound
+      .toEqual({ name: "Alice" }); // score not present — forward_only skipped on outbound
   });
 });
 

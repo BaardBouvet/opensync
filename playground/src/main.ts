@@ -351,7 +351,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const startX = e.clientX;
     const startW = editorPaneEl.getBoundingClientRect().width;
     function onMove(ev: MouseEvent) {
-      const w = Math.max(180, Math.min(600, startW + (ev.clientX - startX)));
+      const w = Math.max(180, startW + (ev.clientX - startX));
       editorPaneEl.style.width = `${w}px`;
     }
     function onUp() {
@@ -373,7 +373,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const startH = devtoolsEl.getBoundingClientRect().height;
     function onMove(ev: MouseEvent) {
       // Dragging up increases height
-      const h = Math.max(60, Math.min(500, startH + (startY - ev.clientY)));
+      const h = Math.max(60, startH + (startY - ev.clientY));
       devtoolsEl.style.height = `${h}px`;
     }
     function onUp() {

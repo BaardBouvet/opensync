@@ -61,7 +61,7 @@ export function resolveSourcePath(
 /**
  * On the reverse pass, assign a value into a nested path within `result`, creating
  * intermediate objects as needed. Array-index write-back is not supported (caught at
- * config load time for non-forward_only fields).
+ * config load time for non-reverse_only fields).
  *
  * Spec: specs/field-mapping.md §1.7 (reverse pass)
  */
@@ -100,7 +100,7 @@ export function applyMapping(
   for (const m of mappings) {
     const dir = m.direction ?? "bidirectional";
     if (pass === "inbound") {
-      if (dir === "forward_only") continue;
+      if (dir === "reverse_only") continue;
       // Spec: specs/field-mapping.md §1.3 — expression takes precedence over source rename
       // Spec: specs/field-mapping.md §1.7 — source_path extraction takes precedence over source key lookup
       let value: unknown;
@@ -125,7 +125,7 @@ export function applyMapping(
         result[m.target] = m.elementFields ? applyElementFields(value, m.elementFields, pass) : value;
       }
     } else {
-      if (dir === "reverse_only") continue;
+      if (dir === "forward_only") continue;
       // Spec: specs/field-mapping.md §1.3 — reverseExpression: object → decompose, scalar → assign
       if (m.reverseExpression) {
         const v = m.reverseExpression(data);

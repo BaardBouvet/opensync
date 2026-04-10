@@ -4,6 +4,7 @@ import type { ScenarioDefinition } from "./types.js";
 import associationsDemo from "./associations-demo.js";
 import assocCardinality from "./assoc-cardinality.js";
 import arrayDemo from "./array-demo.js";
+import mappingShowcase from "./mapping-showcase.js";
 import minimal from "./minimal.js";
 import empty from "./empty.js";
 
@@ -13,6 +14,7 @@ export const scenarios: Record<string, ScenarioDefinition> = {
   "associations-demo": associationsDemo,
   "assoc-cardinality": assocCardinality,
   "array-demo": arrayDemo,
+  "mapping-showcase": mappingShowcase,
   "minimal": minimal,
   "empty": empty,
 };

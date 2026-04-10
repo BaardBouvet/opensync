@@ -102,45 +102,64 @@ The resolution pipeline evaluates strategies in this priority order:
 
 1. **Field master** — if `fieldMasters[field]` names a connector, only that connector's value
    is accepted for that field. All other sources are dropped.
-2. **Per-field strategy** — `fieldStrategies[field]` selects `coalesce`, `last_modified`,
-   `collect`, or `bool_or`.
+2. **Per-field strategy** — a field entry under `fields:` on the channel (e.g. `phone: { strategy: last_modified }`) selects `coalesce`, `last_modified`, `collect`, or `bool_or`.
 3. **Field-level `resolve` expression** — a `resolve:` key on the `FieldMapping` entry
    provides a custom incremental reducer.
 4. **Global strategy** — `strategy: field_master` or `strategy: origin_wins` as the fallback.
 5. **Last-write-wins (LWW)** — the implicit default when no strategy is declared. Incoming
    value accepted if `incoming.ts >= shadow[field].ts`.
 
-### § 2.1 ConflictConfig
+### § 2.1 Channel `fields:` and global `conflict:`
+
+Canonical fields are declared under a `fields:` key on the channel. Each field name maps to a
+field config entry that carries (at minimum) a `strategy:` for conflict resolution. This is
+also the natural place to add `description:`, `type:`, and other field-level metadata in
+future versions.
+
+Three keys are reserved inside `fields:` and cannot be used as field names: `strategy`,
+`fieldMasters`, `connectorPriorities`.
 
 ```typescript
-interface ConflictConfig {
+// YAML surface — parsed flat, then normalised
+interface ChannelFieldsYaml {
+  // reserved cross-field settings:
   strategy?:             "field_master" | "origin_wins";
   fieldMasters?:         Record<string, string>;          // canonical field → connectorId
   connectorPriorities?:  Record<string, number>;          // connectorId → priority (lower wins)
-  fieldStrategies?:      Record<string, FieldStrategy>;
+  // per-field entries (any other key):
+  [fieldName: string]: { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" };
 }
-
-type FieldStrategy =
-  | { strategy: "coalesce" }
-  | { strategy: "last_modified" }
-  | { strategy: "collect" }
-  | { strategy: "bool_or" };
 ```
 
-`ConflictConfig` is declared at the top level of `opensync.json` as `conflict:`. Per-channel
-overrides are not yet supported — `conflict:` applies to all channels.
+Field config declared under `fields:` applies only to that channel and takes precedence over
+the global `conflict:` block for any matching field. Entries are merged field-by-field
+(channel wins on overlap); `strategy`, `fieldMasters`, and `connectorPriorities` are replaced
+wholesale when present on the channel.
 
-```json
-{
-  "conflict": {
-    "connectorPriorities": { "crm": 1, "erp": 2 },
-    "fieldStrategies": {
-      "email":  { "strategy": "coalesce" },
-      "tags":   { "strategy": "collect" },
-      "active": { "strategy": "bool_or" }
-    }
-  }
-}
+Declaring field config per-channel is the recommended practice because field names are scoped
+to a channel’s canonical schema — the same name (e.g. `phone`) can have different resolution
+semantics in different channels.
+
+```yaml
+channels:
+  - id: persons
+    identity: [email]
+    fields:
+      phone:     { strategy: last_modified }
+      firstName: { strategy: coalesce }
+  - id: orgs
+    identity: [domain]
+    fields:
+      categories: { strategy: collect }
+      isPremium:  { strategy: bool_or }
+```
+
+A global `conflict:` block is still useful for cross-cutting settings that apply to all
+channels, such as `connectorPriorities` or a fallback `strategy`:
+
+```yaml
+conflict:
+  connectorPriorities: { crm: 1, erp: 2 }
 ```
 
 ---

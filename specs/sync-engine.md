@@ -183,8 +183,8 @@ Applied before writing to each target connector. Fields listed in `outbound` are
 | `direction`    | Inbound | Outbound |
 |----------------|---------|----------|
 | `bidirectional` (default) | ✓ | ✓ |
-| `reverse_only` | ✓ | ✗ |
-| `forward_only` | ✗ | ✓ |
+| `reverse_only` | ✗ | ✓ |
+| `forward_only` | ✓ | ✗ |
 
 ---
 

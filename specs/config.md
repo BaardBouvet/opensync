@@ -221,17 +221,17 @@ is a convenience for connectors that already speak the canonical field names.
 | `direction`       | Inbound (source → canonical) | Outbound (canonical → target) |
 |-------------------|------------------------------|-------------------------------|
 | `bidirectional`   | ✓ (default)                  | ✓                             |
-| `reverse_only`    | ✓                            | ✗                             |
-| `forward_only`    | ✗                            | ✓                             |
+| `forward_only`    | ✓                            | ✗                             |
+| `reverse_only`    | ✗                            | ✓                             |
 
-- `reverse_only` — read from this connector but never write back to it (e.g. a read-only audit source)
-- `forward_only` — injected when writing to this connector but ignored when reading back (e.g. a constant or computed field the connector provides itself)
+- `forward_only` — read from this connector but never written back to it (e.g. a read-only audit source)
+- `reverse_only` — injected when writing to this connector but ignored when reading back (e.g. a constant or computed field the connector provides itself)
 
 ```yaml
 fields:
   - source: internalNotes
     target: notes
-    direction: reverse_only    # never write back to source
+    direction: forward_only    # never write back to source
 ```
 
 ### Associations
@@ -401,7 +401,7 @@ into the data map under the given name before field mapping runs:
     - { source: name,   target: name }
 ```
 
-Add `direction: reverse_only` to the injected field if you don't want the PK written back
+Add `direction: forward_only` to the injected field if you don't want the PK written back
 as a data field on outbound dispatches. See `specs/field-mapping.md §4.1`.
 
 ---
@@ -450,7 +450,7 @@ All keys are optional unless noted.
 | Key | Type | Meaning |
 |-----|------|---------|
 | `source` | `string` | Connector-side field name. Omit when `expression` or `source_path` supplies the value. Mutually exclusive with `source_path`. |
-| `source_path` | `string` | Dotted JSON path within the source record (`address.street`, `lines[0].sku`). Mutually exclusive with `source`. Array-index tokens `[N]` are only allowed on `reverse_only` fields (array-index write-back is not supported). On the reverse pass the engine reconstructs the nested path; multiple entries sharing the same prefix are merged. See `specs/field-mapping.md §1.7`. |
+| `source_path` | `string` | Dotted JSON path within the source record (`address.street`, `lines[0].sku`). Mutually exclusive with `source`. Array-index tokens `[N]` are only allowed on `forward_only` fields (array-index write-back is not supported). On the reverse pass the engine reconstructs the nested path; multiple entries sharing the same prefix are merged. See `specs/field-mapping.md §1.7`. |
 | `target` | `string` | **Required.** Canonical field name. |
 | `direction` | `enum` | `bidirectional` (default) \| `forward_only` \| `reverse_only`. See §above. |
 | `default` | `any` | Static fallback applied when the source field is absent or null. |
@@ -460,7 +460,7 @@ All keys are optional unless noted.
 | `expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full incoming source record). Return value assigned to `target`. When present, `source` is ignored on the forward pass. |
 | `reverse_expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full canonical record). Return a plain object to decompose into multiple source fields; any other value is assigned to `source ?? target`. |
 | `normalize` | `string` | JS expression compiled via `new Function`. Binding: `v` (the raw field value). Applied to both the incoming value and the shadow before the noop diff check — prevents precision-loss connectors from triggering spurious updates. See `specs/field-mapping.md §1.4`. |
-| `resolve` | `string` | JS expression compiled via `new Function`. Bindings: `incoming`, `existing` (prior canonical value, `undefined` on first ingest). Returns the new canonical value. Takes precedence over `fieldStrategies` when both are set. See `specs/field-mapping.md §2.3`. |
+| `resolve` | `string` | JS expression compiled via `new Function`. Bindings: `incoming`, `existing` (prior canonical value, `undefined` on first ingest). Returns the new canonical value. Takes precedence over a per-field strategy entry when both are set. See `specs/field-mapping.md §2.3`. |
 | `sort_elements` | `boolean` | When `true`, array elements are sorted before the noop diff check so that reordering alone does not trigger a re-sync. Equivalent to declaring `unordered: true` on the field's connector schema type. See `specs/field-mapping.md §3.5`. |
 | `element_fields` | `FieldMappingEntry[]` | Per-element field mappings applied to each object inside an array field. Supports all the same sub-keys; self-referential for nested arrays. See `specs/field-mapping.md §3.5`. |
 
