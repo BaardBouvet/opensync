@@ -15,14 +15,23 @@ mappings:
   - connector: system-a
     entity: contacts
     channel: contacts
+    fields:
+      - name
+      - email
 
   - connector: system-b
     entity: contacts
     channel: contacts
+    fields:
+      - name
+      - email
 
   - connector: system-c
     entity: contacts
     channel: contacts
+    fields:
+      - name
+      - email
 `,
 };
 

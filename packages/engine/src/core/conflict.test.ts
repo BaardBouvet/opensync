@@ -16,6 +16,13 @@
  * FG6  Ungrouped field alongside grouped fields → ungrouped resolves independently
  * FG7  Single-field group → behaves the same as ungrouped
  * FG8  New record (no shadow) → all fields accepted
+ *
+ * PR1  Mapping-level priority: connector priority set via MappingEntry.priority promotes
+ *       into channel ConflictConfig and is used by coalesce (tested via buildChannelsFromEntries + resolveConflicts)
+ * PR2  Field-level priority: priority on a FieldMapping entry overrides connector-level priority
+ *       for that one field; other fields use the connector-level priority
+ * PR3  Both sides have field-level priority; lower number wins regardless of timestamp
+ * PR4  Coalesce + group with per-field priority override
  */
 import { describe, it, expect } from "bun:test";
 import { resolveConflicts } from "./conflict.js";
@@ -639,3 +646,171 @@ describe("OW5: origin_wins — new record (no shadow) → all fields accepted", 
   });
 });
 
+// ═══ PR: mapping-level and field-level priority overrides ════════════════════
+// Spec: specs/field-mapping.md §2.1
+// Plans: plans/engine/PLAN_MAPPING_LEVEL_PRIORITY.md
+
+// ─── PR1: mapping-level priority promotion via buildChannelsFromEntries ───────
+// The actual promotion (MappingEntry.priority → channel.conflict.connectorPriorities) is
+// exercised in loader tests (schema round-trip); here we verify that resolveConflicts
+// uses connectorPriorities correctly — which is the combined result of that promotion.
+// This test uses the already-promoted config (as the engine sees it at runtime).
+describe("PR1: mapping-level priority appears as connectorPriorities — coalesce field respects it", () => {
+  it("crm (priority 1) beats erp (priority 2) even when erp has a newer timestamp", () => {
+    const config: ConflictConfig = {
+      connectorPriorities: { crm: 1, erp: 2 },
+      fieldStrategies: { domain: { strategy: "coalesce" } },
+    };
+    const existingShadow = shadow({ domain: { val: "crm-value.com", src: "crm", ts: 10 } });
+    // ERP has newer ts (500 > 10) but higher priority number — crm wins coalesce
+    const result = resolveConflicts(
+      { domain: "erp-value.com" },
+      existingShadow,
+      "erp", 500,
+      config,
+    );
+    expect(result).toEqual({});  // crm shadow is kept; erp incoming rejected
+  });
+
+  it("erp (priority 1) beats crm (priority 2) for domain coalesce", () => {
+    const config: ConflictConfig = {
+      connectorPriorities: { crm: 2, erp: 1 },
+      fieldStrategies: { domain: { strategy: "coalesce" } },
+    };
+    const existingShadow = shadow({ domain: { val: "crm-value.com", src: "crm", ts: 500 } });
+    const result = resolveConflicts(
+      { domain: "erp-value.com" },
+      existingShadow,
+      "erp", 10,
+      config,
+    );
+    expect(result).toEqual({ domain: "erp-value.com" }); // erp wins despite older ts
+  });
+});
+
+// ─── PR2: field-level priority overrides connector-level for one field ────────
+describe("PR2: field-level priority overrides connector-level for that one field", () => {
+  it("email: field priority 0 for crm overrides mapping-level priority 2; erp (field priority absent) uses connector priority", () => {
+    // Connector-level: crm=2, erp=1  → erp would normally win coalesce
+    // But email has field-level priority 0 for crm → crm wins email specifically
+    const config: ConflictConfig = {
+      connectorPriorities: { crm: 2, erp: 1 },
+      fieldStrategies: {
+        email: { strategy: "coalesce" },
+        name:  { strategy: "coalesce" },
+      },
+    };
+    // Incoming connector is crm (field-level priority 0 on email; no override on name)
+    const incomingMappings: FieldMappingList = [
+      { target: "email", priority: 0 },  // field-level override: crm is authoritative for email
+      { target: "name" },                // no per-field priority → uses connectorPriorities (crm=2)
+    ];
+    // Existing shadow: erp owns both fields
+    const existingShadow = shadow({
+      email: { val: "erp@example.com", src: "erp", ts: 500 },
+      name:  { val: "ERP Name",        src: "erp", ts: 500 },
+    });
+    const allChannelMappings: Record<string, FieldMappingList> = {
+      crm: incomingMappings,
+      erp: [{ target: "email" }, { target: "name" }],  // erp has no per-field priority overrides
+    };
+    const result = resolveConflicts(
+      { email: "crm@example.com", name: "CRM Name" },
+      existingShadow,
+      "crm", 10,   // crm has older ts — would lose LWW and normally lose coalesce (priority 2)
+      config,
+      incomingMappings,
+      undefined, undefined, undefined,
+      allChannelMappings,
+    );
+    // email: crm field priority 0 < erp connector priority 1 → crm wins
+    // name:  crm connector priority 2 > erp connector priority 1 → erp shadow kept
+    expect(result).toEqual({ email: "crm@example.com" });
+    expect(result.name).toBeUndefined();
+  });
+});
+
+// ─── PR3: both sides have field-level priority; lower number wins ─────────────
+describe("PR3: both incoming and existing have field-level priority; lower number wins", () => {
+  it("existing source has field priority 0, incoming has field priority 1 → existing wins", () => {
+    const config: ConflictConfig = {
+      fieldStrategies: { score: { strategy: "coalesce" } },
+    };
+    const incomingMappings: FieldMappingList = [{ target: "score", priority: 1 }];
+    const existingShadow = shadow({ score: { val: 42, src: "erp", ts: 200 } });
+    const allChannelMappings: Record<string, FieldMappingList> = {
+      crm: incomingMappings,
+      erp: [{ target: "score", priority: 0 }],  // erp has field priority 0
+    };
+    // crm incoming: newer ts (500) but field priority 1 > erp field priority 0 → erp wins
+    const result = resolveConflicts(
+      { score: 99 },
+      existingShadow,
+      "crm", 500,
+      config,
+      incomingMappings,
+      undefined, undefined, undefined,
+      allChannelMappings,
+    );
+    expect(result).toEqual({});  // erp shadow (priority 0) beats crm (priority 1)
+  });
+
+  it("incoming has lower field priority → incoming wins regardless of timestamp", () => {
+    const config: ConflictConfig = {
+      fieldStrategies: { score: { strategy: "coalesce" } },
+    };
+    const incomingMappings: FieldMappingList = [{ target: "score", priority: 0 }];
+    const existingShadow = shadow({ score: { val: 42, src: "erp", ts: 500 } });
+    const allChannelMappings: Record<string, FieldMappingList> = {
+      crm: incomingMappings,
+      erp: [{ target: "score", priority: 1 }],
+    };
+    const result = resolveConflicts(
+      { score: 99 },
+      existingShadow,
+      "crm", 10,  // older ts, but field priority 0 beats erp priority 1
+      config,
+      incomingMappings,
+      undefined, undefined, undefined,
+      allChannelMappings,
+    );
+    expect(result).toEqual({ score: 99 });
+  });
+});
+
+// ─── PR4: coalesce + group with per-field priority override ───────────────────
+describe("PR4: coalesce + group — per-field priority on any group field applies to whole group", () => {
+  it("group field 'firstName' has priority 0 for crm; crm wins the whole name group even with older ts", () => {
+    // Configuration: erp wins by connector priority (1 < 2) but crm has field-level priority
+    // 0 on firstName, which should promote crm's group priority above erp's.
+    const config: ConflictConfig = {
+      connectorPriorities: { crm: 2, erp: 1 },
+    };
+    const incomingMappings: FieldMappingList = [
+      { target: "firstName", group: "name", priority: 0 },  // field-level override
+      { target: "lastName",  group: "name" },                // no field-level; uses connector priority
+    ];
+    const existingShadow = shadow({
+      firstName: { val: "Bob",   src: "erp", ts: 500 },
+      lastName:  { val: "Smith", src: "erp", ts: 500 },
+    });
+    const allChannelMappings: Record<string, FieldMappingList> = {
+      crm: incomingMappings,
+      erp: [{ target: "firstName", group: "name" }, { target: "lastName", group: "name" }],
+    };
+    // crm incoming: ts=10 (older), connector priority 2 (worse), BUT firstName field priority 0
+    // The group pre-pass should pick up that crm has field priority 0 on firstName and use
+    // that as crm's group priority (min across group fields).
+    const result = resolveConflicts(
+      { firstName: "Alice", lastName: "Jones" },
+      existingShadow,
+      "crm", 10,
+      config,
+      incomingMappings,
+      undefined, undefined, undefined,
+      allChannelMappings,
+    );
+    // crm group priority = min(0) = 0 < erp connector priority 1 → crm wins the group
+    expect(result).toEqual({ firstName: "Alice", lastName: "Jones" });
+  });
+});

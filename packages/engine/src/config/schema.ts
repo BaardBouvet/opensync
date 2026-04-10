@@ -31,18 +31,19 @@ const FieldStrategyEntrySchema = z.object({
   strategy: z.enum(["coalesce", "last_modified", "collect", "bool_or", "origin_wins"]),
 });
 
-// Reserved keys at the top level of a conflict: block (cannot be used as field names).
-const CONFLICT_RESERVED = new Set(["strategy", "fieldMasters", "connectorPriorities"]);
+// Reserved keys at the top level of a fields: block (cannot be used as canonical field names).
+const CONFLICT_RESERVED = new Set(["strategy"]);
 
 /**
- * Conflict config schema. Spec: specs/channels.md §2.1.
+ * Conflict config schema — used only for `channels[].fields:` blocks.
+ * Spec: specs/channels.md §2.1.
  *
- * Field strategies are declared as direct keys under `conflict:` — no `fieldStrategies`
- * wrapper. Each field entry is an object starting with `strategy:` and may carry additional
- * metadata (description, type, …) in future versions.
+ * Field strategies are declared as direct keys — no `fieldStrategies` wrapper.
+ * `strategy:` is the only reserved key; all other keys are per-field conflict entries.
  *
- * Reserved words (`strategy`, `fieldMasters`, `connectorPriorities`) cannot be used as
- * field names. All other keys are treated as per-field conflict config.
+ * `fieldMasters` and `connectorPriorities` are loader-internal runtime properties;
+ * they are built from `master: true` field entries and `priority:` mapping entries
+ * respectively, never declared directly in YAML.
  *
  * The transform normalises the parsed flat representation into the internal ConflictConfig
  * shape (keeping `fieldStrategies` internally so engine + resolvers need not change).
@@ -54,14 +55,6 @@ export const ConflictConfigSchema = z
       const r = ConflictStrategySchema.safeParse(data.strategy);
       if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.strategy: ${r.error.issues[0]?.message ?? "invalid"}` });
     }
-    if ("fieldMasters" in data && data.fieldMasters !== undefined) {
-      const r = z.record(z.string(), z.string()).safeParse(data.fieldMasters);
-      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.fieldMasters: ${r.error.issues[0]?.message ?? "invalid"}` });
-    }
-    if ("connectorPriorities" in data && data.connectorPriorities !== undefined) {
-      const r = z.record(z.string(), z.number()).safeParse(data.connectorPriorities);
-      if (!r.success) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `conflict.connectorPriorities: ${r.error.issues[0]?.message ?? "invalid"}` });
-    }
     for (const [key, value] of Object.entries(data)) {
       if (CONFLICT_RESERVED.has(key)) continue;
       const r = FieldStrategyEntrySchema.safeParse(value);
@@ -72,13 +65,9 @@ export const ConflictConfigSchema = z
     type FieldStrategy = { strategy: "coalesce" | "last_modified" | "collect" | "bool_or" | "origin_wins" };
     const result: {
       strategy?: "field_master" | "origin_wins";
-      fieldMasters?: Record<string, string>;
-      connectorPriorities?: Record<string, number>;
       fieldStrategies?: Record<string, FieldStrategy>;
     } = {};
     if (data.strategy !== undefined) result.strategy = data.strategy as "field_master" | "origin_wins";
-    if (data.fieldMasters !== undefined) result.fieldMasters = data.fieldMasters as Record<string, string>;
-    if (data.connectorPriorities !== undefined) result.connectorPriorities = data.connectorPriorities as Record<string, number>;
     const fieldEntries: Record<string, FieldStrategy> = {};
     for (const [key, value] of Object.entries(data)) {
       if (!CONFLICT_RESERVED.has(key)) fieldEntries[key] = value as FieldStrategy;
@@ -171,6 +160,24 @@ const FieldMappingEntrySchemaBase = z.object({
   /** Spec: specs/field-mapping.md §3.5 — when true, sort array elements before diff comparison.
    *  Suppresses false updates when source API returns same elements in different order. */
   sort_elements: z.boolean().optional(),
+  /** Spec: specs/field-mapping.md §1.10 — forward value map: source code → canonical code.
+   *  Mutually exclusive with expression / reverse_expression. */
+  value_map: z.record(z.string(), z.unknown()).optional(),
+  /** Spec: specs/field-mapping.md §1.10 — reverse value map: canonical code → source code.
+   *  Auto-derived from value_map when absent. */
+  reverse_value_map: z.record(z.string(), z.unknown()).optional(),
+  /** Spec: specs/field-mapping.md §1.10 — behaviour when lookup key is absent.
+   *  'passthrough' (default) | 'null'. */
+  value_map_fallback: z.enum(["passthrough", "null"]).optional(),
+  /** Spec: specs/field-mapping.md §2.1 — per-field priority override.
+   *  Lower number = higher priority. Overrides the mapping-level priority for this
+   *  specific canonical field when strategy is coalesce. */
+  priority: z.number().optional(),
+  /** Spec: specs/field-mapping.md §2.4 — declare this connector as the sole authority
+   *  for this canonical field in this channel. Patches from all other connectors for
+   *  this field are dropped before resolution. Built into ch.conflict.fieldMasters at
+   *  load time; promoted per-channel (does not affect other channels). */
+  master: z.boolean().optional(),
 }).refine(
   (f) => !(f.source && f.source_path),
   { message: "source and source_path are mutually exclusive on a field mapping entry" },
@@ -242,6 +249,10 @@ export const MappingEntrySchema = z.object({
   soft_delete: SoftDeleteSchema.optional(),
   /** Spec: specs/field-mapping.md §8.3 — full-snapshot absence detection (flat members only). */
   full_snapshot: z.boolean().optional(),
+  /** Spec: specs/field-mapping.md §2.1 — mapping-level source priority for coalesce.
+   *  Promotes to channel.conflict.connectorPriorities at load time.
+   *  Lower number = higher priority. Channel-scoped: does not bleed to other channels. */
+  priority: z.number().optional(),
 }).refine(
   (e) => !(e.soft_delete && (e.array_path || e.parent)),
   { message: "soft_delete cannot be used on array expansion members (array_path or parent)" },
@@ -253,7 +264,6 @@ export const MappingEntrySchema = z.object({
 export const MappingsFileSchema = z.object({
   mappings: z.array(MappingEntrySchema).optional(),
   channels: z.array(ChannelDefSchema).optional(),
-  conflict: ConflictConfigSchema.optional(),
 });
 
 export type MappingEntry = z.infer<typeof MappingEntrySchema>;

@@ -1963,6 +1963,14 @@ export class SyncEngine {
       (m) => m.connectorId !== sourceMember.connectorId && m.arrayPath != null,
     );
 
+    // Spec: specs/field-mapping.md §2.1 — per-field priority override.
+    // Build a per-connector index of inbound FieldMappingLists for this channel so the
+    // conflict resolver can look up the existing shadow source's field-level priority.
+    const allChannelMappings: Record<string, import("./config/loader.js").FieldMappingList> = {};
+    for (const m of channel.members) {
+      if (m.inbound) allChannelMappings[m.connectorId] = m.inbound;
+    }
+
     const results: RecordSyncResult[] = [];
     let hadErrors = false;
 
@@ -2075,7 +2083,7 @@ export class SyncEngine {
               ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId)
               : undefined;
 
-            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this._effectiveConflict(channel), sourceMember.inbound, undefined, undefined, undefined);
+            const resolved = resolveConflicts(childCanonical, targetShadow, sourceMember.connectorId, ingestTs, this._effectiveConflict(channel), sourceMember.inbound, undefined, undefined, undefined, allChannelMappings);
             if (!Object.keys(resolved).length && existingTargetId !== undefined) {
               results.push({ entity: sourceMember.entity, action: "skip", sourceId: childRecord.id, targetConnectorId: targetMember.connectorId, targetId: existingTargetId });
               continue;
@@ -2161,7 +2169,7 @@ export class SyncEngine {
         if (!tw) continue;
         for (const [rootCanonId, patches] of perParent) {
           const { results: batchResults, hasError } = await this._applyCollapseBatch(
-            ctMember, tw, rootCanonId, patches, batchId, ingestTs,
+            ctMember, tw, rootCanonId, patches, batchId, ingestTs, channel,
           );
           results.push(...batchResults);
           if (hasError) hadErrors = true;
@@ -2355,7 +2363,7 @@ export class SyncEngine {
         const existingTargetId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
         const targetShadow = existingTargetId ? dbGetShadow(this.db, targetMember.connectorId, targetMember.entity, existingTargetId) : undefined;
 
-        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, effectiveConflict, sourceMember.inbound, fieldTimestamps, incomingCreatedAt, createdAtBySrc);
+        const resolved = resolveConflicts(canonical, targetShadow, sourceMember.connectorId, ingestTs, effectiveConflict, sourceMember.inbound, fieldTimestamps, incomingCreatedAt, createdAtBySrc, allChannelMappings);
         // Zero-key guard: suppress dispatch only when updating an *existing* target record
         // with no field changes.  When existingTargetId is undefined this is a brand-new
         // INSERT — dispatch must run even for empty canonical data so the record is created
@@ -2466,7 +2474,7 @@ export class SyncEngine {
       if (!tw) continue;
       for (const [rootCanonId, patches] of perParent) {
         const { results: batchResults, hasError } = await this._applyCollapseBatch(
-          ctMember, tw, rootCanonId, patches, batchId, ingestTs,
+          ctMember, tw, rootCanonId, patches, batchId, ingestTs, channel,
         );
         results.push(...batchResults);
         if (hasError) hadErrors = true;
@@ -2563,8 +2571,10 @@ export class SyncEngine {
     patches: Array<{ childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string; sourceConnectorId: string; fieldTs?: Record<string, number> }>,
     batchId: string,
     ingestTs: number,
+    channel: ChannelConfig,
   ): Promise<{ results: RecordSyncResult[]; hasError: boolean }> {
     const results: RecordSyncResult[] = [];
+    const effectiveConflict = this._effectiveConflict(channel);
 
     // Locate the root entity definition on the target connector
     const rootEntityName = collapseTarget.sourceEntity ?? collapseTarget.entity;
@@ -2620,7 +2630,7 @@ export class SyncEngine {
         byElemKey.set(key, g);
       }
       const resolved: typeof patches = [];
-      const prios = this.conflictConfig.connectorPriorities ?? {};
+      const prios = effectiveConflict.connectorPriorities ?? {};
       for (const group of byElemKey.values()) {
         if (group.length <= 1) { resolved.push(...group); continue; }
         // Sort lowest-priority first so highest-priority overwrites last
@@ -2631,8 +2641,8 @@ export class SyncEngine {
         const mergedFieldTs: Record<string, number> = {};
         for (const p of sorted) {
           for (const [field, value] of Object.entries(p.resolved)) {
-            const master = this.conflictConfig.fieldMasters?.[field];
-            const strategy = this.conflictConfig.fieldStrategies?.[field];
+            const master = effectiveConflict.fieldMasters?.[field];
+            const strategy = effectiveConflict.fieldStrategies?.[field];
             if (master !== undefined) {
               if (p.sourceConnectorId === master) mergedResolved[field] = value;
             } else if (strategy?.strategy === "last_modified") {
@@ -2652,8 +2662,8 @@ export class SyncEngine {
     // Spec: PLAN_ELEMENT_SET_RESOLUTION.md §3.2 (fieldMasters, single-patch) — apply
     // fieldMasters filtering to every patch individually so a non-master source cannot
     // overwrite a master-owned field even in the single-patch (no merge) case.
-    if (this.conflictConfig.fieldMasters && Object.keys(this.conflictConfig.fieldMasters).length > 0) {
-      const masters = this.conflictConfig.fieldMasters;
+    if (effectiveConflict.fieldMasters && Object.keys(effectiveConflict.fieldMasters).length > 0) {
+      const masters = effectiveConflict.fieldMasters;
       patches = patches.map((patch) => {
         const filtered: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(patch.resolved)) {

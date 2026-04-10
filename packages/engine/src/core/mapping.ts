@@ -83,9 +83,11 @@ function assignNestedPath(
 }
 
 /** Apply inbound (source → canonical) or outbound (canonical → target) rename.
- *  If no mappings are declared, all fields pass through verbatim (whitelist not applied).
- *  If mappings are declared, only listed fields appear in the result (whitelist semantics).
+ *  Every field that crosses a connector boundary must be explicitly declared in `fields`.
+ *  An absent or empty mapping list means no fields are forwarded (empty whitelist).
+ *  Only fields listed in mappings appear in the result.
  *  Spec: specs/config.md § Field whitelist semantics
+ *  Spec: specs/field-mapping.md §1.1 — absent fields = empty whitelist
  *  Spec: specs/field-mapping.md §1.3 — expression / reverseExpression
  *  Spec: specs/field-mapping.md §1.5 — default / defaultExpression
  *  Spec: specs/field-mapping.md §1.7 — source_path extraction */
@@ -94,7 +96,8 @@ export function applyMapping(
   mappings: FieldMappingList | undefined,
   pass: "inbound" | "outbound",
 ): Record<string, unknown> {
-  if (!mappings || mappings.length === 0) return { ...data };
+  // Spec: specs/field-mapping.md §1.1 — absent or empty fields = empty whitelist (no passthrough)
+  if (!mappings || mappings.length === 0) return {};
 
   const result: Record<string, unknown> = {};
   for (const m of mappings) {
@@ -120,6 +123,16 @@ export function applyMapping(
           value = m.default;
         }
       }
+      // Spec: specs/field-mapping.md §1.10 — forward value map (source code → canonical)
+      if (m.valueMap !== undefined && value !== null && value !== undefined) {
+        const key = String(value);
+        if (Object.prototype.hasOwnProperty.call(m.valueMap, key)) {
+          value = m.valueMap[key];
+        } else if (m.valueMapFallback === "null") {
+          value = null;
+        }
+        // else passthrough — value unchanged
+      }
       if (value !== undefined) {
         // Spec: specs/field-mapping.md §3.5 — apply element_fields to each array element
         result[m.target] = m.elementFields ? applyElementFields(value, m.elementFields, pass) : value;
@@ -137,14 +150,32 @@ export function applyMapping(
       } else if (m.sourcePath) {
         // Spec: specs/field-mapping.md §1.7 — reverse: reconstruct nested path in result
         if (Object.prototype.hasOwnProperty.call(data, m.target)) {
-          const outVal = data[m.target];
+          let outVal = data[m.target];
+          // Spec: specs/field-mapping.md §1.10 — reverse value map (canonical → source)
+          if (m.reverseValueMap !== undefined && outVal !== null && outVal !== undefined) {
+            const rkey = String(outVal);
+            if (Object.prototype.hasOwnProperty.call(m.reverseValueMap, rkey)) {
+              outVal = m.reverseValueMap[rkey];
+            } else if (m.valueMapFallback === "null") {
+              outVal = null;
+            }
+          }
           // Array-index write-back not supported (caught at config load for non-forward_only)
           assignNestedPath(result, m.sourcePath, outVal);
         }
       } else {
         const sourceKey = m.source ?? m.target;
         if (Object.prototype.hasOwnProperty.call(data, m.target)) {
-          const outVal = data[m.target];
+          let outVal = data[m.target];
+          // Spec: specs/field-mapping.md §1.10 — reverse value map (canonical → source)
+          if (m.reverseValueMap !== undefined && outVal !== null && outVal !== undefined) {
+            const rkey = String(outVal);
+            if (Object.prototype.hasOwnProperty.call(m.reverseValueMap, rkey)) {
+              outVal = m.reverseValueMap[rkey];
+            } else if (m.valueMapFallback === "null") {
+              outVal = null;
+            }
+          }
           // Spec: specs/field-mapping.md §3.5 — apply element_fields to each array element
           result[sourceKey] = m.elementFields ? applyElementFields(outVal, m.elementFields, pass) : outVal;
         }

@@ -84,16 +84,20 @@ function makeInstanceEntity(id: string, dir: string, filename: string): Resolved
   };
 }
 
+const FM_CONTACT = [{ source: "name", target: "name" }, { source: "email", target: "email" }];
+const FM_COMPANY = [{ source: "name", target: "name" }, { source: "domain", target: "domain" }];
+
 function makeConfig(
   connectors: ResolvedConfig["connectors"],
   channelMembers: { connectorId: string; entity: string }[],
 ): ResolvedConfig {
+  const fieldMap = [{ source: "name", target: "name" }, { source: "email", target: "email" }];
   return {
     connectors,
     channels: [
       {
         id: "ch",
-        members: channelMembers,
+        members: channelMembers.map(m => ({ ...m, inbound: fieldMap, outbound: fieldMap })),
         identity: ["email"],
       },
     ],
@@ -837,8 +841,8 @@ describe("T29: first propagation of association → update (not suppressed)", ()
       channels: [{
         id: "ch",
         members: [
-          { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }] },
-          { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }] },
+          { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }], inbound: [...FM_CONTACT, { source: "works_at", target: "worksAt" }], outbound: FM_CONTACT },
+          { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "works_at", target: "worksAt" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
         ],
         identity: ["email"],
       }],
@@ -973,12 +977,12 @@ describe("T31: deferred association persisted and retried on next ingest", () =>
       connectors: [iA, iB],
       channels: [
         { id: "companies", members: [
-            { connectorId: "system-a", entity: "companies" },
-            { connectorId: "system-b", entity: "accounts" },
+            { connectorId: "system-a", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+            { connectorId: "system-b", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY },
           ], identity: ["domain"] },
         { id: "contacts", members: [
-            { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "system-a", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
+            { connectorId: "system-b", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
           ], identity: ["email"] },
       ],
       conflict: {},
@@ -1047,8 +1051,8 @@ describe("T32: deferred row removed after successful retry", () => {
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1106,8 +1110,8 @@ describe("T33: deferred row retained when source record deleted before retry", (
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1172,8 +1176,8 @@ describe("T34: deferred retry updates association for record inserted without it
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1261,8 +1265,8 @@ describe("T35: targetEntity is translated to the target connector's entity name 
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1329,8 +1333,8 @@ describe("T36: record with unresolvable association is inserted immediately with
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1413,8 +1417,8 @@ describe("T37: deferred retry adds the association once the company is synced", 
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts", "companies"]), makeInst("sb", dirB, ["contacts", "accounts"])],
       channels: [
-        { id: "companies", members: [{ connectorId: "sa", entity: "companies" }, { connectorId: "sb", entity: "accounts" }], identity: ["domain"] },
-        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }]  }], identity: ["email"] },
+        { id: "companies", members: [{ connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY }, { connectorId: "sb", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY }], identity: ["domain"] },
+        { id: "contacts",  members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1481,7 +1485,7 @@ describe("T38: mutual reference — no permanent stall, both associations resolv
     const engine = new SyncEngine({
       connectors: [makeInst("sa", dirA, ["contacts"]), makeInst("sb", dirB, ["contacts"])],
       channels: [
-        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }] }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }] }], identity: ["email"] },
+        { id: "contacts", members: [{ connectorId: "sa", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }], inbound: FM_CONTACT, outbound: FM_CONTACT }, { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "managerId", target: "managerId" }], inbound: FM_CONTACT, outbound: FM_CONTACT }], identity: ["email"] },
       ],
       conflict: {},
       readTimeoutMs: 10_000,
@@ -1746,8 +1750,8 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
             id: "companies",
             identity: ["domain"],
             members: [
-              { connectorId: "system-a", entity: "companies" },
-              { connectorId: "system-b", entity: "accounts" },
+              { connectorId: "system-a", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+              { connectorId: "system-b", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY },
             ],
           },
           {
@@ -1818,8 +1822,8 @@ describe("T41: channelStatus is scoped to the channel's own entities", () => {
         id: "companies",
         identity: ["domain"],
         members: [
-          { connectorId: "system-a", entity: "companies" },
-          { connectorId: "system-b", entity: "accounts" },
+          { connectorId: "system-a", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+          { connectorId: "system-b", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY },
         ],
       },
       {
@@ -1917,18 +1921,18 @@ describe("T42: onboard step 1b includes associations in the fanout INSERT", () =
         {
           id: "companies",
           members: [
-            { connectorId: "sa", entity: "companies" },
-            { connectorId: "sb", entity: "companies" },
-            { connectorId: "sc", entity: "companies" },
+            { connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+            { connectorId: "sb", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+            { connectorId: "sc", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
           ],
           identity: ["domain"],
         },
         {
           id: "contacts",
           members: [
-            { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "sc", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
+            { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
+            { connectorId: "sc", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
           ],
           identity: ["email"],
         },
@@ -2002,12 +2006,12 @@ describe("T44: RecordSyncResult association payload fields", () => {
       ],
       channels: [
         { id: "companies", members: [
-          { connectorId: "sa", entity: "companies" },
-          { connectorId: "sb", entity: "companies" },
+          { connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+          { connectorId: "sb", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
         ], identity: ["domain"] },
         { id: "contacts", members: [
-          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
+          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
         ], identity: ["email"] },
       ],
       conflict: {},
@@ -2073,12 +2077,12 @@ describe("T44: RecordSyncResult association payload fields", () => {
       ],
       channels: [
         { id: "companies", members: [
-          { connectorId: "sa", entity: "companies" },
-          { connectorId: "sb", entity: "companies" },
+          { connectorId: "sa", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+          { connectorId: "sb", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
         ], identity: ["domain"] },
         { id: "contacts", members: [
-          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+          { connectorId: "sa", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
+          { connectorId: "sb", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
         ], identity: ["email"] },
       ],
       conflict: {},
@@ -2161,14 +2165,14 @@ describe("T45: association predicate is translated from source name to target na
       ],
       channels: [
         { id: "companies", members: [
-          { connectorId: "crm", entity: "companies" },
-          { connectorId: "erp", entity: "accounts" },
+          { connectorId: "crm", entity: "companies", inbound: FM_COMPANY, outbound: FM_COMPANY },
+          { connectorId: "erp", entity: "accounts", inbound: FM_COMPANY, outbound: FM_COMPANY },
         ], identity: ["domain"] },
         { id: "contacts", members: [
           { connectorId: "crm", entity: "contacts",
-            assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
           { connectorId: "erp", entity: "contacts",
-            assocMappings: [{ source: "orgId", target: "companyRef" }] },
+            assocMappings: [{ source: "orgId", target: "companyRef" }], inbound: FM_CONTACT, outbound: FM_CONTACT },
         ], identity: ["email"] },
       ],
       conflict: {},

@@ -184,6 +184,8 @@ describe("AS-4: write-side filter drops predicates absent from schema entity fie
       {
         connectorId: "src",
         entity: "contact",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "managerId", target: "managerId" },
           { source: "tagId",     target: "tagId" },
@@ -192,6 +194,8 @@ describe("AS-4: write-side filter drops predicates absent from schema entity fie
       {
         connectorId: "tgt",
         entity: "contact",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "managerId", target: "managerId" },
           { source: "tagId",     target: "tagId" },
@@ -297,6 +301,8 @@ describe("AS-5: entity without FK schema fields receives all associations (pass-
       {
         connectorId: "src",
         entity: "contact",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "managerId", target: "managerId" },
           { source: "tagId",     target: "tagId" },
@@ -305,6 +311,8 @@ describe("AS-5: entity without FK schema fields receives all associations (pass-
       {
         connectorId: "tgt",
         entity: "contact",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "managerId", target: "managerId" },
           { source: "tagId",     target: "tagId" },
@@ -403,6 +411,8 @@ describe("AS-7: target-local associations not expressible by source are preserve
       {
         connectorId: "crm",
         entity: "contacts",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "primaryCompanyId",   target: "primaryRef"   },
           { source: "secondaryCompanyId", target: "secondaryRef" },
@@ -411,6 +421,8 @@ describe("AS-7: target-local associations not expressible by source are preserve
       {
         connectorId: "erp",
         entity: "employees",
+        inbound:  [{ source: "email", target: "email" }, { source: "name", target: "name" }],
+        outbound: [{ source: "email", target: "email" }, { source: "name", target: "name" }],
         assocMappings: [
           { source: "orgId", target: "primaryRef" },
           // No secondaryRef mapping — ERP cannot express secondaryCompanyId

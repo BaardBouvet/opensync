@@ -196,15 +196,15 @@ export const FIXED_SEED: EntitySeedMap = {
         id: "c1",
         // Alice has two typed company links stored as plain FK strings in data.
         // Spec: plans/playground/PLAN_HUBSPOT_TRIPLETEX_ASSOC_DEMO.md § 3.1
-        data: { name: "Alice Liddell", email: "alice@example.com", firstName: "Alice", lastName: "Liddell", phone: "(555) 100-0001",  status: "active", isVerified: true,  leadScore: 90, isDeleted: false, homeStreet: "1 Main St",   homeCity: "Boston",   primaryCompanyId: "co1", secondaryCompanyId: "co2" },
+        data: { name: "Alice Liddell", email: "alice@example.com", firstName: "Alice", lastName: "Liddell", phone: "(555) 100-0001",  status: "a", isVerified: true,  leadScore: 90, isDeleted: false, homeStreet: "1 Main St",   homeCity: "Boston",   primaryCompanyId: "co1", secondaryCompanyId: "co2" },
       },
       {
         id: "c2",
-        data: { name: "Bob Martin",   email: "bob@example.com",   firstName: "Bob",   lastName: "Martin",  phone: "555-100-0002",    status: null,     isVerified: null,  leadScore: 72, isDeleted: true,  homeStreet: "42 Oak Ave",  homeCity: "Chicago",  primaryCompanyId: "co2" },
+        data: { name: "Bob Martin",   email: "bob@example.com",   firstName: "Bob",   lastName: "Martin",  phone: "555-100-0002",    status: null,    isVerified: null,  leadScore: 72, isDeleted: true,  homeStreet: "42 Oak Ave",  homeCity: "Chicago",  primaryCompanyId: "co2" },
       },
       {
         id: "c3",
-        data: { name: "Carol White",  email: "carol@example.com", firstName: "Carol", lastName: "White",   phone: "+1 555 100 0003", status: "active", isVerified: null,  leadScore: 55, isDeleted: false, homeStreet: "7 Elm Rd",    homeCity: "Seattle", primaryCompanyId: "co3" },
+        data: { name: "Carol White",  email: "carol@example.com", firstName: "Carol", lastName: "White",   phone: "+1 555 100 0003", status: "a", isVerified: null,  leadScore: 55, isDeleted: false, homeStreet: "7 Elm Rd",    homeCity: "Seattle", primaryCompanyId: "co3" },
       },
     ],
   },
@@ -216,11 +216,11 @@ export const FIXED_SEED: EntitySeedMap = {
     employees: [
       {
         id: "e1",
-        data: { fullName: "Alice Liddell", email: "alice@example.com", firstName: "Alice", lastName: "Liddell", phoneNo: "5551000001", emailAddress: "alice@acme.com",  isVerified: null, status: "active",   orgId: "acc1" },
+        data: { fullName: "Alice Liddell", email: "alice@example.com", firstName: "Alice", lastName: "Liddell", phoneNo: "5551000001", emailAddress: "alice@acme.com",  isVerified: null, status: "1",   orgId: "acc1" },
       },
       {
         id: "e2",
-        data: { fullName: "Bob Martin",    email: "bob@example.com",   firstName: "Bob",   lastName: "Martin",  phoneNo: "5551000002", emailAddress: "bob@globex.com", isVerified: null, status: "inactive", orgId: "acc2" },
+        data: { fullName: "Bob Martin",    email: "bob@example.com",   firstName: "Bob",   lastName: "Martin",  phoneNo: "5551000002", emailAddress: "bob@globex.com", isVerified: null, status: "2", orgId: "acc2" },
       },
     ],
     orders: [

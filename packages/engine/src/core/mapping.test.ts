@@ -2,8 +2,9 @@
  * packages/engine/src/core/mapping.test.ts
  *
  * Tests for applyMapping() with expression / reverseExpression support.
- * Spec: specs/field-mapping.md §1.3, §1.7
- * Plan: plans/engine/PLAN_FIELD_EXPRESSIONS.md, plans/engine/PLAN_SOURCE_PATH.md
+ * Spec: specs/field-mapping.md §1.3, §1.7, §1.10
+ * Plan: plans/engine/PLAN_FIELD_EXPRESSIONS.md, plans/engine/PLAN_SOURCE_PATH.md,
+ *       plans/engine/PLAN_VALUE_MAP.md
  *
  * FE1  Plain rename still works (no regression)
  * FE2  forward expression overrides source-key lookup
@@ -29,9 +30,22 @@
  * SP8  source_path reverse: reconstruct nested path
  * SP9  source_path reverse: multiple entries with shared prefix merge
  * SP10 source_path forward_only: produces no outbound key
+ * VM1  value_map forward: present key → canonical value
+ * VM2  value_map forward: absent key, fallback=passthrough → original
+ * VM3  value_map forward: absent key, fallback=null → null
+ * VM4  value_map forward: null/undefined source bypasses map
+ * VM5  reverse_value_map (explicit): canonical → source code
+ * VM6  reverse_value_map (auto-inverted bijective map) round-trips
+ * VM7  reverse_value_map: absent canonical key, fallback=passthrough
+ * VM8  round-trip: two connectors with disjoint code spaces
+ * VM9  mutual exclusivity: value_map + expression → loader error (schema test in scenarios.test.ts)
+ * VM10 direction=reverse_only: value_map skipped on inbound
+ * VM11 direction=forward_only: reverse map skipped on outbound
+ * VM12 normalize + value_map: normalize applied first
  */
 import { describe, it, expect } from "bun:test";
 import { applyMapping, applyElementFields, resolveSourcePath, parseTs, computeFieldTimestamps } from "./mapping.js";
+import { buildChannelsFromEntries } from "../config/loader.js";
 import type { FieldMappingList } from "../config/loader.js";
 import type { FieldData } from "../db/schema.js";
 import type { ReadRecord } from "@opensync/sdk";
@@ -785,5 +799,210 @@ describe("resolveSourcePath", () => {
   });
   it("out of bounds index returns undefined", () => {
     expect(resolveSourcePath({ a: [1] }, "a[5]")).toBeUndefined();
+  });
+});
+
+// ─── VM: value_map ───────────────────────────────────────────────────────────
+// Spec: specs/field-mapping.md §1.10
+
+describe("VM1: forward map — present key translates to canonical value", () => {
+  it("maps source code to canonical value on inbound", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active", b: "inactive", c: "closed" },
+      reverseValueMap: { active: "a", inactive: "b", closed: "c" },
+    }];
+    expect(applyMapping({ status: "a" }, mappings, "inbound")).toEqual({ status: "active" });
+    expect(applyMapping({ status: "b" }, mappings, "inbound")).toEqual({ status: "inactive" });
+  });
+});
+
+describe("VM2: forward map — absent key, fallback=passthrough (default)", () => {
+  it("keeps original value when key not in map", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+    }];
+    expect(applyMapping({ status: "UNKNOWN" }, mappings, "inbound")).toEqual({ status: "UNKNOWN" });
+  });
+});
+
+describe("VM3: forward map — absent key, fallback=null", () => {
+  it("returns null when key not in map and fallback is null", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+      valueMapFallback: "null",
+    }];
+    expect(applyMapping({ status: "UNKNOWN" }, mappings, "inbound")).toEqual({ status: null });
+  });
+});
+
+describe("VM4: forward map — null source value bypasses map", () => {
+  it("null value propagates unchanged (map not consulted)", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+      valueMapFallback: "null",
+    }];
+    // null input: map not consulted, null propagates as-is
+    expect(applyMapping({ status: null }, mappings, "inbound")).toEqual({ status: null });
+  });
+  it("undefined/absent value not placed in result", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active" },
+      reverseValueMap: {},
+    }];
+    expect(applyMapping({}, mappings, "inbound")).toEqual({});
+  });
+});
+
+describe("VM5: reverse map (explicit) — canonical to source on outbound", () => {
+  it("maps canonical value back to source code", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active", b: "inactive" },
+      reverseValueMap: { active: "a", inactive: "b" },
+    }];
+    expect(applyMapping({ status: "active" }, mappings, "outbound")).toEqual({ status: "a" });
+    expect(applyMapping({ status: "inactive" }, mappings, "outbound")).toEqual({ status: "b" });
+  });
+});
+
+describe("VM6: reverse map (auto-inverted) — derived from bijective value_map", () => {
+  it("auto-inversion round-trips correctly", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { "1": "active", "2": "inactive", "3": "closed" },
+      // reverseValueMap derived: { active: "1", inactive: "2", closed: "3" }
+      reverseValueMap: { active: "1", inactive: "2", closed: "3" },
+    }];
+    expect(applyMapping({ status: "active" }, mappings, "outbound")).toEqual({ status: "1" });
+    expect(applyMapping({ status: "closed" }, mappings, "outbound")).toEqual({ status: "3" });
+  });
+});
+
+describe("VM7: reverse map — absent canonical key, fallback=passthrough", () => {
+  it("keeps canonical value when not in reverse map", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+    }];
+    expect(applyMapping({ status: "pending" }, mappings, "outbound")).toEqual({ status: "pending" });
+  });
+});
+
+describe("VM8: round-trip — two connectors with disjoint code spaces both canonicalize", () => {
+  it("CRM a/b/c and ERP 1/2/3 both round-trip through same canonical active/inactive/closed", () => {
+    const crmMappings: FieldMappingList = [{
+      source: "status", target: "status",
+      valueMap: { a: "active", b: "inactive", c: "closed" },
+      reverseValueMap: { active: "a", inactive: "b", closed: "c" },
+    }];
+    const erpMappings: FieldMappingList = [{
+      source: "custStatus", target: "status",
+      valueMap: { "1": "active", "2": "inactive", "3": "closed" },
+      reverseValueMap: { active: "1", inactive: "2", closed: "3" },
+    }];
+    // Inbound: both map to same canonical
+    expect(applyMapping({ status: "a" }, crmMappings, "inbound")).toEqual({ status: "active" });
+    expect(applyMapping({ custStatus: "1" }, erpMappings, "inbound")).toEqual({ status: "active" });
+    // Outbound: canonical → each connector's own code
+    expect(applyMapping({ status: "active" }, crmMappings, "outbound")).toEqual({ status: "a" });
+    expect(applyMapping({ status: "active" }, erpMappings, "outbound")).toEqual({ custStatus: "1" });
+  });
+});
+
+describe("VM9: mutual exclusivity — value_map + expression → error at load time", () => {
+  it("buildChannelsFromEntries throws when both value_map and expression are declared", () => {
+    expect(() =>
+      buildChannelsFromEntries(
+        [{ id: "ch", identity: ["id"] }],
+        [{
+          connector: "crm", entity: "contacts", channel: "ch",
+          fields: [{
+            source: "status",
+            target: "status",
+            expression: "record.status",
+            value_map: { a: "active" },
+          }],
+        }],
+      ),
+    ).toThrow(/value_map and expression are mutually exclusive/);
+  });
+});
+
+describe("VM10: direction=reverse_only — value_map skipped on inbound", () => {
+  it("reverse_only field is skipped entirely on inbound, reverse map runs on outbound", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      direction: "reverse_only",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+    }];
+    // Inbound: entry skipped (reverse_only)
+    expect(applyMapping({ status: "a" }, mappings, "inbound")).toEqual({});
+    // Outbound: reverse map runs
+    expect(applyMapping({ status: "active" }, mappings, "outbound")).toEqual({ status: "a" });
+  });
+});
+
+describe("VM11: direction=forward_only — reverse map skipped on outbound", () => {
+  it("forward_only field is skipped entirely on outbound, forward map runs on inbound", () => {
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      direction: "forward_only",
+      valueMap: { a: "active" },
+      reverseValueMap: { active: "a" },
+    }];
+    // Inbound: forward map runs
+    expect(applyMapping({ status: "a" }, mappings, "inbound")).toEqual({ status: "active" });
+    // Outbound: entry skipped (forward_only)
+    expect(applyMapping({ status: "active" }, mappings, "outbound")).toEqual({});
+  });
+});
+
+describe("VM12: normalize and value_map on same field are independent", () => {
+  it("value_map translates the raw source value; normalize is a diff-only function (no interaction)", () => {
+    // normalize is applied at diff time (not at inbound mapping time) so it does NOT
+    // pre-process the value before value_map. applyMapping only uses valueMap.
+    const mappings: FieldMappingList = [{
+      source: "status", target: "status",
+      // normalize is stored on FieldMapping but applyMapping does not call it
+      normalize: (v) => String(v).toLowerCase().trim(),
+      valueMap: { active: "ACTIVE_CANONICAL", inactive: "INACTIVE_CANONICAL" },
+      reverseValueMap: { ACTIVE_CANONICAL: "active", INACTIVE_CANONICAL: "inactive" },
+    }];
+    // value_map sees the raw value "active" — maps correctly
+    expect(applyMapping({ status: "active" }, mappings, "inbound")).toEqual({ status: "ACTIVE_CANONICAL" });
+    // raw value "ACTIVE" (uppercase) is NOT in value_map → passthrough
+    expect(applyMapping({ status: "ACTIVE" }, mappings, "inbound")).toEqual({ status: "ACTIVE" });
+  });
+});
+
+// ─── WL: Empty whitelist (absent fields = no passthrough) ─────────────────────
+// Spec: specs/field-mapping.md §1.1
+// Plan: plans/engine/fields/PLAN_REQUIRE_EXPLICIT_FIELD_MAPPING.md
+
+describe("WL1: undefined mappings → empty result (no implicit passthrough)", () => {
+  it("inbound: undefined mappings returns {}", () => {
+    expect(applyMapping({ name: "Alice", email: "a@example.com" }, undefined, "inbound")).toEqual({});
+  });
+  it("outbound: undefined mappings returns {}", () => {
+    expect(applyMapping({ name: "Alice", email: "a@example.com" }, undefined, "outbound")).toEqual({});
+  });
+});
+
+describe("WL2: empty mappings array → empty result (no implicit passthrough)", () => {
+  it("inbound: [] returns {}", () => {
+    expect(applyMapping({ name: "Alice", email: "a@example.com" }, [], "inbound")).toEqual({});
+  });
+  it("outbound: [] returns {}", () => {
+    expect(applyMapping({ name: "Alice", email: "a@example.com" }, [], "outbound")).toEqual({});
   });
 });

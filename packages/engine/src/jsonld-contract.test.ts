@@ -24,6 +24,11 @@ import type {
 } from "@opensync/sdk";
 import type { ResolvedConfig, ChannelMember } from "./config/loader.js";
 
+/** Shorthand: build identity field mappings (same source + target name) for use in channel members. */
+const fm = (...fields: string[]) => fields.map(f => ({ source: f, target: f }));
+const FM_CO   = fm("name", "domain"); // companies channel
+const FM_CT   = fm("name", "email");  // contacts channel
+
 // ─── JLC1 + JLC2: Basic Ref roundtrip ─────────────────────────────────────────
 
 describe("JLC1: connector Ref value → engine extracts association → dispatches remapped Ref", () => {
@@ -128,16 +133,16 @@ describe("JLC1: connector Ref value → engine extracts association → dispatch
         {
           id: "companies",
           members: [
-            { connectorId: "src", entity: "companies" },
-            { connectorId: "tgt", entity: "companies" },
+            { connectorId: "src", entity: "companies", inbound: FM_CO, outbound: FM_CO },
+            { connectorId: "tgt", entity: "companies", inbound: FM_CO, outbound: FM_CO },
           ],
           identity: ["domain"],
         },
         {
           id: "contacts",
           members: [
-            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
           ],
           identity: ["email"],
         },
@@ -257,12 +262,12 @@ describe("JLC3: { type: 'ref' } schema field drives association inference", () =
         { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
       channels: [
-        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identity: ["domain"] },
+        { id: "companies", members: [{ connectorId: "src", entity: "companies", inbound: FM_CO, outbound: FM_CO }, { connectorId: "tgt", entity: "companies", inbound: FM_CO, outbound: FM_CO }], identity: ["domain"] },
         {
           id: "contacts",
           members: [
-            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
           ],
           identity: ["email"],
         },
@@ -369,12 +374,12 @@ describe("JLC4: schema[field].entity drives association inference when @entity a
         { id: "tgt", connector: tgtConnector, config: {}, auth: {}, batchIdRef: { current: undefined }, triggerRef: { current: undefined } },
       ],
       channels: [
-        { id: "companies", members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }], identity: ["domain"] },
+        { id: "companies", members: [{ connectorId: "src", entity: "companies", inbound: FM_CO, outbound: FM_CO }, { connectorId: "tgt", entity: "companies", inbound: FM_CO, outbound: FM_CO }], identity: ["domain"] },
         {
           id: "contacts",
           members: [
-            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
           ],
           identity: ["email"],
         },
@@ -463,8 +468,8 @@ describe("JLC5: Ref-shaped value treated as opaque when no inference rule applie
       channels: [{
         id: "contacts",
         members: [
-          { connectorId: "src", entity: "contacts" },
-          { connectorId: "tgt", entity: "contacts" },
+          { connectorId: "src", entity: "contacts", inbound: FM_CT, outbound: FM_CT },
+          { connectorId: "tgt", entity: "contacts", inbound: FM_CT, outbound: FM_CT },
         ],
         identity: ["email"],
       }],
@@ -507,6 +512,7 @@ describe("JLC7: inexpressible predicates preserved as Ref values in data on upda
           { source: "primaryCompanyId", target: "primaryRef" },
           { source: "secondaryCompanyId", target: "secondaryRef" },
         ],
+        inbound: FM_CT, outbound: FM_CT,
       },
       {
         connectorId: "erp",
@@ -515,6 +521,7 @@ describe("JLC7: inexpressible predicates preserved as Ref values in data on upda
           { source: "orgId", target: "primaryRef" },
           // No secondaryRef mapping: ERP cannot express secondaryCompanyId
         ],
+        inbound: FM_CT, outbound: FM_CT,
       },
     ];
 
@@ -700,16 +707,16 @@ describe("ASYN1: plain string FK field + schema { type: 'ref' } → engine synth
         {
           id: "companies",
           members: [
-            { connectorId: "src", entity: "companies" },
-            { connectorId: "tgt", entity: "companies" },
+            { connectorId: "src", entity: "companies", inbound: FM_CO, outbound: FM_CO },
+            { connectorId: "tgt", entity: "companies", inbound: FM_CO, outbound: FM_CO },
           ],
           identity: ["domain"],
         },
         {
           id: "contacts",
           members: [
-            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
           ],
           identity: ["email"],
         },
@@ -805,14 +812,14 @@ describe("ASYN2: plain string + no schema ref declaration → not synthesized (o
       channels: [
         {
           id: "companies",
-          members: [{ connectorId: "src", entity: "companies" }, { connectorId: "tgt", entity: "companies" }],
+          members: [{ connectorId: "src", entity: "companies", inbound: FM_CO, outbound: FM_CO }, { connectorId: "tgt", entity: "companies", inbound: FM_CO, outbound: FM_CO }],
           identity: ["domain"],
         },
         {
           id: "contacts",
           members: [
-            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
-            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }] },
+            { connectorId: "src", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
+            { connectorId: "tgt", entity: "contacts", assocMappings: [{ source: "companyId", target: "companyRef" }], inbound: FM_CT, outbound: FM_CT },
           ],
           identity: ["email"],
         },

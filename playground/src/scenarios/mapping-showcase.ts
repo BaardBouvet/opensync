@@ -14,9 +14,12 @@
 //   §1.3  expression      fullName assembled from firstName + lastName; reverse decomposes
 //   §1.4  normalize       phone strips non-digits before diff (3 formats → same canonical)
 //   §1.5  default         null CRM status → "active"
+//   §1.10 value_map       CRM status a/i → canonical active/inactive; ERP 1/2 → same
 //   §1.7  source_path     billing.street / billing.city extracted from ERP nested billing object
 //   §1.8  group           firstName + lastName resolved atomically from winning source
-//   §2.1  coalesce        domain: first non-null wins across crm/erp/hr
+//   §2.1  priority (mapping)  crm priority:1, erp priority:2, hr priority:3 declared on each mapping entry
+//   §2.1  priority (field)  ERP firstName/lastName override to priority:0 — ERP wins name over CRM
+//   §2.1  coalesce        domain: first non-null wins across crm/erp/hr; crm wins (priority 1)
 //   §2.2  last_modified   name / phone: most-recently updated value wins
 //   §2.3  resolve         description: longer value wins
 //   §2.4  collect         categories: union set merged across all sources
@@ -40,8 +43,23 @@ const scenario: ScenarioDefinition = {
 channels:
   - id: persons
     identity: [email]
+    fields:
+      # §1.8 group: firstName + lastName resolved atomically from single winning source
+      firstName: { strategy: coalesce }
+      lastName:  { strategy: coalesce }
+      # §2.2 last_modified: most-recently updated phone wins across sources
+      phone: { strategy: last_modified }
   - id: orgs
     identity: [domain]
+    fields:
+      # §2.1 coalesce: first non-null domain wins; crm (priority 1) beats erp (2) beats hr (3)
+      domain: { strategy: coalesce }
+      # §2.2 last_modified: most-recently updated org name wins
+      name: { strategy: last_modified }
+      # §2.4 collect: categories merged as a union set across all sources
+      categories: { strategy: collect }
+      # §2.5 bool_or: isPremium is true if ANY source says true
+      isPremium: { strategy: bool_or }
   - id: orders
     identity: [ref]
   - id: components
@@ -50,33 +68,19 @@ channels:
       - fields: [orderRef, lineNo, compNo]
 
 
-conflict:
-  # §1.8 group: firstName + lastName resolved atomically from single winning source
-  firstName: { strategy: coalesce }
-  lastName:  { strategy: coalesce }
-  # §2.2 last_modified: most-recently updated phone wins across sources
-  phone: { strategy: last_modified }
-  # §2.1 coalesce: first non-null domain wins
-  domain: { strategy: coalesce }
-  # §2.2 last_modified: most-recently updated org name wins
-  name: { strategy: last_modified }
-  # §2.4 collect: categories merged as a union set across all sources
-  categories: { strategy: collect }
-  # §2.5 bool_or: isPremium is true if ANY source says true
-  isPremium: { strategy: bool_or }
-
-
 mappings:
   # ═══════════════════════════════════════════════════════════════════════════
   # Channel: persons  (crm.contacts / erp.employees / hr.people)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # ── CRM contacts (named for embedded-object child reference) ─────────────────────
+  # ── CRM contacts (named for embedded-object child reference) ─────────────────
   # name: required so the embedded-object child below can use parent: crm_contacts
   - name: crm_contacts
     connector: crm
     entity: contacts
     channel: persons
+    # §2.1 priority (mapping-level): CRM is most authoritative for persons coalesce fields
+    priority: 1
     # §8.2 soft_delete: records with isDeleted:true are treated as removed
     soft_delete:
       strategy: deleted_flag
@@ -98,9 +102,16 @@ mappings:
         target: phone
         normalize: 'String(v).replace(/\D/g, "")'
       # §1.5 default: null CRM status falls back to "active"
+      # §1.10 value_map: CRM uses short codes a=active i=inactive; canonical is the full word
       - source: status
         target: status
         default: "active"
+        value_map:
+          'a': 'active'
+          'i': 'inactive'
+        reverse_value_map:
+          'active':   'a'
+          'inactive': 'i'
       # §1.2 forward_only: leadScore captured from CRM, never written to ERP or HR
       - source: leadScore
         target: crmLeadScore
@@ -120,6 +131,8 @@ mappings:
   - connector: erp
     entity: employees
     channel: persons
+    # §2.1 priority (mapping-level): ERP is secondary for persons coalesce fields by default…
+    priority: 2
     # §5.1 filter: inactive employees are excluded from the ERP ingest pass
     filter: "record.status !== 'inactive'"
     fields:
@@ -128,8 +141,16 @@ mappings:
         target: email
         # reverseRequired: if canonical email is null, suppress ERP dispatch entirely
         reverseRequired: true
-      - { source: firstName, target: firstName, group: name }
-      - { source: lastName,  target: lastName,  group: name }
+      # §2.1 priority (field-level): …except for name fields where ERP is the HR-of-record
+      # priority: 0 overrides the mapping-level priority: 2, making ERP win over CRM (priority: 1)
+      - source: firstName
+        target: firstName
+        group: name
+        priority: 0
+      - source: lastName
+        target: lastName
+        group: name
+        priority: 0
       - source: phoneNo
         target: phone
         normalize: 'String(v).replace(/\D/g, "")'
@@ -137,6 +158,15 @@ mappings:
       - source: syncSource
         target: _origin
         direction: reverse_only
+      # §1.10 value_map: ERP uses numeric codes 1=active 2=inactive; same canonical as CRM
+      - source: status
+        target: status
+        value_map:
+          '1': 'active'
+          '2': 'inactive'
+        reverse_value_map:
+          'active':   '1'
+          'inactive': '2'
 
   # ── HR people ────────────────────────────────────────────────────────────────
   - connector: hr
@@ -161,6 +191,8 @@ mappings:
   - connector: crm
     entity: companies
     channel: orgs
+    # §2.1 priority (mapping-level): CRM is most authoritative for orgs coalesce fields
+    priority: 1
     fields:
       - { source: domain, target: domain }
       - { source: name,   target: name   }
@@ -185,6 +217,8 @@ mappings:
   - connector: erp
     entity: accounts
     channel: orgs
+    # §2.1 priority (mapping-level): ERP is secondary for orgs coalesce fields
+    priority: 2
     fields:
       - { source: website,     target: domain }
       - { source: accountName, target: name   }
@@ -212,6 +246,8 @@ mappings:
   - connector: hr
     entity: orgs
     channel: orgs
+    # §2.1 priority (mapping-level): HR is lowest priority for orgs coalesce fields
+    priority: 3
     fields:
       - { source: site,        target: domain     }
       - { source: orgName,     target: name       }

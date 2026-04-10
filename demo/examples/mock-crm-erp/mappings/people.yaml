@@ -7,6 +7,12 @@ mappings:
   - connector: crm
     entity: contacts
     channel: people
+    fields:
+      - name
+      - email
   - connector: erp
     entity: employees
     channel: people
+    fields:
+      - name
+      - email

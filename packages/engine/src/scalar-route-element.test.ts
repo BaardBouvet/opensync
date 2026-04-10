@@ -164,13 +164,17 @@ function makeScalarConfig(
           arrayPath,
           scalar: true,
           expansionChain: [{ arrayPath, scalar: true, crdtOrder: opts.crdtOrder }],
-          outbound: opts.outbound,
+          inbound:  [{ source: "_value", target: "_value" }, { source: "_ordinal", target: "_ordinal" }],
+          // Explicit parent outbound required; default maps _value so scalar collapse works.
+          outbound: opts.outbound ?? [{ source: "_value", target: "_value" }],
           elementReverseFilter: opts.elementReverseFilter,
           crdtOrder: opts.crdtOrder,
         },
         {
           connectorId: "flat",
           entity: "contact_tags",
+          inbound:  [{ source: "_value", target: "_value" }, { source: "_ordinal", target: "_ordinal" }],
+          outbound: [{ source: "_value", target: "_value" }, { source: "_ordinal", target: "_ordinal" }],
         },
       ],
       identity: ["_value"],
@@ -383,8 +387,8 @@ describe("SC6: no outbound mapping — _value field used as raw scalar", () => {
     const { connector: flatConn, records } = makeFlatTagConnector();
 
     const db = makeDb();
-    // No outbound mapping — _value should be used as-is
-    const engine = new SyncEngine(makeScalarConfig(parentConn, flatConn, { outbound: [] }), db);
+    // Explicit _value outbound mapping — scalar collapse reads _value from canonical fields
+    const engine = new SyncEngine(makeScalarConfig(parentConn, flatConn, { outbound: [{ source: "_value", target: "_value" }] }), db);
 
     await engine.ingest("contact-tags", "parent");
     const [firstId] = Array.from(records.keys());

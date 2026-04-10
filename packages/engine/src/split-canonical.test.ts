@@ -103,8 +103,16 @@ function makeEngine(
       channels: [{
         id: "contacts",
         members: [
-          { connectorId: "crm", entity: "contacts" },
-          { connectorId: "erp", entity: "contacts" },
+          {
+            connectorId: "crm", entity: "contacts",
+            inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+          },
+          {
+            connectorId: "erp", entity: "contacts",
+            inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+          },
         ],
         identity: ["email"],
         ...extra,
@@ -378,9 +386,21 @@ describe("T-SC-13: three-way cluster — splitCanonical leaves the other two mer
         channels: [{
           id: "contacts",
           members: [
-            { connectorId: "crm", entity: "contacts" },
-            { connectorId: "erp", entity: "contacts" },
-            { connectorId: "extra", entity: "contacts" },
+            {
+              connectorId: "crm", entity: "contacts",
+              inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+              outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            },
+            {
+              connectorId: "erp", entity: "contacts",
+              inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+              outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            },
+            {
+              connectorId: "extra", entity: "contacts",
+              inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+              outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            },
           ],
           identity: ["email"],
         }],

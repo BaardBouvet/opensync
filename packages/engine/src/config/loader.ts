@@ -46,6 +46,10 @@ export interface FieldMapping {
    *  or absent in the outbound-mapped record. No written_state row is written.
    *  Spec: specs/field-mapping.md §1.6 */
   reverseRequired?: boolean;
+  /** Spec: specs/field-mapping.md §2.1 — per-field priority override for coalesce.
+   *  Lower number = higher priority. Overrides mapping-level connectorPriorities for
+   *  this specific canonical field when the field strategy is coalesce. */
+  priority?: number;
   /** Static fallback applied during the forward (inbound) pass when the source field is
    *  absent or null. Applied before resolution. Mutually exclusive with defaultExpression.
    *  Spec: specs/field-mapping.md §1.5 */
@@ -83,6 +87,20 @@ export interface FieldMapping {
    *  Mutually exclusive with `array_path` on the same field.
    *  Spec: specs/field-mapping.md §3.5 */
   elementFields?: FieldMappingList;
+  /** Forward value map: source-local code → canonical code.
+   *  Applied on the inbound pass after expression/source resolution and default.
+   *  Mutually exclusive with `expression`.
+   *  Spec: specs/field-mapping.md §1.10 */
+  valueMap?: Record<string, unknown>;
+  /** Reverse value map: canonical code → source-local code.
+   *  Applied on the outbound pass. Auto-derived from valueMap when not declared.
+   *  Spec: specs/field-mapping.md §1.10 */
+  reverseValueMap?: Record<string, unknown>;
+  /** Governs behaviour when a lookup key is absent from the map.
+   *  `"passthrough"` (default): keep the original value unchanged.
+   *  `"null"`: return null.
+   *  Spec: specs/field-mapping.md §1.10 */
+  valueMapFallback?: "passthrough" | "null";
 }
 
 export type FieldMappingList = FieldMapping[];
@@ -461,8 +479,9 @@ export function buildChannelsFromEntries(
       }
     }
 
-    const inbound = entry.fields ? buildInbound(entry.fields) : undefined;
-    const outbound = entry.fields ? buildOutbound(entry.fields) : undefined;
+    // Spec: specs/field-mapping.md §1.1 — absent fields = empty whitelist (no implicit passthrough)
+    const inbound = entry.fields ? buildInbound(entry.fields) : [];
+    const outbound = entry.fields ? buildOutbound(entry.fields) : [];
 
     // Only true array expansion members (parent + array_path) use element-level filters
     const isArrayMember = !!(entry.array_path || (entry.parent && entry.array_path));
@@ -485,6 +504,50 @@ export function buildChannelsFromEntries(
     const softDeletePredicate = isFlatMember && entry.soft_delete
       ? compileSoftDeletePredicate(entry.soft_delete, entry.channel)
       : undefined;
+
+    // Spec: specs/field-mapping.md §2.1 — mapping-level priority promotion.
+    // Flat (non-array-child) mapping entries that declare `priority: N` promote the value
+    // into the channel's conflict.connectorPriorities so coalesce fields use it automatically.
+    // This is channel-scoped: the same connector may have different priorities in different channels.
+    if (entry.priority !== undefined && !entry.array_path && !entry.parent) {
+      const chConflict = ch.conflict ?? {};
+      const existingPriorities = chConflict.connectorPriorities ?? {};
+      if (
+        resolvedConnectorId! in existingPriorities &&
+        existingPriorities[resolvedConnectorId!] !== entry.priority
+      ) {
+        throw new Error(
+          `Connector "${resolvedConnectorId!}" is declared with conflicting priority values ` +
+          `(${existingPriorities[resolvedConnectorId!]} vs ${entry.priority}) in channel "${entry.channel}". ` +
+          `Each connector may appear with at most one priority value per channel.`,
+        );
+      }
+      ch.conflict = {
+        ...chConflict,
+        connectorPriorities: { ...existingPriorities, [resolvedConnectorId!]: entry.priority },
+      };
+    }
+
+    // Spec: specs/field-mapping.md §2.4 — master field promotion.
+    // Field entries with master: true declare this connector as the sole authority for
+    // that canonical field in this channel. Built into ch.conflict.fieldMasters at load time.
+    if (entry.fields && !entry.array_path && !entry.parent) {
+      for (const f of entry.fields) {
+        if (f.master !== true) continue;
+        const existingMasters = ch.conflict?.fieldMasters ?? {};
+        if (f.target in existingMasters && existingMasters[f.target] !== resolvedConnectorId!) {
+          throw new Error(
+            `Canonical field "${f.target}" in channel "${entry.channel}" has conflicting master declarations: ` +
+            `"${existingMasters[f.target]}" and "${resolvedConnectorId!}". ` +
+            `Only one connector may be declared master per field per channel.`,
+          );
+        }
+        ch.conflict = {
+          ...(ch.conflict ?? {}),
+          fieldMasters: { ...existingMasters, [f.target]: resolvedConnectorId! },
+        };
+      }
+    }
 
     ch.members.push({
       name: entry.name,
@@ -570,41 +633,83 @@ function resolveExpansionChain(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
-  return fields.map((f) => ({
-    source: f.source,
-    sourcePath: f.source_path,
-    target: f.target,
-    direction: f.direction,
-    reverseRequired: f.reverseRequired,
-    default: f.default,
-    group: f.group,
-    sources: f.sources,
-    expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
-    reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
-    normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
-    resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
-    sortElements: f.sort_elements,
-    elementFields: f.element_fields ? buildInbound(f.element_fields) : undefined,
-  }));
+  return fields.map((f) => {
+    if (f.value_map && (f.expression || f.reverse_expression)) {
+      throw new Error(`Field "${f.target ?? f.source}": value_map and expression are mutually exclusive`);
+    }
+    // Spec: specs/field-mapping.md §1.10 — auto-invert value_map when reverse_value_map absent
+    let reverseValueMap = f.reverse_value_map as Record<string, unknown> | undefined;
+    if (f.value_map && !reverseValueMap) {
+      const inverse: Record<string, unknown> = {};
+      let collision = false;
+      for (const [k, v] of Object.entries(f.value_map)) {
+        const key = String(v);
+        if (key in inverse) collision = true;
+        inverse[key] = k;
+      }
+      if (collision) {
+        console.warn(`[opensync] value_map on field "${f.target}" is not bijective; ` +
+          `declare reverse_value_map explicitly to silence this warning.`);
+      }
+      reverseValueMap = inverse;
+    }
+    return {
+      source: f.source,
+      sourcePath: f.source_path,
+      target: f.target,
+      direction: f.direction,
+      reverseRequired: f.reverseRequired,
+      default: f.default,
+      group: f.group,
+      sources: f.sources,
+      expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
+      reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
+      normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
+      resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
+      sortElements: f.sort_elements,
+      elementFields: f.element_fields ? buildInbound(f.element_fields) : undefined,
+      valueMap: f.value_map as Record<string, unknown> | undefined,
+      reverseValueMap,
+      valueMapFallback: f.value_map_fallback,
+      priority: f.priority,
+    };
+  });
 }
 
 function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
   // Outbound is the mirror of inbound
-  return fields.map((f) => ({
-    source: f.source,
-    sourcePath: f.source_path,
-    target: f.target,
-    direction: f.direction,
-    reverseRequired: f.reverseRequired,
-    group: f.group,
-    sources: f.sources,
-    expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
-    reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
-    normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
-    resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
-    sortElements: f.sort_elements,
-    elementFields: f.element_fields ? buildOutbound(f.element_fields) : undefined,
-  }));
+  return fields.map((f) => {
+    if (f.value_map && (f.expression || f.reverse_expression)) {
+      throw new Error(`Field "${f.target ?? f.source}": value_map and expression are mutually exclusive`);
+    }
+    let reverseValueMap = f.reverse_value_map as Record<string, unknown> | undefined;
+    if (f.value_map && !reverseValueMap) {
+      const inverse: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(f.value_map)) {
+        inverse[String(v)] = k;
+      }
+      reverseValueMap = inverse;
+    }
+    return {
+      source: f.source,
+      sourcePath: f.source_path,
+      target: f.target,
+      direction: f.direction,
+      reverseRequired: f.reverseRequired,
+      group: f.group,
+      sources: f.sources,
+      expression: f.expression ? compileExpression(f.expression, f.target) : undefined,
+      reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
+      normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
+      resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
+      sortElements: f.sort_elements,
+      elementFields: f.element_fields ? buildOutbound(f.element_fields) : undefined,
+      valueMap: f.value_map as Record<string, unknown> | undefined,
+      reverseValueMap,
+      valueMapFallback: f.value_map_fallback,
+      priority: f.priority,
+    };
+  });
 }
 
 // Spec: specs/config.md — ${VAR} interpolation in string values only (not nested objects)

@@ -63,8 +63,16 @@ function makeConfig(crmUrl: string, erpUrl: string): ResolvedConfig {
       {
         id: "contacts",
         members: [
-          { connectorId: "crm", entity: "contacts" },
-          { connectorId: "erp", entity: "employees" },
+          {
+            connectorId: "crm", entity: "contacts",
+            inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+          },
+          {
+            connectorId: "erp", entity: "employees",
+            inbound:  [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+            outbound: [{ source: "name", target: "name" }, { source: "email", target: "email" }],
+          },
         ],
         identity: ["email"],
       },

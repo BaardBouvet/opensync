@@ -11,6 +11,12 @@ import type { ConflictConfig, FieldMappingList } from "../config/loader.js";
  *      record do not win resolution.
  *    - group (§1.8): fields sharing the same group label are resolved atomically from
  *      whichever source wins the group.
+ *    - priority (§2.1): per-field priority override for coalesce.
+ *  @param allChannelMappings Optional. Map of connectorId → FieldMappingList for every
+ *    connector in the channel. Used to look up the existing shadow source's field-level
+ *    priority when `fieldMappings` (incoming connector's list) declares a per-field priority.
+ *    When absent, priority falls back to connectorPriorities.
+ *    Spec: specs/field-mapping.md §2.1
  *  @param incomingFieldTimestamps Optional per-field timestamps from computeFieldTimestamps.
  *    When present, overrides the flat incomingTs for individual fields.
  *    Spec: specs/field-mapping.md §7.2
@@ -31,6 +37,7 @@ export function resolveConflicts(
   incomingFieldTimestamps?: Record<string, number>,
   incomingCreatedAt?: number,
   createdAtBySrc?: Record<string, number>,
+  allChannelMappings?: Record<string, FieldMappingList>,
 ): Record<string, unknown> {
   // New record in target — accept everything
   if (!targetShadow) return incoming;
@@ -103,11 +110,24 @@ export function resolveConflicts(
           groupWinner.set(label, incomingGroupTs >= existingGroupTs);
         }
       } else if (config.connectorPriorities) {
-        // coalesce-style: priority takes precedence; timestamps break ties
-        const inPri = config.connectorPriorities[incomingSrc] ?? Number.MAX_SAFE_INTEGER;
-        const exPri = existingGroupSrc
+        // coalesce-style: priority takes precedence; timestamps break ties.
+        // For group pre-pass, use the max per-field priority across group fields
+        // (any field-level override in the group applies to the whole group's priority comparison).
+        // Spec: specs/field-mapping.md §2.1, §1.8
+        let inGroupPri: number | undefined;
+        let exGroupPri: number | undefined;
+        for (const m of groupFields) {
+          const inFieldPri = fieldMappings?.find((fm) => fm.target === m.target)?.priority;
+          const exFieldPri = existingGroupSrc
+            ? allChannelMappings?.[existingGroupSrc]?.find((fm) => fm.target === m.target)?.priority
+            : undefined;
+          if (inFieldPri !== undefined && (inGroupPri === undefined || inFieldPri < inGroupPri)) inGroupPri = inFieldPri;
+          if (exFieldPri !== undefined && (exGroupPri === undefined || exFieldPri < exGroupPri)) exGroupPri = exFieldPri;
+        }
+        const inPri = inGroupPri ?? config.connectorPriorities[incomingSrc] ?? Number.MAX_SAFE_INTEGER;
+        const exPri = exGroupPri ?? (existingGroupSrc
           ? (config.connectorPriorities[existingGroupSrc] ?? Number.MAX_SAFE_INTEGER)
-          : Number.MAX_SAFE_INTEGER;
+          : Number.MAX_SAFE_INTEGER);
         // Use max per-field ts across group fields as the group timestamp for incoming
         let incomingGroupTs = -Infinity;
         for (const m of groupFields) {
@@ -192,8 +212,17 @@ export function resolveConflicts(
           break;
         }
         case "coalesce": {
-          const inPri = config.connectorPriorities?.[incomingSrc] ?? Number.MAX_SAFE_INTEGER;
-          const exPri = config.connectorPriorities?.[existing.src] ?? Number.MAX_SAFE_INTEGER;
+          // Spec: specs/field-mapping.md §2.1 — field-level priority overrides mapping-level
+          // (connectorPriorities). Look up the existing shadow source's priority from
+          // allChannelMappings so both sides can have independent per-field overrides.
+          const fieldEntry = fieldMappings?.find((m) => m.target === field);
+          const inPri = fieldEntry?.priority
+            ?? config.connectorPriorities?.[incomingSrc]
+            ?? Number.MAX_SAFE_INTEGER;
+          const exFieldEntry = allChannelMappings?.[existing.src]?.find((m) => m.target === field);
+          const exPri = exFieldEntry?.priority
+            ?? config.connectorPriorities?.[existing.src]
+            ?? Number.MAX_SAFE_INTEGER;
           if (inPri < exPri || (inPri === exPri && fieldTs(field) >= existing.ts)) {
             resolved[field] = incomingVal;
           }

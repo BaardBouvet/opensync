@@ -50,6 +50,11 @@ function inst(id: string, dir: string, filename = "contacts.json"): ResolvedConf
   };
 }
 
+// Comprehensive field map covering all identity + data fields used across T-TC and T-LG tests.
+// Enriched onto every channel member so identity matching works without implicit passthrough.
+const TC_FIELD_MAP = ["email", "taxId", "phone", "name", "firstName", "lastName", "dob"]
+  .map(f => ({ source: f, target: f }));
+
 function makeEngine(
   db: Db,
   connectors: ResolvedConfig["connectors"],
@@ -59,7 +64,7 @@ function makeEngine(
   return new SyncEngine(
     {
       connectors,
-      channels: [{ id: "ch", members, identity: ["email", "taxId"], ...channelOverride }],
+      channels: [{ id: "ch", members: members.map(m => ({ ...m, inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP })), identity: ["email", "taxId"], ...channelOverride }],
       conflict: {},
       readTimeoutMs: 10_000,
     },
@@ -257,7 +262,7 @@ describe("T-TC-5: addConnector bridges a fully-linked canonical and a provisiona
 
     const cfg = (connectors: ResolvedConfig["connectors"], mems: { connectorId: string; entity: string }[]): ResolvedConfig => ({
       connectors,
-      channels: [{ id: "ch", members: mems, identity: ["email", "taxId"] }],
+      channels: [{ id: "ch", members: mems.map(m => ({ ...m, inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP })), identity: ["email", "taxId"] }],
       conflict: {},
       readTimeoutMs: 10_000,
     });
@@ -363,9 +368,9 @@ describe("T-LG-2: identityGroups compound group + transitive", () => {
         channels: [{
           id: "ch",
           members: [
-            { connectorId: "A", entity: "contacts" },
-            { connectorId: "B", entity: "contacts" },
-            { connectorId: "C", entity: "contacts" },
+            { connectorId: "A", entity: "contacts", inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP },
+            { connectorId: "B", entity: "contacts", inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP },
+            { connectorId: "C", entity: "contacts", inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP },
           ],
           identity: [
             { fields: ["email"] },
@@ -413,8 +418,8 @@ describe("T-LG-3: identityGroups compound group at _resolveCanonical ingest time
       channels: [{
         id: "ch",
         members: [
-          { connectorId: "A", entity: "contacts" },
-          { connectorId: "B", entity: "contacts" },
+          { connectorId: "A", entity: "contacts", inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP },
+          { connectorId: "B", entity: "contacts", inbound: TC_FIELD_MAP, outbound: TC_FIELD_MAP },
         ],
         identity: [{ fields: ["firstName", "lastName", "dob"] }],
       }],
