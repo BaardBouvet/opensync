@@ -9,6 +9,7 @@ import {
   type FieldMappingEntry,
   type IdentityGroup,
   type ParentFieldRef,
+  type SoftDeleteEntry,
 } from "./schema.js";
 export type { IdentityGroup } from "./schema.js";
 import type {
@@ -68,6 +69,17 @@ export interface FieldMapping {
    *  @returns The new canonical value to store.
    *  Spec: specs/field-mapping.md §2.3 */
   resolve?: (incoming: unknown, existing: unknown | undefined) => unknown;
+  /** When true, sort array elements by stable JSON representation before diff comparison.
+   *  Suppresses false-positive updates when the source API returns the same elements in
+   *  different order between polls. OR'd with the connector schema's `unordered: true` flag.
+   *  Spec: specs/field-mapping.md §3.5 */
+  sortElements?: boolean;
+  /** Per-element field mappings applied to every element of this array field without
+   *  expanding elements into separate entities. Self-referential: each entry here can itself
+   *  carry `element_fields` for deeply nested arrays.
+   *  Mutually exclusive with `array_path` on the same field.
+   *  Spec: specs/field-mapping.md §3.5 */
+  elementFields?: FieldMappingList;
 }
 
 export type FieldMappingList = FieldMapping[];
@@ -140,6 +152,13 @@ export interface ChannelMember {
    * When set, canonical entities for which this returns false are skipped for this connector.
    * No written_state row is written. Not present on array expansion members. */
   recordReverseFilter?: (record: Record<string, unknown>) => boolean;
+  /** Spec: specs/field-mapping.md §8.2 — soft-delete field inspection (flat members only).
+   * When set, records for which this returns true are treated as deleted before
+   * any further processing. Not present on array expansion members. */
+  softDeletePredicate?: (record: Record<string, unknown>) => boolean;
+  /** Spec: specs/field-mapping.md §8.3 — full-snapshot absence detection (flat members only).
+   * When true, every read is a complete dataset; entities absent from the batch are deleted. */
+  fullSnapshot?: boolean;
 }
 
 export interface ChannelConfig {
@@ -150,6 +169,9 @@ export interface ChannelConfig {
    * `IdentityGroup[]` compound form: AND-within-group, OR-across-groups.
    * Normalised to IdentityGroup[] inside _resolveGroups before use. */
   identity?: string[] | IdentityGroup[];
+  /** Spec: specs/field-mapping.md §8 — opt-in delete propagation.
+   * When true, records with deleted=true are fanned out to target connectors via entity.delete(). */
+  propagateDeletes?: boolean;
 }
 
 /** A resolved connector instance — plugin loaded, context wired, entities retrieved. */
@@ -216,7 +238,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
     // mappings/ is optional if no channels are configured
   }
 
-  const allChannelDefs: Array<{ id: string; identityFields?: string[]; identityGroups?: IdentityGroup[] }> = [];
+  const allChannelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean }> = [];
   const allMappingEntries: MappingEntry[] = [];
 
   for (const filePath of mappingFiles) {
@@ -235,7 +257,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 
     if (result.data.channels) {
       for (const ch of result.data.channels) {
-        allChannelDefs.push({ id: ch.id, identityFields: ch.identityFields, identityGroups: ch.identityGroups });
+        allChannelDefs.push({ id: ch.id, identity: ch.identity, propagateDeletes: ch.propagateDeletes });
       }
     }
     if (result.data.mappings) {
@@ -291,7 +313,7 @@ export async function loadConfig(rootDir: string): Promise<ResolvedConfig> {
 // the browser playground (which parses YAML directly, without file I/O).
 
 export function buildChannelsFromEntries(
-  channelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[] }>,
+  channelDefs: Array<{ id: string; identity?: string[] | IdentityGroup[]; propagateDeletes?: boolean }>,
   mappingEntries: MappingEntry[],
 ): ChannelConfig[] {
   // Spec: specs/field-mapping.md §3.2 — build a global index of named mappings so
@@ -340,6 +362,7 @@ export function buildChannelsFromEntries(
       id: chDef.id,
       members: [],
       identity: chDef.identity,
+      propagateDeletes: chDef.propagateDeletes,
     });
   }
 
@@ -405,6 +428,9 @@ export function buildChannelsFromEntries(
     const recordReverseFilter = !isArrayMember && entry.reverse_filter
       ? compileRecordFilter(entry.reverse_filter, entry.channel)
       : undefined;
+    const softDeletePredicate = !isArrayMember && entry.soft_delete
+      ? compileSoftDeletePredicate(entry.soft_delete, entry.channel)
+      : undefined;
 
     ch.members.push({
       name: entry.name,
@@ -428,6 +454,8 @@ export function buildChannelsFromEntries(
       elementReverseFilter,
       recordFilter,
       recordReverseFilter,
+      softDeletePredicate,
+      fullSnapshot: !isArrayMember && entry.full_snapshot ? true : undefined,
     });
   }
 
@@ -498,6 +526,8 @@ function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
     reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
     normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
     resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
+    sortElements: f.sort_elements,
+    elementFields: f.element_fields ? buildInbound(f.element_fields) : undefined,
   }));
 }
 
@@ -514,6 +544,8 @@ function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
     reverseExpression: f.reverse_expression ? compileReverseExpression(f.reverse_expression, f.target) : undefined,
     normalize: f.normalize ? compileNormalize(f.normalize, f.target) : undefined,
     resolve: f.resolve ? compileResolve(f.resolve, f.target) : undefined,
+    sortElements: f.sort_elements,
+    elementFields: f.element_fields ? buildOutbound(f.element_fields) : undefined,
   }));
 }
 
@@ -572,6 +604,39 @@ function compileElementFilter(
     );
   }
   return (element, parent, index) => Boolean(fn(element, parent, index));
+}
+
+// ─── compileSoftDeletePredicate ───────────────────────────────────────────────
+
+/** Spec: specs/field-mapping.md §8.2
+ * Compile a soft_delete config entry into a typed predicate.
+ * Evaluated on the raw stripped record before echo detection or field mapping.
+ * Security note: `expression` strategy uses new Function — same security contract
+ * as compileRecordFilter above. */
+function compileSoftDeletePredicate(
+  entry: SoftDeleteEntry,
+  channelId: string,
+): (record: Record<string, unknown>) => boolean {
+  switch (entry.strategy) {
+    case "deleted_flag":
+      return (r) => r[entry.field] !== false && r[entry.field] != null;
+    case "timestamp":
+      return (r) => r[entry.field] != null;
+    case "active_flag":
+      return (r) => r[entry.field] !== true;
+    case "expression": {
+      let fn: (record: Record<string, unknown>) => unknown;
+      try {
+        // eslint-disable-next-line no-new-func
+        fn = new Function("record", `return (${entry.expression});`) as typeof fn;
+      } catch (err) {
+        throw new Error(
+          `soft_delete expression in channel "${channelId}" failed to compile: ${String(err)}\n  Expression: ${entry.expression}`,
+        );
+      }
+      return (r) => Boolean(fn(r));
+    }
+  }
 }
 
 // ─── compileRecordFilter ──────────────────────────────────────────────────────

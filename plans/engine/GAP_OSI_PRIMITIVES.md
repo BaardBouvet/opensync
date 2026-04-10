@@ -128,7 +128,7 @@ Each nesting level references the previous as parent. Supports arbitrary depth: 
 ### Scalar arrays (`scalar: true`)
 A JSONB array of bare scalar values (e.g. `["vip", "churned"]`) rather than objects. The scalar value doubles as the element identity.
 
-**Foundation: 🔶** Forward pass implemented: when `scalar: true`, each bare element is wrapped as `{ _value: element }` and the value doubles as element identity. `element_key` is mutually exclusive. `filter` expressions receive the raw scalar. Reverse pass (collapse back to scalar array) is a planned follow-on. Tests: `array-expander.test.ts` SA1–SA9.
+**Foundation: ✅** Fully implemented. Forward pass wraps each bare element as `{ _value: element }` with the value doubling as element identity. `_value` is preserved through the expansion pipeline (scalar leaf children are exempt from the `_`-prefix strip). Reverse pass (`_scalarCollapseRebuild`) loads canonical children via `dbGetArrayChildrenByParent`, skips cascade-deleted elements (empty `dbGetCanonicalFields`), and assembles the bare scalar array. `reverse_filter` receives the raw scalar; `order: true` sorts by `_ordinal`. Element absence cascades shadow deletion to all member connectors. Tests: `array-expander.test.ts` SA1–SA9, `scalar-route-element.test.ts` SC1–SC8. Spec: `specs/field-mapping.md §3.3`.
 
 ---
 
@@ -140,32 +140,35 @@ Extract a value from a nested JSON path within a source column rather than a top
 ---
 
 ### Passthrough columns
-Source columns that are not mapped to any target field but should still appear in the delta output (e.g. for downstream consumers that need the original row).
+Source columns that are not mapped to any canonical field but must survive the sync cycle to be re-injected into the outbound payload when the engine writes back to **that same connector** (important for connectors using full-replace PUT APIs where unmapped fields would otherwise be zeroed).
 
-**Foundation: 🔶** NormalizedRecord carries arbitrary fields and shadow state preserves them. But the delta/dispatch pipeline does not have an explicit `passthrough` concept for forwarding unmapped columns to reverse output. Needs a config/spec design.
+**Foundation: 🔶** Shadow state can store arbitrary fields, so the storage layer is ready. What is missing is the `passthrough: [...]` config key, the `_pt.*` shadow-storage convention, and the re-injection step in `_dispatchToTarget` for same-source writes. Note: the OSI-mapping primitive is strictly a same-source roundtrip preservation — fields visible to other connectors must be declared in the channel mapping with appropriate `direction`. See `plans/engine/PLAN_PASSTHROUGH_COLUMNS.md`.
 
 ---
 
-## 4. References & Foreign Keys
+### Atomic arrays (`sort_elements` / `element_fields`)
+An array-valued field that is owned by one source and replaced in its entirety — no per-element tracking, no per-element canonical IDs. Useful when the connector API is full-replace and mixing elements across sources is not wanted.
+
+**Foundation: ✅** Fully implemented. Two mechanisms enable order-insensitive diff: (1) `unordered: true` on the `FieldType` array variant in the SDK — schema-guided recursive normaliser in `diff.ts` descends the tree sorting arrays declared unordered at any depth; (2) `sort_elements: true` on a mapping field entry — explicit override when the connector schema is absent or omits `unordered`.  `element_fields` (self-referential FieldMapping list on a field entry) renames / transforms per-element object fields in both directions without expanding elements into child entities. Mutual exclusion with `array_path` enforced at config load time. Tests: `diff.test.ts` AA1–AA5, `mapping.test.ts` EF1–EF8. Spec: `specs/field-mapping.md §3.5`.
 
 ### Cross-entity references (`references` on TargetFieldDef)
 Declares that a target field is a foreign key to another target entity. When entities merge during identity linking, local IDs in referencing records are automatically preserved — each source keeps its own FK value pointing to the correct local record.
 
-**Foundation: 🔶** The identity spec mentions "associations" where a contact references a company, and deferred associations handle the case where the company hasn't synced yet. However, explicit `references:` declarations on fields and the automatic FK translation during entity merges are not designed. The deferred-associations mechanism is the closest foundation.
+**Foundation: ✅** FK references are handled via the `id_field` channel-member config: the connector's PK is injected into the canonical scope as a named field under a stable string (e.g. `erpId`). Both sides carry the same external ID string; no UUID translation or explicit `references:` declaration is needed. `direction: reverse_only` on the injected field prevents the ID being written back as a data field on reverse dispatch. Association FK fields use `FieldDescriptor.kind = 'association'` with predicate remapping via `assocMappings`. Spec: `specs/field-mapping.md §4.1`. Note: `references_field` (alternate-representation FK) and vocabulary targets remain unimplemented (§4.2–4.3).
 
 ---
 
 ### FK reverse resolution
 When syncing back to a source, translate the global resolved FK field back to the source's local ID namespace. Requires tracing through the identity graph: find which source record in the referenced entity is part of the same cluster, return its local PK.
 
-**Foundation: 🔶** `IdentityMap.getExternalId(entityId, connectorInstanceId)` provides the basic lookup needed. The challenge is wiring this into the reverse-mapping path so that FK fields are automatically translated per source. Architecture supports it; the pipeline plumbing is missing.
+**Foundation: ✅** The `id_field` + `direction: reverse_only` pattern is the primary FK reverse mechanism: the injected PK is readable on the forward pass (contributing the stable external ID to canonical state) but excluded from the outbound payload when dispatching updates back to the same connector, preventing ID round-trips. For cases requiring UUID-to-local-ID translation across connectors (e.g. translating a canonical UUID to a different connector's PK), the deferred `references_field` mechanism (`§4.2`) is the targeted follow-on. Spec: `specs/field-mapping.md §4.1`.
 
 ---
 
 ### Reference preservation after merge
 When two entities merge (e.g. two company records with the same domain), referencing contacts preserve their original FK values in each source — because the original FK is still a valid local ID.
 
-**Foundation: 🔶** The identity map keeps all `entity_links` for a merged entity (they all point to the same UUID), so original external IDs are preserved. Preservation of FK values in referencing records during reverse-mapping needs to be explicitly designed.
+**Foundation: ✅** All connector external IDs are preserved in `entity_links`, each independently mapped to the same canonical UUID. When two company records merge, both their external IDs remain valid FK targets for referencing contact records on each side. Association predicate remapping (`assocMappings` in channel config) translates inbound predicates to canonical names and back. Plan complete: `PLAN_PREDICATE_MAPPING`. Spec: `specs/associations.md`.
 
 ---
 
@@ -256,21 +259,21 @@ Detect source-side deletion signals without requiring a hard DELETE:
 
 Can suppress the row locally (default) or route the detection into a named target field for propagation.
 
-**Foundation: 🔶** Connector-reported deletion via `_deleted: true` on `NormalizedRecord` is implemented. Engine-level `soft_delete:` field inspection (treating a field value as a deletion signal, translating the three strategies listed above) is designed but not yet implemented — the connector still handles the signal interpretation itself. Spec: `specs/field-mapping.md §8.2`.
+**Foundation: ✅** Engine-level `soft_delete:` field inspection implemented with four strategies (`deleted_flag`, `timestamp`, `active_flag`, `expression`). Compiled to a predicate at config-load time; evaluated before echo detection in `_processRecords`. Plans complete: `PLAN_SOFT_DELETE_INSPECTION`. Tests: `delete-propagation.test.ts` SD1–SD14. Spec: `specs/field-mapping.md §8.2`.
 
 ---
 
 ### Hard delete / `derive_tombstones`
 Detect entity absence: entities present in the `cluster_members` feedback table (i.e. previously inserted) but missing from the current source snapshot are treated as deleted. A synthetic row with `is_deleted = true` is contributed to resolution.
 
-**Foundation: 🔶** `written_state` is now implemented and provides the "last written" baseline needed for full-snapshot comparison. The `full_snapshot: true` mapping flag is designed (`specs/field-mapping.md §8.3`); the detection logic (compare current read set against `written_state` rows for this connector) requires implementation. All dependencies are met; design work remains.
+**Foundation: ✅** `full_snapshot: true` mapping flag implemented. When set, `since` is always `undefined` and after reading, the engine compares the returned ID set against all non-deleted shadow rows; missing IDs are synthesised as `{ id, data: {}, deleted: true }`. Safety guard trips if > 50% of known rows are absent. Plans complete: `PLAN_HARD_DELETE`. Tests: `delete-propagation.test.ts` HD1–HD6. Spec: `specs/field-mapping.md §8.3`.
 
 ---
 
 ### Element hard delete (child-level tombstones)
 Detect absence of nested array elements that were previously written. Elements present in `written_state` but absent in the current source contribute a synthetic `is_removed = true` row.
 
-**Foundation: 🔶** Both dependencies are now met: nested array expansion/collapse (`PLAN_NESTED_ARRAY_PIPELINE`, `PLAN_ARRAY_COLLAPSE`) and `written_state` (`PLAN_WRITTEN_STATE`) are implemented. The remaining gap is the element-absence detection logic itself — comparing current expanded elements against `written_state` rows for the target and synthesising deletion signals for missing keys.
+**Foundation: ✅** Element-absence detection implemented in the array expansion path: after all child `ReadRecord`s are processed, `dbGetChildShadowsForParent` returns previously-known non-deleted children; any that are missing are tombstoned and trigger an empty-patch collapse-rebuild via `_applyCollapseBatch`. Plans complete: `PLAN_HARD_DELETE`. Tests: `delete-propagation.test.ts` T-DEL-06, T-DEL-08. Spec: `specs/field-mapping.md §8.5`.
 
 ---
 
@@ -339,21 +342,21 @@ Adjacency pointer metadata for graph-like ordering: each element knows its previ
 ### Discriminator routing (`filter`)
 Multiple mappings from one source to different targets (or multiple sources to one target) with `filter` conditions acting as discriminators. E.g. `type = 'customer'` rows go to CRM; `type = 'employee'` rows go to HR.
 
-**Foundation: 🔶** Implemented via §5.1 `filter` expressions: separate mapping entries per channel with different `filter` conditions fan out one source entity type to different targets. Within-channel routing (same entity type, same channel) is not supported.
+**Foundation: ✅** Fully implemented via per-member `filter` expressions. Separate mapping entries from the same source, each with a different `filter` predicate, fan records out to different channels/targets. Source records that fail `filter` are excluded from resolution and have their shadow state cleared. Expressions receive full record binding; compiled at load time via `compileRecordFilter`. Spec: `specs/field-mapping.md §5.3`.
 
 ---
 
 ### Route combined (routing + merging)
 A routing mapping handles a subset of records via `filter`; a separate plain mapping handles all records from another source. The two mappings merge into the same target entity via identity linking.
 
-**Foundation: ❌** Transitive closure and record-level filters are both implemented. The remaining gap is the engine correctly handling two mappings that contribute to the **same** target entity via identity linking when one has a `filter` condition — ensuring the filtered and unfiltered paths merge rather than overwrite.
+**Foundation: ✅** Fully validated. A filtered CRM source (`filter: "record.type === 'customer'"`) and an unfiltered ERP source merge into the same canonical entity via identity linking. Shadow rows are independent per source; clearing the CRM shadow (filter no longer matches) does not disturb the ERP shadow. Ingest order does not affect the stable end-state. `reverse_filter` suppresses CRM write-back for archived records without affecting ERP dispatch. Tests: `scalar-route-element.test.ts` RC1–RC6. Spec: `specs/field-mapping.md §5.4`.
 
 ---
 
 ### Element-set resolution (`elements: coalesce` / `elements: last_modified`)
 When multiple sources contribute elements to a nested array, resolve element-level conflicts — pick the winning source's version of each element by priority or timestamp.
 
-**Foundation: ❌** Nested array expansion and collapse are implemented. The gap is element-level conflict resolution: when multiple sources contribute elements to the same array, the engine needs a strategy (coalesce by element key, last-modified per element, etc.) for picking the winning version of each element.
+**Foundation: ✅** Fully implemented. At collapse time, patches from all contributing sources are grouped by leaf `elementKey`. Winners are selected by `connectorPriorities` (lowest number wins), `last_modified` per-field timestamps, or `fieldMasters` (only the declared master connector's value for a given field is applied). `fieldMasters` filtering applies even to single-patch batches to prevent non-master sources from overwriting master-owned fields. Tests: `scalar-route-element.test.ts` ES1–ES7. Spec: `specs/field-mapping.md §5.5`.
 
 ---
 
@@ -369,7 +372,7 @@ All related entities (company, contact, country) belong in the same mapping file
 ### Source metadata (`sources:` / `primary_key`)
 Declares physical table/view names and primary keys per source dataset. Composite PKs (array of columns) supported.
 
-**Foundation: 🔶** OpenSync connectors declare their own entity schema and return an `id` field as the external ID. A separate `sources:` section with explicit PK declarations is not in the current config. For a SQL-backend variant (OSI-mapping style), this would be needed.
+**Foundation: ✅** Connectors declare their entity schema via `getEntities()` (returning `EntityDefinition[]` with field descriptors and types), which is the effective equivalent of `sources:` metadata. The external `id` on `ReadRecord` is the primary key. Individual mapping field entries support a `sources: [...]` array for lineage hints (documenting which source fields feed a computed expression). The SQL-style `sources:` section with named physical tables is not needed in OpenSync's connector model. Spec: `specs/connector-sdk.md §getEntities`, `specs/field-mapping.md §1.3`.
 
 ---
 
@@ -408,17 +411,17 @@ Expected insert rows must include a `_cluster_id` seed (`"mapping:src_id"`) that
 | Category | Total Primitives | ✅ Found | 🔶 Partial | ❌ Gap |
 |----------|-----------------|---------|-----------|-------|
 | Resolution strategies | 6 | 6 | 0 | 0 |
-| Identity & linking | 5 | 1 | 1 | 3 |
-| Nesting & structure | 6 | 2 | 4 | 0 |
-| References & FKs | 5 | 0 | 3 | 2 |
+| Identity & linking | 5 | 2 | 0 | 3 |
+| Nesting & structure | 7 | 4 | 3 | 0 |
+| References & FKs | 5 | 3 | 0 | 2 |
 | Field-level controls | 8 | 7 | 0 | 1 |
-| Deletion & tombstones | 4 | 1 | 3 | 0 |
+| Deletion & tombstones | 4 | 4 | 0 | 0 |
 | Change detection & noop | 4 | 3 | 1 | 0 |
 | Ordering | 3 | 3 | 0 | 0 |
-| Routing & partitioning | 3 | 0 | 1 | 2 |
-| Mapping config & metadata | 4 | 1 | 2 | 1 |
+| Routing & partitioning | 3 | 3 | 0 | 0 |
+| Mapping config & metadata | 4 | 2 | 1 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **24** | **15** | **11** |
+| **Total** | **51** | **37** | **5** | **9** |
 
 ---
 
@@ -430,11 +433,11 @@ Five of the six original high-priority foundation items are now done. Remaining 
 
 2. ~~**Nested array pipeline**~~ — ✅ done (forward expand + reverse collapse, multi-level, cross-channel).
 
-3. ~~**Filter/routing**~~ — ✅ flat record `filter`/`reverse_filter` done; within-channel routing variant still 🔶.
+3. ~~**Filter/routing**~~ — ✅ done. `filter`/`reverse_filter` implemented; discriminator routing ✅; route-combined ✅; element-set resolution ✅.
 
-4. **FK resolution pipeline** — unlocks `references`, `references_field`, vocabulary targets, reference preservation. Builds on transitive closure + `IdentityMap.getExternalId`. All dependencies are now met.
+4. ~~**FK resolution pipeline (core)**~~ — ✅ core done. `id_field` + `direction: reverse_only` handles the primary FK pattern; reference preservation via `entity_links` and predicate remapping ✅. Remaining: `references_field` (alternate-representation FK) and vocabulary targets — both require design work.
 
-5. ~~**`written_state` / target-centric noop**~~ — ✅ done (`PLAN_WRITTEN_STATE`). Unblocks `derive_timestamps`, element tombstoning, and hard-delete detection — all now at 🔶 (foundation present, logic not yet wired).
+5. ~~**`written_state` / target-centric noop**~~ — ✅ done (`PLAN_WRITTEN_STATE`). Also unblocked and now complete: `derive_timestamps` ✅, element tombstoning ✅, hard-delete detection ✅ (plans: `PLAN_FIELD_TIMESTAMPS`, `PLAN_HARD_DELETE`). ~~`derive_timestamps`, element tombstoning, and hard-delete detection — all now at 🔶 (foundation present, logic not yet wired)~~.
 
 6. **Inline test framework** — high value for mapping validation. No dependencies on the above. Independent work.
 

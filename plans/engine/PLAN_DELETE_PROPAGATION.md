@@ -1,6 +1,6 @@
 # PLAN_DELETE_PROPAGATION — Opt-in delete propagation
 
-**Status:** draft  
+**Status:** complete  
 **Date:** 2026-04-05  
 **Domain:** engine  
 **Scope:** engine, config, SDK types  

@@ -14,9 +14,14 @@
  * FE7  expression + plain-rename entries in same mapping list coexist
  * FE8  enum mapping: expression (bool→string) + reverseExpression (string→bool)
  * FE9  expression receives full record (can reference multiple fields)
+ * AT1  element_fields: inbound renames per-element fields (Spec: §3.5)
+ * AT2  element_fields: outbound reverses per-element renames (Spec: §3.5)
+ * AT3  element_fields: nested (self-referential) element_fields (Spec: §3.5)
+ * AT4  element_fields: non-array value passes through unchanged (Spec: §3.5)
+ * AT5  applyMapping integrates element_fields automatically (Spec: §3.5)
  */
 import { describe, it, expect } from "bun:test";
-import { applyMapping, parseTs, computeFieldTimestamps } from "./mapping.js";
+import { applyMapping, applyElementFields, parseTs, computeFieldTimestamps } from "./mapping.js";
 import type { FieldMappingList } from "../config/loader.js";
 import type { FieldData } from "../db/schema.js";
 import type { ReadRecord } from "@opensync/sdk";
@@ -478,6 +483,139 @@ describe("FT7: fieldTimestamps present for subset of fields", () => {
       9999,
     );
     expect(result).toEqual({ email: Date.parse("2024-06-01T00:00:00Z"), name: 9999 });
+  });
+});
+
+// ─── AT1: element_fields inbound rename ──────────────────────────────────────
+
+describe("AT1: element_fields inbound per-element rename (Spec: §3.5)", () => {
+  it("renames fields within each array element on inbound pass", () => {
+    const elementFields: FieldMappingList = [
+      { source: "number", target: "value" },
+      { source: "label",  target: "type" },
+    ];
+    const input = [
+      { number: "+1-555-0100", label: "work" },
+      { number: "+1-555-0200", label: "home" },
+    ];
+    expect(applyElementFields(input, elementFields, "inbound")).toEqual([
+      { value: "+1-555-0100", type: "work" },
+      { value: "+1-555-0200", type: "home" },
+    ]);
+  });
+});
+
+// ─── AT2: element_fields outbound reverse rename ─────────────────────────────
+
+describe("AT2: element_fields outbound per-element reverse rename (Spec: §3.5)", () => {
+  it("reverses field renames within each array element on outbound pass", () => {
+    const elementFields: FieldMappingList = [
+      { source: "number", target: "value" },
+      { source: "label",  target: "type" },
+    ];
+    const input = [
+      { value: "+1-555-0100", type: "work" },
+      { value: "+1-555-0200", type: "home" },
+    ];
+    expect(applyElementFields(input, elementFields, "outbound")).toEqual([
+      { number: "+1-555-0100", label: "work" },
+      { number: "+1-555-0200", label: "home" },
+    ]);
+  });
+});
+
+// ─── AT3: nested element_fields ──────────────────────────────────────────────
+
+describe("AT3: nested (self-referential) element_fields (Spec: §3.5)", () => {
+  it("applies nested element_fields to inner arrays", () => {
+    const elementFields: FieldMappingList = [
+      { source: "dept",    target: "deptName" },
+      {
+        source: "members", target: "members",
+        elementFields: [
+          { source: "userId", target: "id" },
+        ],
+      },
+    ];
+    const input = [
+      {
+        dept: "Engineering",
+        members: [{ userId: "u1" }, { userId: "u2" }],
+      },
+    ];
+    expect(applyElementFields(input, elementFields, "inbound")).toEqual([
+      {
+        deptName: "Engineering",
+        members: [{ id: "u1" }, { id: "u2" }],
+      },
+    ]);
+  });
+});
+
+// ─── AT4: non-array value passes through unchanged ────────────────────────────
+
+describe("AT4: non-array value passes through unchanged (Spec: §3.5)", () => {
+  it("returns null unchanged", () => {
+    const elementFields: FieldMappingList = [{ source: "a", target: "b" }];
+    expect(applyElementFields(null, elementFields, "inbound")).toBeNull();
+  });
+  it("returns string unchanged", () => {
+    const elementFields: FieldMappingList = [{ source: "a", target: "b" }];
+    expect(applyElementFields("not-an-array", elementFields, "inbound")).toBe("not-an-array");
+  });
+});
+
+// ─── AT5: applyMapping integrates element_fields automatically ────────────────
+
+describe("AT5: applyMapping applies element_fields via mapping list (Spec: §3.5)", () => {
+  it("inbound: renames top-level field and per-element fields", () => {
+    const mappings: FieldMappingList = [
+      {
+        source: "phoneNumbers",
+        target: "phones",
+        elementFields: [
+          { source: "number", target: "value" },
+          { source: "label",  target: "type" },
+        ],
+      },
+    ];
+    const data = {
+      phoneNumbers: [
+        { number: "+1-555-0100", label: "work" },
+        { number: "+1-555-0200", label: "home" },
+      ],
+    };
+    expect(applyMapping(data, mappings, "inbound")).toEqual({
+      phones: [
+        { value: "+1-555-0100", type: "work" },
+        { value: "+1-555-0200", type: "home" },
+      ],
+    });
+  });
+
+  it("outbound: reverse-renames top-level field and per-element fields", () => {
+    const mappings: FieldMappingList = [
+      {
+        source: "phoneNumbers",
+        target: "phones",
+        elementFields: [
+          { source: "number", target: "value" },
+          { source: "label",  target: "type" },
+        ],
+      },
+    ];
+    const canonical = {
+      phones: [
+        { value: "+1-555-0100", type: "work" },
+        { value: "+1-555-0200", type: "home" },
+      ],
+    };
+    expect(applyMapping(canonical, mappings, "outbound")).toEqual({
+      phoneNumbers: [
+        { number: "+1-555-0100", label: "work" },
+        { number: "+1-555-0200", label: "home" },
+      ],
+    });
   });
 });
 

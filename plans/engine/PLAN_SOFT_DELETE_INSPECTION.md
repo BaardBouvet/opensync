@@ -1,6 +1,6 @@
 # Soft Delete Field Inspection
 
-**Status:** proposed  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** S  
 **Domain:** Engine — deletion, config  

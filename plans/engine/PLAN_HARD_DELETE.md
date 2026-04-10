@@ -1,6 +1,6 @@
 # Hard Delete: Entity Absence and Element Absence Detection
 
-**Status:** proposed  
+**Status:** complete  
 **Date:** 2026-04-07  
 **Effort:** M  
 **Domain:** Engine — deletion, array expansion  

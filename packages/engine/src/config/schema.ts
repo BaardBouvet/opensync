@@ -53,6 +53,8 @@ export const IdentitySchema = z.union([
 export const ChannelDefSchema = z.object({
   id: z.string(),
   identity: IdentitySchema.optional(),
+  /** Spec: specs/field-mapping.md §8 — opt-in delete propagation (default: false). */
+  propagateDeletes: z.boolean().optional(),
 });
 
 export type IdentityGroup = z.infer<typeof IdentityGroupSchema>;
@@ -61,11 +63,25 @@ export const ChannelsYamlSchema = z.object({
   channels: z.array(ChannelDefSchema),
 });
 
+// ─── mappings/*.yaml — soft-delete field inspection ─────────────────────────
+
+/** Spec: specs/field-mapping.md §8.2 */
+export const SoftDeleteSchema = z.union([
+  z.object({
+    strategy: z.enum(["deleted_flag", "timestamp", "active_flag"]),
+    field: z.string(),
+  }),
+  z.object({
+    strategy: z.literal("expression"),
+    expression: z.string(),
+  }),
+]);
+
 // ─── mappings/*.yaml — field mappings ─────────────────────────────────────────
 
 export const FieldDirectionSchema = z.enum(["bidirectional", "forward_only", "reverse_only"]);
 
-export const FieldMappingEntrySchema = z.object({
+const FieldMappingEntrySchemaBase = z.object({
   source: z.string().optional(),
   target: z.string(),
   direction: FieldDirectionSchema.optional(),
@@ -93,6 +109,22 @@ export const FieldMappingEntrySchema = z.object({
    *  Receives `incoming` and `existing`; returns the new canonical value.
    *  Takes precedence over fieldStrategies / global strategy. */
   resolve: z.string().optional(),
+  /** Spec: specs/field-mapping.md §3.5 — when true, sort array elements before diff comparison.
+   *  Suppresses false updates when source API returns same elements in different order. */
+  sort_elements: z.boolean().optional(),
+});
+
+// element_fields is self-referential, so define the full schema using z.lazy.
+// TypeScript type annotation is required to break the inference cycle.
+export type FieldMappingEntry = z.infer<typeof FieldMappingEntrySchemaBase> & {
+  element_fields?: FieldMappingEntry[];
+};
+
+export const FieldMappingEntrySchema: z.ZodType<FieldMappingEntry> = FieldMappingEntrySchemaBase.extend({
+  /** Spec: specs/field-mapping.md §3.5 — per-element field mappings applied to every element
+   *  of this array field. Self-referential: supports arbitrarily deeply nested arrays.
+   *  Mutually exclusive with array_path on the same mapping entry. */
+  element_fields: z.lazy(() => z.array(FieldMappingEntrySchema)).optional(),
 });
 
 export const AssocPredicateMappingSchema = z.object({
@@ -132,7 +164,18 @@ export const MappingEntrySchema = z.object({
   })).optional(),
   order: z.boolean().optional(),
   order_linked_list: z.boolean().optional(),
-});
+  // Deletion primitives (specs/field-mapping.md §8)
+  /** Spec: specs/field-mapping.md §8.2 — soft-delete field inspection (flat members only). */
+  soft_delete: SoftDeleteSchema.optional(),
+  /** Spec: specs/field-mapping.md §8.3 — full-snapshot absence detection (flat members only). */
+  full_snapshot: z.boolean().optional(),
+}).refine(
+  (e) => !(e.soft_delete && (e.array_path || e.parent)),
+  { message: "soft_delete cannot be used on array expansion members (array_path or parent)" },
+).refine(
+  (e) => !(e.full_snapshot && (e.array_path || e.parent)),
+  { message: "full_snapshot cannot be used on array expansion members (array_path or parent)" },
+);
 
 export const MappingsFileSchema = z.object({
   mappings: z.array(MappingEntrySchema).optional(),
@@ -141,7 +184,8 @@ export const MappingsFileSchema = z.object({
 });
 
 export type MappingEntry = z.infer<typeof MappingEntrySchema>;
-export type FieldMappingEntry = z.infer<typeof FieldMappingEntrySchema>;
+// FieldMappingEntry is declared above (self-referential type requires manual declaration).
 export type AssocPredicateMappingEntry = z.infer<typeof AssocPredicateMappingSchema>;
 export type ParentFieldRef = z.infer<typeof ParentFieldRefSchema>;
+export type SoftDeleteEntry = z.infer<typeof SoftDeleteSchema>;
 // Note: ConflictConfig interface lives in loader.ts; ConflictConfigSchema is the Zod validator.

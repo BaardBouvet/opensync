@@ -194,28 +194,37 @@ canonical record and can reference other fields.
 ### 1.6 Passthrough columns
 
 ```yaml
-mappings:
-  - connector: erp
-    channel: contacts
-    entity: customers
-    passthrough: [raw_segment_code, internal_account_ref]
-    fields:
-      - source: name
-        target: customerName
+- connector: erp
+  channel: contacts
+  entity: customers
+  passthrough: [raw_segment_code, internal_account_ref]
+  fields:
+    - source: name
+      target: customerName
 ```
 
-Fields listed under `passthrough` are forwarded to the delta output without mapping to any target
-field. They are invisible to resolution and do not participate in conflict detection. Useful when
-downstream consumers of the sync pipeline need the original source row's metadata columns.
+Fields listed under `passthrough` are **preserved for same-source roundtrip write-back only**.
+They do not enter the canonical record, do not participate in resolution, and are never dispatched
+to any other connector.
 
-Passthrough columns appear under a connector-namespaced key in the delta record to avoid collisions
-with canonical fields:
+**Use case:** connectors that use a full-replace (PUT) write API require all fields to be present
+in the update payload, even fields that are not part of the canonical schema. Without `passthrough`,
+the engine's outbound payload only contains mapped fields — the connector would silently zero any
+unmapped field on write-back.
 
-```json
-{ "customerName": "Acme Corp", "_passthrough.erp.raw_segment_code": "A142" }
-```
+**Forward pass:** passthrough fields are read from `record.data` and stored in the source
+connector's `shadow_state` row under a `_pt.<fieldName>` reserved key. They are not added to the
+canonical record.
 
-**Status: designed, not yet implemented (OSI-mapping §3 "Passthrough columns").**
+**Reverse pass:** when the engine dispatches an update back to **the same connector**, the `_pt.*`
+shadow entries are merged into the outbound `UpdateRecord.data` after the reverse field mapping,
+so the connector receives its own fields back unchanged. They are stripped from outbound payloads
+to all other connectors.
+
+**If you want a field to reach a different connector**, declare it in the channel mapping with
+appropriate `direction`. Passthrough is a same-source preservation mechanism, not a routing tool.
+
+**Status: designed, not yet implemented (OSI-mapping §3 "Passthrough columns"). See `plans/engine/PLAN_PASSTHROUGH_COLUMNS.md`.**
 
 ---
 
@@ -432,39 +441,43 @@ conflict_resolution:
 
 ### 3.1 Embedded objects (flat parent mapping)
 
-One source record maps to a parent entity and a child entity whose fields are columns on the same
-row.
+One source record maps to a parent entity and one or more child entities whose fields are columns
+on the **same source row** (no array — a 1:1 sub-entity).
 
 ```yaml
-mappings:
-  - connector: erp
-    channel: contacts
-    entity: contacts
-    fields:
-      - source: email
-        target: email
+- name: erp_contacts           # name: required so child can reference it
+  connector: erp
+  channel: contacts
+  entity: contacts
+  fields:
+    - source: email
+      target: email
 
-  - connector: erp
-    channel: contacts
-    entity: addresses         # child entity
-    parent: contacts          # parent entity type
-    fields:
-      - source: ship_street
-        target: street
-      - source: ship_city
-        target: city
-      - source: ship_zip
-        target: zip
+- channel: contacts
+  entity: addresses             # child entity
+  parent: erp_contacts          # references name: above — inherits connector=erp, entity=contacts
+  fields:                       # fields from the SAME row as the parent record
+    - source: ship_street
+      target: street
+    - source: ship_city
+      target: city
+    - source: ship_zip
+      target: zip
 ```
 
-When the engine processes the ERP `contacts` record it produces two entities: a `contacts` entity
-and an `addresses` entity. The child entity's identity is derived from the parent's external ID with
-a deterministic suffix (`<parent_external_id>#address`).
+`parent:` references the `name:` of another mapping entry — the same convention as array
+expansion. The child inherits the parent's source connector and source entity. `connector:` on
+the child is optional and must match the inherited value if present.
+
+The child entity's external ID is derived deterministically: `<parent_external_id>#<child_entity>`.
+Multiple children may reference the same parent `name:`; each produces an independent canonical
+entity. Children may themselves be named and referenced as the parent of further embedded children
+(chaining is supported — all levels read from the root ancestor's source row).
 
 On the reverse pass, child entity fields are written back alongside parent fields in the same
 `UpdateRecord`.
 
-**Status: designed, not yet implemented (OSI-mapping §3 "Embedded objects").**
+**Status: designed, not yet implemented (OSI-mapping §3 "Embedded objects"). See `plans/engine/PLAN_EMBEDDED_OBJECTS.md`.**
 
 ---
 
@@ -641,9 +654,15 @@ same canonical ID). `element_key` is mutually exclusive with `scalar: true`.
 
 In `filter` expressions, `element` is the **raw scalar value** (not the wrapped object).
 
-Reverse pass (collapse) is not yet implemented for scalar arrays.
+**Reverse pass** (scalar collapse): `_scalarCollapseRebuild` reconstructs the full scalar array at
+collapse time. It loads all canonical children via `dbGetArrayChildrenByParent`, skips any child
+whose `dbGetCanonicalFields` returns `{}` (indicating a cascade-deleted element), and assembles the
+bare scalar array from each surviving child's `_value` canonical field. Element absence triggers
+cascade shadow deletion to all channel member connectors so deleted elements are reliably excluded
+from the next rebuild. `reverse_filter` receives the raw scalar value as `element`; `order: true`
+sorts by `_ordinal` ascending.
 
-**Status: forward pass implemented (OSI-mapping §3 "Scalar arrays"). Reverse pass planned follow-on. Tests: `array-expander.test.ts` SA1–SA9.**
+**Status: forward + reverse pass implemented (OSI-mapping §3 "Scalar arrays"). Tests: `array-expander.test.ts` SA1–SA9, `scalar-route-element.test.ts` SC1–SC8.**
 
 ---
 
@@ -743,6 +762,94 @@ root source connector.
 - Cycles in `parent` chains are detected at config load time and cause a fatal error.
 
 **Status: implemented. (OSI-mapping §3 "Deep nesting").**
+
+---
+
+### 3.5 Atomic arrays
+
+An array-valued field that should be owned by one source and replaced in its entirety when it
+changes — with no per-element tracking — can be mapped as a **plain field** without `array_path`.
+The engine stores the JSON blob in shadow state; normal resolution strategies (coalesce,
+last_modified, field_master) pick the winning source's entire array value; fan-out delivers the
+full array to other connectors as a field value.
+
+**When to use atomic vs `array_path`:**
+
+| Need | Use |
+|------|-----|
+| One source owns the whole array; API is full-replace | Atomic (no `array_path`) |
+| Items from multiple sources may coexist; per-element conflict resolution needed | `array_path` channel expansion |
+| Targets need item-level `insert`/`update` rather than full-array replace | `array_path` channel expansion |
+
+**Order-insensitive diff:** by default the diff is order-sensitive (`JSON.stringify` comparison).
+Two independent mechanisms switch it to order-insensitive (OR'd together):
+
+1. **Connector schema `unordered: true`** — on the array's `FieldType`:
+   ```typescript
+   // packages/sdk/src/types.ts
+   { type: "array", items: "string", unordered: true }
+   ```
+   When the source connector's schema declares `unordered: true`, the engine sorts elements
+   before comparing. Schema-guided recursion descends through `object` properties that
+   themselves contain unordered arrays.
+
+2. **Mapping `sort_elements: true`** — on a `FieldMappingEntry`:
+   ```yaml
+   fields:
+     - source: tags
+       target: tags
+       sort_elements: true
+   ```
+   Useful when the connector schema is absent, omits `unordered`, or the operator knows this
+   particular sync doesn't care about element order.
+
+**`element_fields`** — per-element field mapping without expansion:
+
+When multiple connectors represent the same logical array but with different element field
+names, `element_fields` applies rename/expression/direction mappings to every element object
+before the array is stored canonically — without expanding elements into separate child
+entities and without any per-element canonical ID allocation.
+
+```yaml
+- connector: erp
+  channel: orders
+  entity: orders
+  fields:
+    - source: lines
+      target: lines
+      sort_elements: true
+      element_fields:
+        - source: line_no
+          target: lineNumber
+        - source: unit_price
+          target: unitPrice
+
+- connector: crm
+  channel: orders
+  entity: orders
+  fields:
+    - source: lines
+      target: lines
+      direction: forward_only    # CRM receives the canonical array; never writes it upstream
+      sort_elements: true
+      element_fields:
+        - source: lineNum
+          target: lineNumber
+        - source: price
+          target: unitPrice
+```
+
+`element_fields` is self-referential: a nested array field within an element can carry its own
+`element_fields` and `sort_elements` at any depth. It supports the **transform** sub-set of
+field-mapping primitives: `source`/`target` rename, `source_path`, `expression`/`reverse_expression`,
+`default`, `direction`, and `sort_elements`. It does **not** support resolution primitives
+(`group`, `resolve`, `priority`, `reverseRequired`) — cross-source arbitration applies at the
+whole-array level, not per-element-field.
+
+`element_fields` is **mutually exclusive** with `array_path` on the same field entry — a
+config validation error is raised at load time. Both keys at every nesting level are validated.
+
+**Status: implemented (OSI-mapping §3 "Atomic arrays"). `sort_elements` + `unordered` wired in `diff.ts` via schema-guided recursive normaliser; `element_fields` applied in `applyMapping` / `applyElementFields` in `core/mapping.ts`. Tests: `diff.test.ts` AA1–AA5, `mapping.test.ts` EF1–EF8.**
 
 ---
 
@@ -912,6 +1019,93 @@ target with different filters) identity linking handles the merge once filters a
 
 ---
 
+### 5.4 Route combined
+
+A filtered mapping entry and an unfiltered mapping entry from different sources merge into the
+**same canonical entity** via identity linking. Example: ERP provides all contacts; CRM provides
+only "customer"-type contacts with enriched billing data. Both contribute to the same `contacts`
+channel.
+
+```yaml
+channels:
+  - name: contacts
+    members:
+
+      - connector: erp
+        entity: contacts
+        fields: [id, name, email]
+        # no filter — all ERP contacts flow through
+
+      - connector: crm
+        entity: crm_contacts
+        filter: "record.type === 'customer'"
+        reverse_filter: "record.status !== 'archived'"
+        fields:
+          - source: id
+            target: id
+          - source: name
+            target: name
+          - source: billingCode
+            target: billingCode
+```
+
+Each source writes its own shadow row independently; the CRM shadow is only present for records
+whose `filter` passes. Clearing the CRM shadow (when `filter` no longer matches) does not touch the
+ERP shadow — the canonical entity survives with the ERP fields. Ingest order does not affect the
+stable end-state. `reverse_filter` on the CRM member suppresses write-back for archived records
+without affecting the ERP member's dispatch.
+
+**Status: implemented and validated (OSI-mapping §9 "Route combined"). Tests: `scalar-route-element.test.ts` RC1–RC6.**
+
+---
+
+### 5.5 Element-set resolution
+
+When multiple sources contribute elements to the same nested array, the engine applies an ES
+resolution pre-step at collapse time before writing the merged array back to targets.
+
+**Element grouping:** patches from all contributing sources are grouped by their leaf `elementKey`.
+For each element key a winner is chosen:
+
+1. **`connectorPriorities`** — source with the numerically **lowest** priority number wins.
+2. **`last_modified` fieldStrategy** — if both sources provide per-field timestamps
+   (`record.fieldTimestamps`), the source with the more-recent timestamp for that field wins.
+3. **`fieldMasters`** — a per-field master declaration. For a given field, only patches from the
+   declared master connector contribute that field's value. Patches from non-master sources have
+   the field stripped before the element is applied. This applies even to single-patch batches
+   (no merging required).
+
+Config example:
+
+```yaml
+channels:
+  - name: order-lines
+    conflict:
+      connectorPriorities:
+        erp: 1
+        marketplace: 2
+      fieldStrategies:
+        qty:
+          strategy: coalesce
+      fieldMasters:
+        price: erp          # only ERP may set price; marketplace patches have price stripped
+    members:
+      - connector: erp
+        entity: orders
+        array_path: lines
+        element_key: lineNo
+        ...
+      - connector: marketplace
+        entity: order_items
+        array_path: items
+        element_key: sku
+        ...
+```
+
+**Status: implemented (OSI-mapping §9 "Element-set resolution"). ES pre-step in `_applyCollapseBatch`; `fieldMasters` single-patch filtering applied to all patch batches. Tests: `scalar-route-element.test.ts` ES1–ES7.**
+
+---
+
 ## 6. Ordering (Nested Arrays)
 
 All three ordering strategies depend on nested array expansion (§3.2). They are applied during
@@ -1062,19 +1256,40 @@ threading design that addresses the write-side of concurrent edits.
 
 ## 8. Deletion Primitives
 
+All deletion primitives are opt-in at the channel level. Enable fan-out deletion via the
+channel's `propagateDeletes` flag:
+
+```yaml
+channels:
+  - name: contacts
+    propagateDeletes: true   # engine calls entity.delete() on target connectors when a source record is deleted
+```
+
+Without `propagateDeletes: true`, deletions are still tombstoned in shadow state but are **not**
+pushed to target connectors. The default is `false`.
+
+---
+
 ### 8.1 Connector-reported deletion
 
 Connectors signal deletion in two ways:
 
-1. Emit a `NormalizedRecord` with `_deleted: true` during `read()`.
+1. Emit a `ReadRecord` with `deleted: true` during `read()`.
 2. Stop returning a previously-seen record (absence detection — only reliable in full-snapshot
-   connectors, not watermark-based).
+   connectors, not watermark-based; see §8.3).
 
-The engine propagates deletion signals through the canonical layer: if all sources delete an entity,
-the entity is tombstoned; if only one source deletes, force resolution falls back to remaining
-sources.
+The engine processes the `deleted` flag in `_processRecords` before echo detection and field
+mapping. When the flag is set (either directly by the connector or via soft-delete inspection §8.2):
 
-**Status: implemented.**
+1. The source shadow row is tombstoned: `deleted_at` is set to the current UTC timestamp.
+2. A `SyncAction = "delete"` result is pushed.
+3. If `propagateDeletes: true` on the channel (§8 intro), the engine calls `entity.delete()` on
+   each target connector that has a mapped identity for this canonical entity.
+
+A subsequent ingest of the same `externalId` without `deleted: true` is treated as a resurrection:
+`dbSetShadow` resets `deleted_at` to NULL and resumes normal processing.
+
+**Status: implemented.** Tests: `packages/engine/src/delete-propagation.test.ts` (T-DEL-01–T-DEL-08).
 
 ---
 
@@ -1093,12 +1308,17 @@ value as a deletion signal rather than requiring the connector to translate it:
 ```
 
 Strategies:
-- `deleted_flag`: `is_deleted IS NOT FALSE` → row is deleted
-- `timestamp`: `deleted_at IS NOT NULL` → row is deleted
-- `active_flag`: `is_active IS NOT TRUE` → row is deleted
-- `expression`: `(record) => !record.is_active || !!record.archived_at` → custom condition
+- `deleted_flag`: `record[field] !== false && record[field] != null` → row is deleted
+- `timestamp`: `record[field] != null` → row is deleted
+- `active_flag`: `record[field] !== true` → row is deleted (null counts as inactive)
+- `expression`: arbitrary JS expression; binding is `record`
 
-**Status: designed, not yet implemented (OSI-mapping §6 "Soft delete").**
+The engine evaluates the predicate on the raw stripped record before echo detection or field
+mapping, then sets `record.deleted = true`. The deletion then follows the same path as §8.1.
+
+**Status: implemented.** `soft_delete:` key in `MappingEntrySchema`; `compileSoftDeletePredicate`
+in `config/loader.ts`; pre-drop check in `_processRecords`.
+Tests: `packages/engine/src/delete-propagation.test.ts` (SD1–SD14).
 
 ---
 
@@ -1115,8 +1335,19 @@ as deleted.
     full_snapshot: true   # enables entity-absence deletion detection
 ```
 
-**Status: requires design work; depends on `written_state` (§7.1)
-(OSI-mapping §6 "Hard delete / derive_tombstones").**
+When `full_snapshot: true`:
+- The engine always calls `read()` with `since = undefined` (no watermark used).
+- After reading, it compares the returned ID set against all non-deleted shadow rows for
+  `(connectorId, entityName)`. Missing IDs are synthesised as `{ id, data: {}, deleted: true }`
+  and appended to the batch before `_processRecords`.
+- Safety guard: if more than 50% of known rows are absent, the circuit breaker trips instead
+  of propagating mass deletes (guards against empty reads from connector errors).
+- Empty batch guard: if the connector returns zero records but known rows exist, no deletions
+  are synthesised for this cycle.
+
+**Status: implemented.** `full_snapshot:` key in `MappingEntrySchema`; absence detection in
+`ingest()` before `_processRecords`.
+Tests: `packages/engine/src/delete-propagation.test.ts` (HD1–HD6).
 
 ---
 
@@ -1132,6 +1363,29 @@ fields:
 ```
 
 **Status: implemented. `isDispatchBlocked()` in `core/mapping.ts`; guard in `engine.ts` fan-out loop. Tests: `packages/engine/src/core/mapping.test.ts` (RR1–RR6).**
+
+---
+
+### 8.5 Element hard delete (nested arrays)
+
+When an array element was present in a previous read cycle but is absent from the current one,
+the engine treats the element as deleted and removes it from the collapsed record:
+
+1. After all child `ReadRecord`s have been processed for a given parent in the array expansion
+   path, the engine queries `dbGetChildShadowsForParent` to retrieve all previously-known
+   non-deleted child shadow rows for `(connectorId, entityName, parentCanonId, arrayPath)`.
+2. Any child that was NOT present in the current batch is marked deleted
+   (`dbMarkDeleted`) and a zero-patch collapse-rebuild is enqueued.
+3. The collapse batch calls `dbGetArrayChildrenByParent` to reconstruct the remaining live
+   elements, applies the outbound mapping for each, and writes the rebuilt array back to targets.
+
+This mechanism requires a watermark-based or full-snapshot connector and does **not** require
+`full_snapshot: true` on the member entry — array child absence is always detected once a parent
+record is returned by the connector.
+
+**Status: implemented.** Element absence detection in `_processRecords` array expansion path;
+empty-patch rebuild in `_applyCollapseBatch`.
+Tests: `packages/engine/src/delete-propagation.test.ts` (T-DEL-06, T-DEL-08).
 
 ---
 
@@ -1194,9 +1448,10 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Embedded objects (flat `parent`) | §3 | 🔶 conceptually supported; `parent:` syntax not implemented |
 | Nested arrays (`array` / `array_path`) | §3 | ✅ implemented — forward expand + reverse collapse; same-channel + cross-channel |
 | Deep nesting | §3 | ✅ implemented — `expansionChain`, multi-hop `array_parent_map`, cross-join |
-| Scalar arrays (`scalar: true`) | §3 | ✅ forward pass implemented; reverse (collapse) planned |
+| Scalar arrays (`scalar: true`) | §3.3 | ✅ forward + reverse collapse implemented; cascade element-absence deletion; `_value` preserved through pipeline. Tests: SA1–SA9, SC1–SC8 |
 | `source_path` extraction | §3 | 🔶 doable as expression; inline syntax not implemented |
 | Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
+| Atomic arrays (`sort_elements`, `element_fields`) | §3.5 | ✅ `sort_elements`/`unordered` schema-guided sort; `element_fields` per-element rename; Tests: AA1–AA5, EF1–EF8 |
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
 | FK reverse resolution | §4 | ✅ `direction: reverse_only` excludes injected PK from outbound dispatch |
 | Reference preservation after merge | §4 | ✅ identity_map preserves all connector IDs; association predicate remapping implemented |
@@ -1211,9 +1466,9 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Enriched cross-entity expressions | §5 | ❌ no cross-entity reference in resolution pass |
 | Per-field timestamps (`lastModifiedField`) | §5 | ✅ `record.fieldTimestamps` + per-field derivation; no config key needed |
 | `normalize` (precision-loss noop) | §5 | ✅ implemented — YAML `normalize` string form + TypeScript function form |
-| Soft-delete field inspection | §6 | 🔶 connector handles; engine-level `soft_delete:` config not built |
-| Hard delete / `derive_tombstones` | §6 | 🔶 proposed — `full_snapshot: true` entity-absence detection; not yet implemented |
-| Element hard delete (array) | §6 | 🔶 proposed — element-absence detection after collapse; not yet implemented |
+| Soft-delete field inspection | §6 | ✅ implemented — `soft_delete:` config key; four strategies; pre-drop check in `_processRecords` |
+| Hard delete / `derive_tombstones` | §6 | ✅ implemented — `full_snapshot: true`; entity-absence detection with 50% safety guard |
+| Element hard delete (array) | §6 | ✅ implemented — element-absence detection after array expansion; empty-patch collapse rebuild |
 | `reverse_required` | §6 | ✅ implemented — `reverseRequired: true` / `reverse_required: true` |
 | Source-level noop (`_base` / shadow diff) | §7 | ✅ implemented — see [safety.md](safety.md) |
 | Target-centric noop (`written_state`) | §7 | ✅ implemented — `written_state` table + `_dispatchToTarget` guard |
@@ -1223,8 +1478,8 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | CRDT ordinal ordering | §8 | ✅ implemented — `order: true` (`_ordinal` injection) |
 | CRDT linked-list ordering | §8 | ✅ implemented — `order_linked_list: true` (`_prev`/`_next`) |
 | Discriminator routing | §9 | ✅ implemented — per-member `filter` with distinct channel entries (§5.3) |
-| Route combined (routing + merging) | §9 | 🔶 filter + transitive identity available; combined pattern not validated |
-| Element-set resolution | §9 | 🔶 element filters available; cross-member set logic not designed |
+| Route combined (routing + merging) | §5.4 | ✅ validated; shadow independence confirmed; ingest-order invariance; `reverse_filter` suppression. Tests: RC1–RC6 |
+| Element-set resolution | §5.5 | ✅ ES pre-step + `fieldMasters` single-patch filtering in `_applyCollapseBatch`. Tests: ES1–ES7 |
 | Multi-entity mapping files | §10 | ✅ implemented |
 | `sources:` / `primary_key` metadata | §10 | ✅ `sources:` in field entries (lineage hint); entity schema from `getEntities()` |
 | Mapping-level priority / `last_modified` | §10 | 🔶 field-level works; mapping-level default not in config |
@@ -1236,18 +1491,18 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 
 | Category | Total | ✅ | 🔶 | ❌ |
 |----------|-------|----|----|-----|
-| Resolution strategies | 6 | 3 | 3 | 0 |
-| Identity & linking | 5 | 0 | 1 | 4 |
-| Nesting & structure | 6 | 0 | 2 | 4 |
-| References & FKs | 5 | 2 | 1 | 2 |
-| Field-level controls | 8 | 1 | 3 | 4 |
-| Deletion & tombstones | 4 | 0 | 1 | 3 |
+| Resolution strategies | 6 | 6 | 0 | 0 |
+| Identity & linking | 5 | 2 | 0 | 3 |
+| Nesting & structure | 7 | 4 | 3 | 0 |
+| References & FKs | 5 | 3 | 0 | 2 |
+| Field-level controls | 8 | 7 | 0 | 1 |
+| Deletion & tombstones | 4 | 4 | 0 | 0 |
 | Change detection & noop | 4 | 3 | 1 | 0 |
 | Ordering | 3 | 3 | 0 | 0 |
-| Routing & partitioning | 3 | 1 | 2 | 0 |
+| Routing & partitioning | 3 | 3 | 0 | 0 |
 | Mapping config & metadata | 4 | 2 | 1 | 1 |
 | Testing | 2 | 0 | 0 | 2 |
-| **Total** | **50** | **30** | **10** | **10** |
+| **Total** | **51** | **37** | **5** | **9** |
 
 ### Open gaps (as of 2026-04-08)
 
@@ -1265,7 +1520,4 @@ Most OSI-mapping primitives are now implemented. Remaining gaps:
 - **`defaultExpression`** (§5) — dynamic fallback; TypeScript API only.
 - **Enriched cross-entity expressions** (§5) — expressions that reference fields from a related
   entity during resolution.
-- **Soft-delete field inspection** (`soft_delete:` config key, §6).
-- **Hard delete / element absence detection** (§6, `full_snapshot: true`).
-- **Route-combined** (§9) — cross-source merge after discriminator split.
 - **Inline test cases** (§11).

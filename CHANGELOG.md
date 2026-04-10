@@ -12,6 +12,23 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Added
+- **Sync Engine — atomic array `sort_elements`** — new `sort_elements: true` field-mapping key sorts array elements before the noop diff check so that element reordering alone does not trigger a re-sync. Equivalent connector-schema flag: `{ type: "array", unordered: true }` on `FieldType`.
+- **Sync Engine — atomic array `element_fields`** — new self-referential `element_fields` field-mapping key renames fields within each element of an array field (both inbound and outbound) without expanding the array into child entity rows. Supports nested `element_fields` for deeply nested arrays.
+- **Sync Engine — `normalizeForDiff`** — schema-guided recursive normalizer: descends the `FieldType` tree sorting every `unordered: true` array at any nesting depth; used by `buildNormalizers` and reachable via the entity schema path. Tests AA1–AA5, AT1–AT5.
+
+### Added
+- **Sync Engine — delete propagation** — `propagateDeletes: true` on a channel config now fans out `entity.delete()` calls to all target connectors when a source record is deleted. Tombstones shadow rows with `deleted_at` and records a `"delete"` `SyncAction`.
+- **Sync Engine — soft-delete field inspection** — new `soft_delete:` mapping config key with four strategies (`deleted_flag`, `timestamp`, `active_flag`, `expression`). Predicate compiled at config-load time; evaluated before echo detection so the connector need not translate the signal.
+- **Sync Engine — full-snapshot hard delete** — new `full_snapshot: true` mapping config key. Engine always reads without a watermark and synthesises `deleted: true` records for any entity absent from the current snapshot. Safety guard trips if > 50% of known entities are absent.
+- **Sync Engine — array element hard delete** — after processing each array expansion batch, the engine detects missing child elements, tombstones their shadow rows, and triggers an empty-patch collapse-rebuild that strips the deleted element from the target array.
+- **Sync Engine — scalar array collapse** — `_scalarCollapseRebuild` rebuilds a bare scalar array (e.g. `["vip", "churned"]`) from canonical children at collapse time. Element absence triggers cascade shadow deletion to all member connectors so deleted elements are reliably excluded. `_value` is preserved through the expansion pipeline (`scalar: true` children are exempt from the `_`-prefix strip). Tests SC1–SC8.
+- **Sync Engine — route-combined** — validated that a filtered mapping entry (CRM, `filter: record.type === 'customer'`) and an unfiltered entry (ERP) correctly merge into the same canonical entity via identity linking. Shadow rows are independent; filter clearance from one source does not affect the other; ingest order is invariant; `reverse_filter` suppresses write-back without cross-source impact. Tests RC1–RC6.
+- **Sync Engine — element-set resolution** — ES resolution pre-step in `_applyCollapseBatch` groups patches from all contributing sources by leaf `elementKey` and applies `connectorPriorities`, per-field `last_modified` timestamps, and `fieldMasters` to select the winning value per field. `fieldMasters` filtering applies even to single-patch batches. Tests ES1–ES7.
+
+### Changed
+- **OSI-mapping primitive coverage** — GAP report and `specs/field-mapping.md` coverage table corrected and updated: References & FKs (3 items promoted ✅), routing (discriminator ✅, route-combined/element-set promoted 🔶), sources/primary_key metadata (✅), scalar array row corrected to 🔶 (reverse/collapse not yet implemented). Totals now **33✅ 8🔶 9❌**.
+
 ---
 
 ## [0.3.0] — 2026-04-10

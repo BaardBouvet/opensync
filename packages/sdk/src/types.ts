@@ -17,7 +17,17 @@ export type FieldType =
   | "boolean"
   | "null"
   | { type: "object"; properties?: Record<string, FieldDescriptor> }
-  | { type: "array"; items?: FieldType };
+  | {
+      type: "array";
+      items?: FieldType;
+      /** When true, element order is not significant.
+       *  The engine applies sort-before-compare during diff so that the same elements
+       *  returned in a different order do not register as a change.
+       *  Follows the pattern of `required` and `immutable`: only written when it carries meaning;
+       *  absent means order is significant (safe default).
+       *  Spec: specs/connector-sdk.md § Field Types */
+      unordered?: true;
+    };
 
 /**
  * Metadata for a single field on an entity or action payload.

@@ -14,13 +14,16 @@ import type {
 } from "@opensync/sdk";
 import { isRef } from "@opensync/sdk";
 import type { Db } from "./db/index.js";
-import type { ChannelConfig, ChannelMember, ConflictConfig, ResolvedConfig, IdentityGroup } from "./config/loader.js";
+import type { ChannelConfig, ChannelMember, ConflictConfig, ExpansionChainLevel, ResolvedConfig, IdentityGroup } from "./config/loader.js";
 import type { WiredConnectorInstance } from "./auth/context.js";
 import type { FieldData } from "./db/schema.js";
 import {
   dbGetCanonicalId,
   dbGetExternalId,
   dbLinkIdentity,
+  dbMarkDeleted,
+  dbGetChildShadowsForParent,
+  dbDeleteWrittenState,
   dbMergeCanonicals,
   dbMergeBlockedByNoLink,
   dbSplitCluster,
@@ -51,6 +54,7 @@ import {
   dbGetWrittenState,
   dbUpsertArrayParentMap,
   dbGetArrayParentMap,
+  dbGetArrayChildrenByParent,
   dbGetSourceCreatedAts,
 } from "./db/queries.js";
 import { applyMapping, isDispatchBlocked, computeFieldTimestamps } from "./core/mapping.js";
@@ -72,7 +76,7 @@ import {
 // ─── Public result types ──────────────────────────────────────────────────────
 
 // Spec: specs/sync-engine.md § RecordSyncResult
-export type SyncAction = "read" | "insert" | "update" | "skip" | "defer" | "error";
+export type SyncAction = "read" | "insert" | "update" | "skip" | "defer" | "error" | "delete";
 
 export interface RecordSyncResult {
   entity: string;
@@ -201,6 +205,12 @@ export class ConflictError extends Error {
     this.name = "ConflictError";
   }
 }
+
+// Spec: specs/field-mapping.md §8.3 — safety guard for full-snapshot absence detection.
+// If more than this fraction of known rows are absent from a full-snapshot batch, the
+// circuit breaker trips instead of synthesizing mass deletes (guards against empty reads
+// from connector errors or config mistakes).
+const FULL_SNAPSHOT_DELETE_RATIO_GUARD = 0.5;
 
 // ─── SyncEngine ───────────────────────────────────────────────────────────────
 
@@ -479,7 +489,9 @@ export class SyncEngine {
         const sourceRead = sourceEntity.read;
 
         const ingestTs = Date.now();
-        const since = opts?.fullSync
+        // Spec: specs/field-mapping.md §8.3 — full-snapshot members always read without
+        // a watermark so every cycle is a complete dataset (enables absence detection).
+        const since = (opts?.fullSync || sourceMember.fullSnapshot)
           ? undefined
           : dbGetWatermark(this.db, connectorId, sourceMember.entity);
 
@@ -500,6 +512,29 @@ export class SyncEngine {
             )
           ),
         ]);
+
+        // Spec: specs/field-mapping.md §8.3 — entity absence detection for full-snapshot members.
+        // Any shadow row not returned in this batch is synthesized as a deleted record.
+        // Safety guards: skip if batch is empty and known rows exist (connector error);
+        // trip the circuit breaker if > 50% of known rows are absent (corrupt snapshot).
+        if (sourceMember.fullSnapshot && !sourceMember.arrayPath) {
+          const returnedIds = new Set(allRecords.filter((r) => !r.deleted).map((r) => r.id));
+          const knownRows = dbGetAllShadowForEntity(this.db, connectorId, sourceMember.entity);
+          if (returnedIds.size > 0 || knownRows.length === 0) {
+            const missing = knownRows.filter((r) => !returnedIds.has(r.externalId));
+            const deletionRatio = knownRows.length > 0 ? missing.length / knownRows.length : 0;
+            if (deletionRatio > FULL_SNAPSHOT_DELETE_RATIO_GUARD) {
+              const breaker = this._breaker(channelId);
+              breaker.trip(
+                `full_snapshot absence detection: ${missing.length}/${knownRows.length} rows absent (>${(FULL_SNAPSHOT_DELETE_RATIO_GUARD * 100).toFixed(0)}% threshold)`,
+              );
+            } else {
+              for (const row of missing) {
+                allRecords.push({ id: row.externalId, data: {}, deleted: true });
+              }
+            }
+          }
+        }
 
         const results = await this._processRecords(
           channelId,
@@ -548,13 +583,14 @@ export class SyncEngine {
           dbSetWatermark(this.db, connectorId, sourceMember.entity, newWatermark);
         }
 
-        const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0 };
+        const counts = { inserted: 0, updated: 0, skipped: 0, deferred: 0, errors: 0, deleted: 0 };
         for (const r of results) {
           if (r.action === "insert") counts.inserted++;
           else if (r.action === "update") counts.updated++;
           else if (r.action === "skip") counts.skipped++;
           else if (r.action === "defer") counts.deferred++;
           else if (r.action === "error") counts.errors++;
+          else if (r.action === "delete") counts.deleted++;
         }
 
         dbLogSyncRun(this.db, {
@@ -1860,6 +1896,20 @@ export class SyncEngine {
     const results: RecordSyncResult[] = [];
     let hadErrors = false;
 
+    // Collapse patch accumulator — declared here so both the array expansion path and the
+    // standard path can contribute to it. Processed at the end of each path before returning.
+    // Spec: specs/field-mapping.md §3.2/§3.4 — collapse patches, §8 — element-absence patches.
+    // Spec: PLAN_ELEMENT_SET_RESOLUTION.md §3.1, PLAN_SCALAR_ARRAY_COLLAPSE.md
+    type CollapsePatch = {
+      childCanonId: string;
+      resolved: Record<string, unknown>;
+      hops: { arrayPath: string; elementKey: string }[];
+      sourceId: string;
+      sourceConnectorId: string;        // for cross-source element arbitration
+      fieldTs?: Record<string, number>; // per-field timestamps for last_modified strategy
+    };
+    const pendingCollapsePatches = new Map<ChannelMember, Map<string, CollapsePatch[]>>();
+
     // Spec: specs/field-mapping.md §3.2 — array child member expansion path.
     // When sourceMember has an arrayPath the records arriving here are PARENT records
     // (e.g. orders) that must be expanded into individual child entities (e.g. order lines)
@@ -1922,7 +1972,14 @@ export class SyncEngine {
 
         for (const childRecord of childRecords) {
           const childRaw = childRecord.data as Record<string, unknown>;
-          const childStripped = Object.fromEntries(Object.entries(childRaw).filter(([k]) => !k.startsWith("_")));
+          // Spec: specs/field-mapping.md §3.3 — scalar child records carry only _value (and _ordinal
+          // for CRDT-ordered arrays).  These are synthetic keys injected by the expansion step;
+          // do NOT strip them alongside ordinary _-prefixed connector metadata.
+          const leafChainLevel = chain[chain.length - 1];
+          const isScalarLeaf = leafChainLevel?.scalar === true;
+          const childStripped = isScalarLeaf
+            ? { ...childRaw }
+            : Object.fromEntries(Object.entries(childRaw).filter(([k]) => !k.startsWith("_")));
           const childCanonical = applyMapping(childStripped, sourceMember.inbound, "inbound");
 
           // Spec: specs/field-mapping.md §3.4 — derive canonical IDs for every hop and record them.
@@ -1995,6 +2052,50 @@ export class SyncEngine {
 
           for (const o of childOutcomes) results.push(o.result);
         }
+
+        // Spec: specs/field-mapping.md §8 (element absence) — detect elements present in
+        // the previous expansion but absent from this one. Delete their source shadow rows
+        // and queue an empty-patch collapse so the target array is rewritten without them.
+        const leafArrayPath = chain[chain.length - 1]!.arrayPath;
+        const currentElementIds = new Set(childRecords.map((cr) => cr.id));
+        const prevElements = dbGetChildShadowsForParent(
+          this.db, sourceMember.connectorId, sourceMember.entity, parentCanonId, leafArrayPath,
+        );
+        for (const prev of prevElements) {
+          if (!currentElementIds.has(prev.externalId)) {
+            dbDeleteShadow(this.db, sourceMember.connectorId, sourceMember.entity, prev.externalId);
+            // Spec: PLAN_SCALAR_ARRAY_COLLAPSE.md §3.5 — cascade shadow deletion to ALL
+            // channel members so dbGetCanonicalFields returns {} for the absent child,
+            // ensuring the scalar rebuild (and object rebuild) correctly skips it.
+            for (const member of channel.members) {
+              if (member.connectorId === sourceMember.connectorId) continue;
+              const memberExtId = dbGetExternalId(this.db, prev.canonicalId, member.connectorId);
+              if (memberExtId) {
+                dbDeleteShadow(this.db, member.connectorId, member.entity, memberExtId);
+              }
+            }
+            for (const ctMember of collapseTargets) {
+              const perTarget = pendingCollapsePatches.get(ctMember) ?? new Map<string, CollapsePatch[]>();
+              if (!perTarget.has(parentCanonId)) {
+                perTarget.set(parentCanonId, []);
+                pendingCollapsePatches.set(ctMember, perTarget);
+              }
+            }
+          }
+        }
+      }
+
+      // Dispatch element-absence collapse batches for the array expansion path.
+      for (const [ctMember, perParent] of pendingCollapsePatches) {
+        const tw = this.wired.get(ctMember.connectorId);
+        if (!tw) continue;
+        for (const [rootCanonId, patches] of perParent) {
+          const { results: batchResults, hasError } = await this._applyCollapseBatch(
+            ctMember, tw, rootCanonId, patches, batchId, ingestTs,
+          );
+          results.push(...batchResults);
+          if (hasError) hadErrors = true;
+        }
       }
 
       breaker.recordResult(hadErrors);
@@ -2002,15 +2103,64 @@ export class SyncEngine {
     }
 
     // ── Standard (non-expansion) path ─────────────────────────────────────────
-    // Accumulator for collapse batches: collapseTargetMember → parentCanonId → patches
-    type CollapsePatch = { childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string };
-    const pendingCollapsePatches = new Map<ChannelMember, Map<string, CollapsePatch[]>>();
 
     for (const record of records) {
       const raw = record.data as Record<string, unknown>;
       // Spec: specs/field-mapping.md §4.1 — inject record.id when idField is declared
       const idBase = sourceMember.idField ? { [sourceMember.idField]: record.id } : {};
       const stripped = Object.fromEntries(Object.entries({ ...idBase, ...raw }).filter(([k]) => !k.startsWith("_")));
+
+      // Spec: specs/field-mapping.md §8.2 — soft-delete field inspection.
+      // Evaluated on the raw stripped record before echo detection or field mapping.
+      // Sets isDeleted = true if the predicate matches; the record then follows the
+      // deletion path regardless of whether record.deleted was already set.
+      const isDeleted = record.deleted === true ||
+        (sourceMember.softDeletePredicate != null && sourceMember.softDeletePredicate(stripped));
+
+      // Spec: specs/field-mapping.md §8 / specs/sync-engine.md § Delete Propagation
+      // When a record is flagged as deleted (explicit signal or soft-delete field):
+      //  1. Mark the shadow row with deleted_at (tombstone).
+      //  2. If channel.propagateDeletes, fan-out delete to target connectors.
+      //  3. Push a "delete" result and skip the rest of the pipeline.
+      if (isDeleted) {
+        const existingShadowRow = dbGetShadowRow(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
+        if (existingShadowRow) {
+          dbMarkDeleted(this.db, sourceMember.connectorId, sourceMember.entity, record.id);
+          if (channel.propagateDeletes) {
+            const canonId = dbGetCanonicalId(this.db, sourceMember.connectorId, record.id);
+            if (canonId) {
+              for (const targetMember of regularTargets) {
+                const tw = this.wired.get(targetMember.connectorId);
+                if (!tw) continue;
+                const targetExternalId = dbGetExternalId(this.db, canonId, targetMember.connectorId);
+                if (!targetExternalId) continue;
+                const targetEntityDef = tw.entities.find((e) => e.name === targetMember.entity);
+                if (!targetEntityDef?.delete) continue;
+                try {
+                  for await (const deleteResult of targetEntityDef.delete(
+                    (async function* () { yield targetExternalId; })(),
+                    tw.ctx,
+                  )) {
+                    if (deleteResult.error) {
+                      results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: targetExternalId, error: deleteResult.error });
+                      hadErrors = true;
+                    } else {
+                      dbMarkDeleted(this.db, targetMember.connectorId, targetMember.entity, targetExternalId);
+                      dbDeleteWrittenState(this.db, targetMember.connectorId, targetMember.entity, canonId);
+                      results.push({ entity: sourceMember.entity, action: "delete", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: targetExternalId });
+                    }
+                  }
+                } catch (err) {
+                  results.push({ entity: sourceMember.entity, action: "error", sourceId: record.id, targetConnectorId: targetMember.connectorId, targetId: targetExternalId, error: String(err) });
+                  hadErrors = true;
+                }
+              }
+            }
+          }
+        }
+        results.push({ entity: sourceMember.entity, action: "delete", sourceId: record.id, targetConnectorId: "", targetId: record.id });
+        continue;
+      }
 
       // Spec: specs/field-mapping.md §5.1 — record-level filter on flat (non-array) members.
       // Applied to the raw stripped record before inbound mapping.
@@ -2204,6 +2354,8 @@ export class SyncEngine {
           resolved: canonical,
           hops: walkResult.hops,
           sourceId: record.id,
+          sourceConnectorId: sourceMember.connectorId,
+          fieldTs: fieldTimestamps ?? undefined,
         });
         perTarget.set(walkResult.rootCanonId, collapsePatches);
         pendingCollapsePatches.set(ctMember, perTarget);
@@ -2312,7 +2464,7 @@ export class SyncEngine {
     collapseTarget: ChannelMember,
     targetWired: WiredConnectorInstance,
     rootCanonId: string,
-    patches: Array<{ childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string }>,
+    patches: Array<{ childCanonId: string; resolved: Record<string, unknown>; hops: { arrayPath: string; elementKey: string }[]; sourceId: string; sourceConnectorId: string; fieldTs?: Record<string, number> }>,
     batchId: string,
     ingestTs: number,
   ): Promise<{ results: RecordSyncResult[]; hasError: boolean }> {
@@ -2360,51 +2512,142 @@ export class SyncEngine {
     const patchedData: Record<string, unknown> = JSON.parse(JSON.stringify(parentData));
     const chain = collapseTarget.expansionChain ?? [{ arrayPath: collapseTarget.arrayPath!, elementKey: collapseTarget.elementKey }];
 
-    const applied: typeof patches = [];
-    for (const patch of patches) {
-      const localData = applyMapping(patch.resolved, collapseTarget.outbound, "outbound");
-      // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.3 — reverse_filter: check the current
-      // element in parentData before patching.  Mismatch → skip with warning.
-      if (collapseTarget.elementReverseFilter) {
-        const lastHop = patch.hops[patch.hops.length - 1];
-        if (lastHop) {
-          const leafFieldName = chain.find((l) => l.arrayPath === lastHop.arrayPath)?.elementKey;
-          const arr = (() => {
-            let node: unknown = patchedData;
-            for (const hop of patch.hops.slice(0, -1)) {
-              const fieldName = chain.find((l) => l.arrayPath === hop.arrayPath)?.elementKey;
-              if (!Array.isArray((node as Record<string, unknown>)[hop.arrayPath])) return undefined;
-              const a = (node as Record<string, unknown>)[hop.arrayPath] as unknown[];
-              const idx = a.findIndex((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[fieldName ?? ""]) === hop.elementKey);
-              if (idx === -1) return undefined;
-              node = a[idx];
+    // Spec: PLAN_ELEMENT_SET_RESOLUTION.md §3.2 — before patching, resolve cross-source
+    // conflicts when multiple patches target the same element key.  Group by leaf element key
+    // and arbitrate using connectorPriorities, fieldMasters, and last_modified fieldStrategies.
+    if (patches.length > 1) {
+      const byElemKey = new Map<string, typeof patches>();
+      for (const p of patches) {
+        const key = p.hops[p.hops.length - 1]?.elementKey ?? "";
+        const g = byElemKey.get(key) ?? [];
+        g.push(p);
+        byElemKey.set(key, g);
+      }
+      const resolved: typeof patches = [];
+      const prios = this.conflictConfig.connectorPriorities ?? {};
+      for (const group of byElemKey.values()) {
+        if (group.length <= 1) { resolved.push(...group); continue; }
+        // Sort lowest-priority first so highest-priority overwrites last
+        const sorted = [...group].sort(
+          (a, b) => (prios[b.sourceConnectorId] ?? Infinity) - (prios[a.sourceConnectorId] ?? Infinity),
+        );
+        const mergedResolved: Record<string, unknown> = {};
+        const mergedFieldTs: Record<string, number> = {};
+        for (const p of sorted) {
+          for (const [field, value] of Object.entries(p.resolved)) {
+            const master = this.conflictConfig.fieldMasters?.[field];
+            const strategy = this.conflictConfig.fieldStrategies?.[field];
+            if (master !== undefined) {
+              if (p.sourceConnectorId === master) mergedResolved[field] = value;
+            } else if (strategy?.strategy === "last_modified") {
+              const existingTs = mergedFieldTs[field] ?? -Infinity;
+              const incoming = p.fieldTs?.[field] ?? -Infinity;
+              if (incoming > existingTs) { mergedResolved[field] = value; mergedFieldTs[field] = incoming; }
+            } else {
+              mergedResolved[field] = value;
             }
-            return Array.isArray((node as Record<string, unknown>)[lastHop.arrayPath])
-              ? (node as Record<string, unknown>)[lastHop.arrayPath] as unknown[]
-              : undefined;
-          })();
-          const element = arr?.find((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[leafFieldName ?? ""]) === lastHop.elementKey);
-          if (element !== undefined && !collapseTarget.elementReverseFilter(element, patchedData, 0)) {
-            console.warn(`[opensync] collapse: reverse_filter rejected patch for element "${lastHop.elementKey}" at "${lastHop.arrayPath}" — skipping`);
-            results.push({ entity: collapseTarget.entity, action: "skip", sourceId: patch.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
-            continue;
           }
         }
+        resolved.push({ ...sorted[sorted.length - 1]!, resolved: mergedResolved, fieldTs: mergedFieldTs });
       }
-      const ok = patchNestedElement(patchedData, patch.hops, chain, localData);
-      if (ok) applied.push(patch);
+      patches = resolved;
     }
 
-    if (applied.length === 0) {
-      for (const p of patches) {
-        results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+    // Spec: PLAN_ELEMENT_SET_RESOLUTION.md §3.2 (fieldMasters, single-patch) — apply
+    // fieldMasters filtering to every patch individually so a non-master source cannot
+    // overwrite a master-owned field even in the single-patch (no merge) case.
+    if (this.conflictConfig.fieldMasters && Object.keys(this.conflictConfig.fieldMasters).length > 0) {
+      const masters = this.conflictConfig.fieldMasters;
+      patches = patches.map((patch) => {
+        const filtered: Record<string, unknown> = {};
+        for (const [field, value] of Object.entries(patch.resolved)) {
+          const master = masters[field];
+          if (master === undefined || master === patch.sourceConnectorId) filtered[field] = value;
+        }
+        return { ...patch, resolved: filtered };
+      });
+    }
+
+    // Spec: PLAN_SCALAR_ARRAY_COLLAPSE.md — scalar arrays use a full set-rebuild strategy;
+    // no per-element patching.  The collapsed array is rebuilt from canonical children.
+    let applied: typeof patches;
+    if (collapseTarget.scalar) {
+      applied = this._scalarCollapseRebuild(collapseTarget, patchedData, chain, rootCanonId, patches);
+    } else {
+      applied = [];
+      for (const patch of patches) {
+        const localData = applyMapping(patch.resolved, collapseTarget.outbound, "outbound");
+        // Spec: plans/engine/PLAN_ELEMENT_FILTER.md §3.3 — reverse_filter: check the current
+        // element in parentData before patching.  Mismatch → skip with warning.
+        if (collapseTarget.elementReverseFilter) {
+          const lastHop = patch.hops[patch.hops.length - 1];
+          if (lastHop) {
+            const leafFieldName = chain.find((l) => l.arrayPath === lastHop.arrayPath)?.elementKey;
+            const arr = (() => {
+              let node: unknown = patchedData;
+              for (const hop of patch.hops.slice(0, -1)) {
+                const fieldName = chain.find((l) => l.arrayPath === hop.arrayPath)?.elementKey;
+                if (!Array.isArray((node as Record<string, unknown>)[hop.arrayPath])) return undefined;
+                const a = (node as Record<string, unknown>)[hop.arrayPath] as unknown[];
+                const idx = a.findIndex((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[fieldName ?? ""]) === hop.elementKey);
+                if (idx === -1) return undefined;
+                node = a[idx];
+              }
+              return Array.isArray((node as Record<string, unknown>)[lastHop.arrayPath])
+                ? (node as Record<string, unknown>)[lastHop.arrayPath] as unknown[]
+                : undefined;
+            })();
+            const element = arr?.find((el) => el !== null && typeof el === "object" && !Array.isArray(el) && String((el as Record<string, unknown>)[leafFieldName ?? ""]) === lastHop.elementKey);
+            if (element !== undefined && !collapseTarget.elementReverseFilter(element, patchedData, 0)) {
+              console.warn(`[opensync] collapse: reverse_filter rejected patch for element "${lastHop.elementKey}" at "${lastHop.arrayPath}" — skipping`);
+              results.push({ entity: collapseTarget.entity, action: "skip", sourceId: patch.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+              continue;
+            }
+          }
+        }
+        const ok = patchNestedElement(patchedData, patch.hops, chain, localData);
+        if (ok) applied.push(patch);
       }
-      return { results, hasError: false };
+
+      if (applied.length === 0) {
+        // Spec: specs/field-mapping.md §8 (element absence) — empty patch list means
+        // "rebuild the array from current canonical state without any new patches."
+        // This branch is taken when element-absence detection triggers collapse with no
+        // new element data (the deleted element's shadow is already gone).
+        if (patches.length === 0) {
+          // Rebuild the leaf array entirely from remaining canonical children.
+          const leafPath = chain[chain.length - 1]!.arrayPath;
+          const childRows = dbGetArrayChildrenByParent(this.db, rootCanonId, leafPath);
+          const rebuiltArray: Record<string, unknown>[] = [];
+          for (const { childCanonId } of childRows) {
+            const fields = dbGetCanonicalFields(this.db, childCanonId);
+            if (Object.keys(fields).length === 0) continue; // no contribution — skip
+            const localData = applyMapping(fields, collapseTarget.outbound, "outbound");
+            rebuiltArray.push(localData);
+          }
+          // Traverse patchedData to set the leaf array
+          let node: Record<string, unknown> = patchedData;
+          for (let i = 0; i < chain.length - 1; i++) {
+            const hop = chain[i]!;
+            if (!node[hop.arrayPath]) node[hop.arrayPath] = [];
+            // For intermediate hops we need to operate on the element — not supported in MVP;
+            // single-level nesting covers the common case.
+            break;
+          }
+          node[leafPath] = rebuiltArray;
+          // Fall through to write-back below
+        } else {
+          for (const p of patches) {
+            results.push({ entity: collapseTarget.entity, action: "skip", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+          }
+          return { results, hasError: false };
+        }
+      }
     }
 
     // Spec: specs/field-mapping.md §6 — apply ordering to the leaf array after all patches,
-    // before write-back to the target connector.
-    if (collapseTarget.orderBy || collapseTarget.crdtOrder || collapseTarget.crdtLinkedList) {
+    // before write-back to the target connector.  Skip for scalar (ordering handled in rebuild).
+    if (!collapseTarget.scalar && (collapseTarget.orderBy || collapseTarget.crdtOrder || collapseTarget.crdtLinkedList)) {
       applySortToLeafArray(patchedData, chain, collapseTarget);
     }
 
@@ -2448,7 +2691,99 @@ export class SyncEngine {
     for (const p of applied) {
       results.push({ entity: collapseTarget.entity, action: "update", sourceId: p.sourceId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
     }
+    // Element-absence triggered collapse (no patches): emit a single update result
+    // with sourceId = rootExternalId to indicate the parent was rewritten.
+    if (patches.length === 0) {
+      results.push({ entity: collapseTarget.entity, action: "update", sourceId: rootExternalId, targetConnectorId: collapseTarget.connectorId, targetId: rootExternalId });
+    }
     return { results, hasError: false };
+  }
+
+  /** Spec: PLAN_SCALAR_ARRAY_COLLAPSE.md §3.1 — rebuild a scalar array from canonical
+   * children rather than applying per-element patches.  Mutates patchedData in place.
+   * Returns patches (treated as all applied) or [] for empty-patch (uses element-absence branch). */
+  private _scalarCollapseRebuild(
+    collapseTarget: ChannelMember,
+    patchedData: Record<string, unknown>,
+    chain: ExpansionChainLevel[],
+    rootCanonId: string,
+    patches: Array<{ childCanonId: string; hops: { arrayPath: string; elementKey: string }[]; sourceId: string; sourceConnectorId: string; resolved: Record<string, unknown>; fieldTs?: Record<string, number> }>,
+  ): typeof patches {
+    type ParentEntry = {
+      parentCanonId: string;
+      leafPath: string;
+      intermedHops: { arrayPath: string; elementKey: string }[];
+    };
+    const parents = new Map<string, ParentEntry>();
+
+    if (patches.length === 0) {
+      // Element-absence: rebuild from rootCanonId's direct children at the leaf array path.
+      const leafPath = chain[chain.length - 1]!.arrayPath;
+      parents.set(rootCanonId, { parentCanonId: rootCanonId, leafPath, intermedHops: [] });
+    } else {
+      for (const patch of patches) {
+        // Use the childCanonId as the group key (one rebuild per unique parent).
+        const parentRow = dbGetArrayParentMap(this.db, patch.childCanonId);
+        const parentCanonId = parentRow?.parentCanonId ?? rootCanonId;
+        const leafPath = parentRow?.arrayPath ?? chain[chain.length - 1]!.arrayPath;
+        if (!parents.has(parentCanonId)) {
+          // intermedHops are the hops before the final (leaf) hop — used for multi-level arrays.
+          parents.set(parentCanonId, { parentCanonId, leafPath, intermedHops: patch.hops.slice(0, -1) });
+        }
+      }
+    }
+
+    for (const { parentCanonId, leafPath, intermedHops } of parents.values()) {
+      // Navigate to the container object that holds the scalar leaf array.
+      let container: Record<string, unknown> = patchedData;
+      let navOk = true;
+      for (const hop of intermedHops) {
+        const hopChain = chain.find((l) => l.arrayPath === hop.arrayPath);
+        const fieldName = hopChain?.elementKey ?? "";
+        const arr = container[hop.arrayPath];
+        if (!Array.isArray(arr)) { navOk = false; break; }
+        const idx = (arr as unknown[]).findIndex(
+          (el) =>
+            el !== null && typeof el === "object" && !Array.isArray(el) &&
+            String((el as Record<string, unknown>)[fieldName]) === hop.elementKey,
+        );
+        if (idx === -1) { navOk = false; break; }
+        container = (arr as Record<string, unknown>[])[idx]!;
+      }
+      if (!navOk) continue;
+
+      // Load canonical children for this parent and build the scalar array.
+      // Use dbGetCanonicalFields to check liveness: if a child's canonical is empty
+      // (all contributing shadows deleted, e.g. via element-absence), it is skipped.
+      // Spec: PLAN_SCALAR_ARRAY_COLLAPSE.md §3.5 — element deletion via empty-patch.
+      const childRows = dbGetArrayChildrenByParent(this.db, parentCanonId, leafPath);
+      const withOrdinals: Array<{ val: unknown; ordinal: number }> = [];
+      for (const { childCanonId } of childRows) {
+        const fields = dbGetCanonicalFields(this.db, childCanonId);
+        if (Object.keys(fields).length === 0) continue;
+        const localData = applyMapping(fields, collapseTarget.outbound, "outbound");
+        // Scalar values are stored as _value in canonical records.
+        const scalarVal = localData["_value"] ?? fields["_value"];
+        if (scalarVal === undefined) continue;
+        if (
+          collapseTarget.elementReverseFilter &&
+          !collapseTarget.elementReverseFilter(scalarVal, patchedData, 0)
+        ) continue;
+        const ordinal =
+          typeof fields["_ordinal"] === "number" ? (fields["_ordinal"] as number) : Infinity;
+        withOrdinals.push({ val: scalarVal, ordinal });
+      }
+
+      if (collapseTarget.crdtOrder) {
+        withOrdinals.sort((a, b) => a.ordinal - b.ordinal);
+      }
+
+      container[leafPath] = withOrdinals.map((x) => x.val);
+    }
+
+    // Empty-patch → return [] so the element-absence result-emission branch fires.
+    // Non-empty patches → all treated as applied.
+    return patches.length === 0 ? [] : [...patches];
   }
 }
 

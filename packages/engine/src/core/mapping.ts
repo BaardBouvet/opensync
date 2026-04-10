@@ -40,7 +40,8 @@ export function applyMapping(
         }
       }
       if (value !== undefined) {
-        result[m.target] = value;
+        // Spec: specs/field-mapping.md §3.5 — apply element_fields to each array element
+        result[m.target] = m.elementFields ? applyElementFields(value, m.elementFields, pass) : value;
       }
     } else {
       if (dir === "reverse_only") continue;
@@ -55,12 +56,30 @@ export function applyMapping(
       } else {
         const sourceKey = m.source ?? m.target;
         if (Object.prototype.hasOwnProperty.call(data, m.target)) {
-          result[sourceKey] = data[m.target];
+          const outVal = data[m.target];
+          // Spec: specs/field-mapping.md §3.5 — apply element_fields to each array element
+          result[sourceKey] = m.elementFields ? applyElementFields(outVal, m.elementFields, pass) : outVal;
         }
       }
     }
   }
   return result;
+}
+
+/** Apply per-element field mappings to each element of an array field.
+ *  Recursively handles nested element_fields via applyMapping (which internally
+ *  calls applyElementFields for any mapping entry that has elementFields set).
+ *  Spec: specs/field-mapping.md §3.5 */
+export function applyElementFields(
+  arrayValue: unknown,
+  elementFields: FieldMappingList,
+  pass: "inbound" | "outbound",
+): unknown {
+  if (!Array.isArray(arrayValue)) return arrayValue;
+  return arrayValue.map((el) => {
+    if (typeof el !== "object" || el === null || Array.isArray(el)) return el;
+    return applyMapping(el as Record<string, unknown>, elementFields, pass);
+  });
 }
 
 /** Returns true when any field with reverseRequired:true resolves to null/undefined in the

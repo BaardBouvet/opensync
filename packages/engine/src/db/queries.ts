@@ -470,6 +470,47 @@ export function dbDeleteShadow(
   ).run(connectorId, entityName, externalId);
 }
 
+/** Spec: specs/field-mapping.md §8 — mark a shadow row as deleted (tombstone).
+ * Sets deleted_at to the current time. The row is retained for audit and rollback.
+ * A subsequent normal ingest of the same externalId (resurrection) resets deleted_at via dbSetShadow. */
+export function dbMarkDeleted(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  externalId: string,
+): void {
+  db.prepare(
+    `UPDATE shadow_state
+        SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE connector_id = ? AND entity_name = ? AND external_id = ?`,
+  ).run(connectorId, entityName, externalId);
+}
+
+/** Spec: specs/field-mapping.md §8 (element absence) — return all non-deleted child shadow
+ * rows that are linked to `parentCanonId` via `array_parent_map` at the given `arrayPath`.
+ * Used to detect elements present in the previous expansion but absent from the current one. */
+export function dbGetChildShadowsForParent(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  parentCanonId: string,
+  arrayPath: string,
+): Array<{ externalId: string; canonicalId: string }> {
+  return db
+    .prepare<{ external_id: string; canonical_id: string }>(
+      `SELECT ss.external_id, ss.canonical_id
+         FROM shadow_state ss
+         JOIN array_parent_map apm ON apm.child_canon_id = ss.canonical_id
+        WHERE ss.connector_id     = ?
+          AND ss.entity_name      = ?
+          AND apm.parent_canon_id = ?
+          AND apm.array_path      = ?
+          AND ss.deleted_at IS NULL`,
+    )
+    .all(connectorId, entityName, parentCanonId, arrayPath)
+    .map((r) => ({ externalId: r.external_id, canonicalId: r.canonical_id }));
+}
+
 /**
  * Returns a map of { connectorId → epoch ms } for every source that has a non-null
  * created_at stored in shadow_state for the given canonical entity.
@@ -578,7 +619,7 @@ export function dbLogTransaction(
     entityName: string;
     externalId: string;
     canonicalId: string;
-    action: "insert" | "update";
+    action: "insert" | "update" | "delete";
     dataBefore: FieldData | undefined;
     dataAfter: FieldData;
   },
@@ -891,6 +932,20 @@ export function dbGetWrittenState(
   return JSON.parse(row.data) as Record<string, unknown>;
 }
 
+/** Spec: specs/field-mapping.md §8 (element absence) — remove the written_state row for a
+ * canonical ID after confirming it is no longer present in the source array.
+ * Prevents stale written_state from blocking a future re-insert of the same element. */
+export function dbDeleteWrittenState(
+  db: Db,
+  connectorId: string,
+  entityName: string,
+  canonicalId: string,
+): void {
+  db.prepare(
+    `DELETE FROM written_state WHERE connector_id = ? AND entity_name = ? AND canonical_id = ?`,
+  ).run(connectorId, entityName, canonicalId);
+}
+
 // ─── Array parent map ─────────────────────────────────────────────────────────
 
 export interface ArrayParentMapRow {
@@ -938,4 +993,22 @@ export function dbGetArrayParentMap(
     .get(childCanonId);
   if (!row) return undefined;
   return { parentCanonId: row.parent_canon_id, arrayPath: row.array_path, elementKey: row.element_key };
+}
+
+/** Return all child canonical IDs for a given parent at the specified array path.
+ * Used by element-absence collapse rebuild to reassemble the array from current canonical state. */
+export function dbGetArrayChildrenByParent(
+  db: Db,
+  parentCanonId: string,
+  arrayPath: string,
+): Array<{ childCanonId: string; elementKey: string }> {
+  return db
+    .prepare<{ child_canon_id: string; element_key: string }>(
+      `SELECT child_canon_id, element_key
+         FROM array_parent_map
+        WHERE parent_canon_id = ? AND array_path = ?
+        ORDER BY element_key`,
+    )
+    .all(parentCanonId, arrayPath)
+    .map((r) => ({ childCanonId: r.child_canon_id, elementKey: r.element_key }));
 }

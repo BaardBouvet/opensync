@@ -131,10 +131,14 @@ interface OAuthConfig {
 //
 // Object `properties` values use the full FieldDescriptor shape, enabling description,
 // example, and FK entity annotations on nested fields.
+//
+// Array fields may declare `unordered: true` to tell the engine that element order is not
+// significant. The engine will sort elements before diff (echo detection) so that reordering
+// alone does not trigger a re-sync. Spec: specs/field-mapping.md §3.5
 type FieldType =
   | 'string' | 'number' | 'boolean' | 'null'
   | { type: 'object'; properties?: Record<string, FieldDescriptor> }
-  | { type: 'array'; items?: FieldType };
+  | { type: 'array'; items?: FieldType; unordered?: true };
 
 interface FieldDescriptor {
   description?: string;

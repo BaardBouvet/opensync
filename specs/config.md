@@ -460,6 +460,8 @@ All keys are optional unless noted.
 | `reverse_expression` | `string` | JS expression compiled via `new Function`. Binding: `record` (full canonical record). Return a plain object to decompose into multiple source fields; any other value is assigned to `source ?? target`. |
 | `normalize` | `string` | JS expression compiled via `new Function`. Binding: `v` (the raw field value). Applied to both the incoming value and the shadow before the noop diff check — prevents precision-loss connectors from triggering spurious updates. See `specs/field-mapping.md §1.4`. |
 | `resolve` | `string` | JS expression compiled via `new Function`. Bindings: `incoming`, `existing` (prior canonical value, `undefined` on first ingest). Returns the new canonical value. Takes precedence over `fieldStrategies` when both are set. See `specs/field-mapping.md §2.3`. |
+| `sort_elements` | `boolean` | When `true`, array elements are sorted before the noop diff check so that reordering alone does not trigger a re-sync. Equivalent to declaring `unordered: true` on the field's connector schema type. See `specs/field-mapping.md §3.5`. |
+| `element_fields` | `FieldMappingEntry[]` | Per-element field mappings applied to each object inside an array field. Supports all the same sub-keys; self-referential for nested arrays. See `specs/field-mapping.md §3.5`. |
 
 **TypeScript-only field functions** — `defaultExpression` is available only in the TypeScript
 embedded API (receives the partial canonical record; cannot be expressed as a simple expression
