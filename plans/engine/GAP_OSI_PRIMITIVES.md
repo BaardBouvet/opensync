@@ -107,7 +107,7 @@ A source column that holds a pre-populated cluster ID from a previous ETL run. T
 ### Embedded objects (flat parent mapping)
 A sub-entity whose fields come from the same source row as the parent. Declared with `parent:` and no `array:` — the child reads columns directly from the parent's row (e.g. `ship_street`, `ship_city` → a `shipping_address` entity).
 
-**Foundation: 🔶** The current mapping config ([config.md](config.md)) handles field-level mappings but does not have a first-class `parent:` concept for splitting one source row into multiple target entities. The identity spec mentions that a flat connector record can map to multiple entity types via mapping config, which is the conceptual equivalent. Needs `parent:` syntax in mapping config.
+**Foundation: ✅** `parent:` without `array_path` is implemented as an embedded-object child. Child fields are split into a separate canonical entity; external ID derived as `<parentId>#<childEntity>`; reverse pass merges child outbound fields into the parent connector's `UpdateRecord`; parent-delete cascades to child shadow tombstones. Tests: EO1–EO7. See `plans/engine/PLAN_EMBEDDED_OBJECTS.md`.
 
 ---
 
@@ -135,7 +135,7 @@ A JSONB array of bare scalar values (e.g. `["vip", "churned"]`) rather than obje
 ### JSONB sub-field extraction (`source_path`)
 Extract a value from a nested JSON path within a source column rather than a top-level field.
 
-**Foundation: 🔶** NormalizedRecord is a flat key-value map. A connector can pre-extract nested fields before yielding records, but there is no engine-level `source_path` that does JSON path extraction inline during the forward transform. This is implementable as a field expression variant.
+**Foundation: ✅** `source_path` config key implemented. Dotted-path + `[N]` array-index extraction on the forward pass; nested-path reconstruction on the reverse pass; shared-prefix merge. Array-index restricted to `reverse_only` fields. Valid inside `element_fields`. Tests: SP1–SP10. See `plans/engine/PLAN_SOURCE_PATH.md`.
 
 ---
 

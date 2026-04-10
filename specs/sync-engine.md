@@ -271,6 +271,8 @@ Sparse updates are valid — the connector only returns what changed.
 Conflict resolution runs per-target before dispatch. It compares the incoming canonical
 values against the target connector's current shadow to decide which values to actually write.
 
+> Full strategy reference: `specs/channels.md § 3 Resolution Strategies`.
+
 ### Global strategies
 
 **Last-write-wins (default)** — if `incoming.ts >= shadow[field].ts`, accept the

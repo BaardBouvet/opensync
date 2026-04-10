@@ -15,6 +15,7 @@ with a POC lesson, the POC wins and the spec should be updated.
 - [connector-helpers.md](connector-helpers.md) — Optional SDK helper APIs for common REST connector patterns (pagination, mapping, state, batching)
 - [associations.md](associations.md) — Cross-connector references: Association type, composite-key resolution, JSON-LD pattern, pending-edge handling
 - [sync-engine.md](sync-engine.md) — Pipeline, shadow state, field tracking, diffing, conflict resolution, dispatch, echo prevention, circuit breaker, webhooks
+- [channels.md](channels.md) — Channel configuration, members, identity, resolution strategies (coalesce, LWW, collect, bool_or, expression, field_master, element-set)
 - [identity.md](identity.md) — Hub-and-spoke identity map, canonical UUIDs, associations, flat vs relational
 - [safety.md](safety.md) — Circuit breakers, echo prevention, idempotency, soft deletes, retry, external change detection
 - [webhooks.md](webhooks.md) — Queue-first design, thin/thick payloads, lifecycle, monitoring, offline replay

@@ -36,8 +36,9 @@ live API reference tour.
    users reading the YAML editor can identify what each config key does.
 
 Out of scope: primitives marked "not yet implemented" in `specs/field-mapping.md` (passthrough
-columns, JSON sub-field extraction, embedded objects, references_field/vocabulary targets, and
-linked-list array ordering).
+columns, references_field/vocabulary targets, and linked-list array ordering).
+`source_path` (§1.7) and embedded objects (§3.1) are now implemented — they are added to the
+coverage matrix below (rows 23–24) for the next pass of this plan.
 
 ---
 
@@ -71,8 +72,10 @@ by the new `deep-nesting` scenario (§ 5.3); rows 7–22 (field-level) are cover
 | 20 | PK as field | §4.1 | `id_field` | ✗ |
 | 21 | reverseRequired | §1.5 | `reverseRequired: true` on field entry | ✗ |
 | 22 | Soft delete | §8.2 | `soft_delete: { strategy, field }` | ✗ |
+| 23 | JSON sub-field extraction | §1.7 | `source_path` | ✗ |
+| 24 | Embedded objects | §3.1 | `parent:` (no `array_path`), child `entity` | ✗ |
 
-Items 1–3 and 6 are already covered; items 4–5 and 7–22 are addressed by this plan.
+Items 1–3 and 6 are already covered; items 4–5 and 7–24 are addressed by this plan.
 
 ---
 

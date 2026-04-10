@@ -234,18 +234,40 @@ appropriate `direction`. Passthrough is a same-source preservation mechanism, no
 fields:
   - source_path: address.street   # dotted JSON path within the source record
     target: street
-  - source_path: metadata.tags[0]
+  - source_path: address.city
+    target: city
+  - source_path: metadata.tags[0]   # array index — reverse_only only (see below)
     target: primaryTag
+    direction: reverse_only
 ```
 
-`source_path` extracts a value from a nested path within the source record rather than requiring
-the connector to pre-extract it. The `source` field name is inferred from the leaf key unless
-overridden.
+`source_path` extracts a value from a nested path within the source record without requiring
+the connector to pre-extract it. Path syntax:
 
-This is equivalent to writing a connector transform that calls `record.address?.street`, but
-declared inline in the mapping file.
+- `.` separates object keys (`address.street`).
+- `[N]` (non-negative integer) indexes into an array (`lines[0].product_id`).
+- Missing intermediates resolve to `undefined` (not an error); `undefined` falls through to
+  `default` if configured.
 
-**Status: designed, not yet implemented (OSI-mapping §3 "JSONB sub-field extraction").**
+Mutually exclusive with `source`. When only `source_path` is present, the leaf key of the path
+is used as the effective source name for lineage display.
+
+**Forward pass (source → canonical):** the path is walked on the raw source record; the extracted
+value is then subjected to the same pipeline as a plain `source` field (`expression`, `normalize`,
+`default`, `direction`).
+
+**Reverse pass (canonical → source):** the outbound-mapped value is placed at the nested location
+in the write payload by reconstructing the path. Multiple fields sharing the same path prefix are
+merged into the same nested object (`address.street` + `address.city` → `{ address: { street, city } }`).
+
+**Array-index write-back restriction:** `source_path` with an `[N]` token is only allowed on
+`reverse_only` fields (inbound only, no write-back). Using an array-index token on a
+`bidirectional` or `forward_only` field raises a config validation error at load time, since
+writing to a positional index within an existing array is not supported. Use `array_path`
+expansion or `reverse_expression` for that case.
+
+`source_path` is valid inside `element_fields` entries; the path resolves relative to each
+element object, not the parent record.
 
 ---
 
@@ -313,6 +335,10 @@ Priority chain used by the engine for each field:
 
 Resolution determines how the canonical value for a field is chosen when multiple connectors in the
 same channel contribute a value for it. Declared per-field (or mapping-wide as a default).
+
+> The authoritative reference for all resolution strategies, connector priorities, field masters,
+> and per-channel conflict config is `specs/channels.md`. The subsections below document the
+> YAML/TypeScript config syntax at the field-mapping level.
 
 ### 2.1 `coalesce`
 
@@ -477,7 +503,7 @@ entity. Children may themselves be named and referenced as the parent of further
 On the reverse pass, child entity fields are written back alongside parent fields in the same
 `UpdateRecord`.
 
-**Status: designed, not yet implemented (OSI-mapping §3 "Embedded objects"). See `plans/engine/PLAN_EMBEDDED_OBJECTS.md`.**
+**Status: implemented. Tests: `packages/engine/src/embedded-objects.test.ts` EO1–EO7. See `plans/engine/PLAN_EMBEDDED_OBJECTS.md`.**
 
 ---
 
@@ -1445,11 +1471,11 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | External link tables | §2 | ❌ no third-party linkage feed |
 | Cluster members writeback | §2 | ❌ no feedback table after inserts |
 | Cluster field on source record | §2 | ❌ no contract for this in connector SDK |
-| Embedded objects (flat `parent`) | §3 | 🔶 conceptually supported; `parent:` syntax not implemented |
+| Embedded objects (flat `parent`) | §3 | ✅ implemented — `parent:` without `array_path`; child external ID `<parentId>#<childEntity>`; reverse merge into parent `UpdateRecord`; parent-delete cascade. Tests: EO1–EO7 |
 | Nested arrays (`array` / `array_path`) | §3 | ✅ implemented — forward expand + reverse collapse; same-channel + cross-channel |
 | Deep nesting | §3 | ✅ implemented — `expansionChain`, multi-hop `array_parent_map`, cross-join |
 | Scalar arrays (`scalar: true`) | §3.3 | ✅ forward + reverse collapse implemented; cascade element-absence deletion; `_value` preserved through pipeline. Tests: SA1–SA9, SC1–SC8 |
-| `source_path` extraction | §3 | 🔶 doable as expression; inline syntax not implemented |
+| `source_path` extraction | §1.7 | ✅ implemented — dotted path + `[N]` index; forward pass extraction; reverse pass nested-path reconstruction; array-index restricted to `reverse_only`; `element_fields` support. Tests: SP1–SP10 |
 | Passthrough columns | §3 | 🔶 shadow state preserves; delta pipeline needs `passthrough:` key |
 | Atomic arrays (`sort_elements`, `element_fields`) | §3.5 | ✅ `sort_elements`/`unordered` schema-guided sort; `element_fields` per-element rename; Tests: AA1–AA5, EF1–EF8 |
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
@@ -1512,8 +1538,6 @@ Most OSI-mapping primitives are now implemented. Remaining gaps:
   linkage feed mechanism; not yet designed.
 - **Embedded objects** (`parent:` flat syntax, §3.1) — child entity from columns on the same row;
   distinct from array expansion. Designed, not yet implemented.
-- **`source_path`** (§3) — dotted JSON path extraction inline in config. Workaround: use
-  `expression`.
 - **`passthrough` config** (§3) — named passthrough columns forwarded to delta output.
 - **`references_field`** (§4) — alternate-representation FK (e.g. ISO code instead of UUID).
 - **Vocabulary targets** (§4) — read-only seeded lookup tables for FK translation.

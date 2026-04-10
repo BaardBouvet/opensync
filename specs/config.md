@@ -449,7 +449,8 @@ All keys are optional unless noted.
 
 | Key | Type | Meaning |
 |-----|------|---------|
-| `source` | `string` | Connector-side field name. Omit when `expression` supplies the value. |
+| `source` | `string` | Connector-side field name. Omit when `expression` or `source_path` supplies the value. Mutually exclusive with `source_path`. |
+| `source_path` | `string` | Dotted JSON path within the source record (`address.street`, `lines[0].sku`). Mutually exclusive with `source`. Array-index tokens `[N]` are only allowed on `reverse_only` fields (array-index write-back is not supported). On the reverse pass the engine reconstructs the nested path; multiple entries sharing the same prefix are merged. See `specs/field-mapping.md §1.7`. |
 | `target` | `string` | **Required.** Canonical field name. |
 | `direction` | `enum` | `bidirectional` (default) \| `forward_only` \| `reverse_only`. See §above. |
 | `default` | `any` | Static fallback applied when the source field is absent or null. |

@@ -28,6 +28,8 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ### Changed
 - **OSI-mapping primitive coverage** — GAP report and `specs/field-mapping.md` coverage table corrected and updated: References & FKs (3 items promoted ✅), routing (discriminator ✅, route-combined/element-set promoted 🔶), sources/primary_key metadata (✅), scalar array row corrected to 🔶 (reverse/collapse not yet implemented). Totals now **33✅ 8🔶 9❌**.
+- **Sync Engine — `source_path` extraction** — new `source_path` field-mapping key extracts values from nested JSON paths in source records (`address.street`, `lines[0].sku`). Forward pass extraction + reverse pass nested-path reconstruction; shared-prefix entries merged on reverse; array-index restricted to `reverse_only` fields. Valid inside `element_fields`. Tests SP1–SP10.
+- **Sync Engine — embedded objects** — `parent:` without `array_path` splits one source row into multiple canonical entities. Child external ID derived as `<parentId>#<childEntity>`; reverse pass merges child outbound fields into the parent connector's `UpdateRecord`; parent-delete cascades to child shadow tombstones. Tests EO1–EO7.
 
 ---
 

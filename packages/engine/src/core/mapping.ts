@@ -5,12 +5,90 @@ import type { ReadRecord } from "@opensync/sdk";
 import type { FieldData } from "../db/schema.js";
 import type { FieldMappingList } from "../config/loader.js";
 
+/**
+ * Walk a dotted-path with optional `[N]` array-index tokens and return the value at
+ * that location, or `undefined` if any intermediate step is absent.
+ *
+ * Syntax supported:
+ *   - `address.street`        — object key traversal
+ *   - `metadata.tags[0]`      — array index within an object key
+ *   - `lines[0].product_id`   — array index then key
+ *
+ * Only non-negative integer indices are recognised. Everything else is treated as a
+ * plain object key. Missing intermediates resolve to `undefined` without throwing.
+ *
+ * Spec: specs/field-mapping.md §1.7
+ */
+export function resolveSourcePath(
+  record: Record<string, unknown>,
+  path: string,
+): unknown {
+  // Split on `.` first, then parse `key[N]` tokens within each segment.
+  const segments = path.split(".");
+  let current: unknown = record;
+  for (const seg of segments) {
+    if (current === null || current === undefined) return undefined;
+    // Handle trailing `[N]` on a segment (e.g. "tags[0]" or "lines[2]")
+    const bracketIdx = seg.indexOf("[");
+    if (bracketIdx !== -1) {
+      const key = seg.slice(0, bracketIdx);
+      const rest = seg.slice(bracketIdx);
+      // Navigate into the object key first (if non-empty)
+      if (key) {
+        if (typeof current !== "object" || Array.isArray(current)) return undefined;
+        current = (current as Record<string, unknown>)[key];
+        if (current === null || current === undefined) return undefined;
+      }
+      // Parse all consecutive `[N]` tokens
+      let remaining = rest;
+      while (remaining.length > 0) {
+        const m = /^\[(\d+)\](.*)/.exec(remaining);
+        if (!m) return undefined;
+        const idx = parseInt(m[1], 10);
+        remaining = m[2];
+        if (!Array.isArray(current)) return undefined;
+        current = (current as unknown[])[idx];
+        if (current === null || current === undefined) return undefined;
+      }
+    } else {
+      if (typeof current !== "object" || Array.isArray(current)) return undefined;
+      current = (current as Record<string, unknown>)[seg];
+    }
+  }
+  return current;
+}
+
+/**
+ * On the reverse pass, assign a value into a nested path within `result`, creating
+ * intermediate objects as needed. Array-index write-back is not supported (caught at
+ * config load time for non-forward_only fields).
+ *
+ * Spec: specs/field-mapping.md §1.7 (reverse pass)
+ */
+function assignNestedPath(
+  result: Record<string, unknown>,
+  path: string,
+  value: unknown,
+): void {
+  const parts = path.split(".");
+  let cursor: Record<string, unknown> = result;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (cursor[key] === undefined || cursor[key] === null) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
 /** Apply inbound (source → canonical) or outbound (canonical → target) rename.
  *  If no mappings are declared, all fields pass through verbatim (whitelist not applied).
  *  If mappings are declared, only listed fields appear in the result (whitelist semantics).
  *  Spec: specs/config.md § Field whitelist semantics
  *  Spec: specs/field-mapping.md §1.3 — expression / reverseExpression
- *  Spec: specs/field-mapping.md §1.5 — default / defaultExpression */
+ *  Spec: specs/field-mapping.md §1.5 — default / defaultExpression
+ *  Spec: specs/field-mapping.md §1.7 — source_path extraction */
 export function applyMapping(
   data: Record<string, unknown>,
   mappings: FieldMappingList | undefined,
@@ -24,9 +102,12 @@ export function applyMapping(
     if (pass === "inbound") {
       if (dir === "forward_only") continue;
       // Spec: specs/field-mapping.md §1.3 — expression takes precedence over source rename
+      // Spec: specs/field-mapping.md §1.7 — source_path extraction takes precedence over source key lookup
       let value: unknown;
       if (m.expression) {
         value = m.expression(data);
+      } else if (m.sourcePath) {
+        value = resolveSourcePath(data, m.sourcePath);
       } else {
         const sourceKey = m.source ?? m.target;
         value = Object.prototype.hasOwnProperty.call(data, sourceKey) ? data[sourceKey] : undefined;
@@ -52,6 +133,13 @@ export function applyMapping(
           Object.assign(result, v as Record<string, unknown>);
         } else {
           result[m.source ?? m.target] = v;
+        }
+      } else if (m.sourcePath) {
+        // Spec: specs/field-mapping.md §1.7 — reverse: reconstruct nested path in result
+        if (Object.prototype.hasOwnProperty.call(data, m.target)) {
+          const outVal = data[m.target];
+          // Array-index write-back not supported (caught at config load for non-forward_only)
+          assignNestedPath(result, m.sourcePath, outVal);
         }
       } else {
         const sourceKey = m.source ?? m.target;

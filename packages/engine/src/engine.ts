@@ -348,7 +348,9 @@ export class SyncEngine {
 
     // A connector may contribute multiple entities to the same channel (e.g. orders + orderLines).
     // Use filter so every entity is processed, not just the first match.
-    const sourceMembers = channel.members.filter((m) => m.connectorId === connectorId);
+    // Spec: specs/field-mapping.md §3.1 — embedded children are processed from their parent's
+    // records, not read directly; exclude them from the top-level iteration.
+    const sourceMembers = channel.members.filter((m) => m.connectorId === connectorId && !m.embeddedChild);
     if (sourceMembers.length === 0) throw new Error(`${connectorId} is not a member of channel ${channelId}`);
 
     const source = this.wired.get(connectorId);
@@ -599,6 +601,26 @@ export class SyncEngine {
         });
 
         allMemberResults.push(...results);
+
+        // Spec: specs/field-mapping.md §3.1 — after processing a flat member, process any
+        // embedded-child members that reference this member by name, using the same raw records.
+        if (sourceMember.name && !sourceMember.arrayPath) {
+          const embeddedChildren = channel.members.filter(
+            (m) => m.embeddedChild && m.connectorId === connectorId && m.parentMappingName === sourceMember.name,
+          );
+          for (const childMember of embeddedChildren) {
+            // Synthesize child ReadRecords: id = <parentId>#<childEntity>, data = parent data.
+            // The child's inbound mapping extracts only the child's declared fields.
+            const childRecords = allRecords.map((r) => ({
+              ...r,
+              id: `${r.id}#${childMember.entity}`,
+            }));
+            const childResults = await this._processRecords(
+              channelId, childMember, childRecords, batchId, ingestTs,
+            );
+            allMemberResults.push(...childResults);
+          }
+        }
       }
 
       return { channelId, connectorId, records: allMemberResults };
@@ -1709,7 +1731,24 @@ export class SyncEngine {
     | { type: "error"; error: string }
     | { type: "skip" }
   > {
-    const targetEntityDef = targetWired.entities.find((e) => e.name === targetMember.entity);
+    // Spec: specs/field-mapping.md §3.1 — embedded-object child dispatch.
+    // The child entity has no independent row on the connector; data lives in the parent row.
+    // Use the parent entity definition for writes and derive the parent external ID.
+    let dispatchEntity = targetMember.entity;
+    let dispatchExistingId = existingTargetId;
+    if (targetMember.embeddedChild && targetMember.embeddedParentEntity) {
+      dispatchEntity = targetMember.embeddedParentEntity;
+      if (dispatchExistingId) {
+        const suffix = "#" + targetMember.entity;
+        if (dispatchExistingId.endsWith(suffix)) {
+          dispatchExistingId = dispatchExistingId.slice(0, -suffix.length);
+        }
+      } else {
+        // Parent row not yet linked — skip; will be retried after the parent's connector polls
+        return { type: "skip" };
+      }
+    }
+    const targetEntityDef = targetWired.entities.find((e) => e.name === dispatchEntity);
     if (!targetEntityDef?.insert || !targetEntityDef?.update) return { type: "skip" };
 
     // Spec: specs/associations.md § 8.1 — write-side association filter.
@@ -1761,7 +1800,7 @@ export class SyncEngine {
     // Spec: specs/field-mapping.md §7.1 — target-centric noop suppression.
     // For update dispatches only: if every field in localData AND the association sentinel
     // match the last value written to this target, skip the write.
-    if (existingTargetId !== undefined) {
+    if (dispatchExistingId !== undefined) {
       const prior = dbGetWrittenState(this.db, targetMember.connectorId, targetMember.entity, canonId);
       if (prior !== undefined) {
         const fieldsMatch = Object.entries(localData).every(
@@ -1775,20 +1814,25 @@ export class SyncEngine {
     // ETag pre-fetch (Spec: specs/sync-engine.md § Dispatch)
     let liveVersion: string | undefined;
     let liveSnapshot: Record<string, unknown> | undefined;
-    if (existingTargetId && targetEntityDef.lookup) {
+    if (dispatchExistingId && targetEntityDef.lookup) {
       try {
-        const liveRecords = await targetEntityDef.lookup([existingTargetId], targetWired.ctx);
-        const live = liveRecords.find((r) => r.id === existingTargetId);
+        const liveRecords = await targetEntityDef.lookup([dispatchExistingId], targetWired.ctx);
+        const live = liveRecords.find((r) => r.id === dispatchExistingId);
         if (live) { liveVersion = live.version; liveSnapshot = live.data as Record<string, unknown>; }
       } catch { /* non-fatal */ }
     }
+
+    // resultTargetId: the external ID recorded in results and shadows.
+    // For embedded children this is existingTargetId (child ID = <parent>#<entity>),
+    // not dispatchExistingId (parent ID). For regular members they are equal.
+    const resultTargetId = existingTargetId;
 
     const doWrite = async (retryVersion?: string): Promise<
       | { type: "ok"; action: "insert" | "update"; targetId: string }
       | { type: "conflict" }
       | { type: "error"; error: string }
     > => {
-      if (existingTargetId === undefined) {
+      if (dispatchExistingId === undefined) {
         let newId: string | undefined;
         let err: string | undefined;
         for await (const result of targetEntityDef.insert!(
@@ -1802,7 +1846,9 @@ export class SyncEngine {
         let notFound = false;
         for await (const result of targetEntityDef.update!(
           (async function* (self: SyncEngine): AsyncIterable<UpdateRecord> {
-            yield { id: existingTargetId!, data: self._injectRefsIntoData(localData, filteredAssociations), version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
+            // For embedded children: use parent API id (dispatchExistingId) for the write.
+            // For regular members: dispatchExistingId === existingTargetId.
+            yield { id: dispatchExistingId!, data: self._injectRefsIntoData(localData, filteredAssociations), version: retryVersion ?? liveVersion, snapshot: liveSnapshot };
           })(this),
           targetWired.ctx,
         )) {
@@ -1815,19 +1861,19 @@ export class SyncEngine {
           }
           if (result.notFound) notFound = true;
         }
-        if (notFound) return { type: "ok", action: "update", targetId: existingTargetId! };
+        if (notFound) return { type: "ok", action: "update", targetId: resultTargetId ?? dispatchExistingId };
         if (err) return { type: "error", error: err };
-        return { type: "ok", action: "update", targetId: existingTargetId! };
+        return { type: "ok", action: "update", targetId: resultTargetId ?? dispatchExistingId };
       }
     };
 
     let writeResult = await doWrite();
 
     // Gap 6: 412 retry — re-read, update shadow version, retry once
-    if (writeResult.type === "conflict" && existingTargetId && targetEntityDef.lookup) {
+    if (writeResult.type === "conflict" && dispatchExistingId && targetEntityDef.lookup) {
       try {
-        const fresh = await targetEntityDef.lookup([existingTargetId], targetWired.ctx);
-        const freshRecord = fresh.find((r) => r.id === existingTargetId);
+        const fresh = await targetEntityDef.lookup([dispatchExistingId], targetWired.ctx);
+        const freshRecord = fresh.find((r) => r.id === dispatchExistingId);
         if (freshRecord) {
           liveVersion = freshRecord.version;
           liveSnapshot = freshRecord.data as Record<string, unknown>;
@@ -2215,7 +2261,32 @@ export class SyncEngine {
         sourceShadowAssociations: existingShadow ? parseSentinelAssociations(existingShadow) : undefined,
       });
 
-      const canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel);
+      // Spec: specs/field-mapping.md §3.1 — embedded-object child canonical ID derivation.
+      // Bypass field-based identity matching; derive deterministically from the parent
+      // canonical ID so all connectors converge on the same canonical ID for the same
+      // parent record's child entity.
+      let canonId: string;
+      if (sourceMember.embeddedChild && sourceMember.embeddedParentEntity) {
+        const suffix = "#" + sourceMember.entity;
+        const parentExternalId = record.id.endsWith(suffix)
+          ? record.id.slice(0, -suffix.length)
+          : record.id;
+        const parentCanonId = dbGetCanonicalId(this.db, sourceMember.connectorId, parentExternalId);
+        if (!parentCanonId) {
+          // Parent not yet canonicalized (e.g. the order of member processing) — skip.
+          continue;
+        }
+        const derivedCanonId = deriveChildCanonicalId(parentCanonId, "embedded", sourceMember.entity);
+        const existingLink = dbGetCanonicalId(this.db, sourceMember.connectorId, record.id);
+        if (!existingLink) {
+          dbLinkIdentity(this.db, derivedCanonId, sourceMember.connectorId, record.id);
+        } else if (existingLink !== derivedCanonId) {
+          dbMergeCanonicals(this.db, derivedCanonId, existingLink);
+        }
+        canonId = derivedCanonId;
+      } else {
+        canonId = this._resolveCanonical(sourceMember.connectorId, record.id, canonical, sourceMember.entity, channel);
+      }
 
       // Spec: specs/field-mapping.md §7.2 — per-field timestamps (always-on shadow derivation)
       const fieldTimestamps = computeFieldTimestamps(canonical, existingShadow, record, ingestTs);

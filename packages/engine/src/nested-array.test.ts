@@ -14,7 +14,7 @@
  * NA7  Cross-channel: child member reads from parent entity via sourceEntity
  * NA8  Cross-channel watermarks advance independently
  * NA9  Config validation: parent reference to unknown name → throws
- * NA10 Config validation: array_path omitted when parent set → throws
+ * NA10 Config validation: embedded-object child (parent, no array_path) without entity → throws
  * NA11 getChannelIdentityMap returns source-connector slot for array children
  * NA12 _resolveCanonical finds canonical across different entity names in same channel
  */
@@ -438,7 +438,9 @@ describe("Nested array expansion — integration", () => {
     }
   });
 
-  it("NA10 — config validation rejects child with parent but no array_path", async () => {
+  it("NA10 — config validation rejects embedded-object child with parent but no entity", async () => {
+    // Spec: specs/field-mapping.md §3.1 — parent without array_path is an embedded-object child;
+    // it is valid but requires an explicit entity declaration.
     const dir = join(tmpdir(), `opensync-test-${Date.now()}`);
     mkdirSync(join(dir, "mappings"), { recursive: true });
     writeFileSync(join(dir, "opensync.json"), JSON.stringify({
@@ -452,10 +454,11 @@ describe("Nested array expansion — integration", () => {
       "    entity: orders",
       "  - channel: order-lines",
       "    parent: erp_orders",
-      // array_path deliberately omitted
+      // array_path omitted → treated as embedded-object child; entity is required
+      // entity deliberately omitted
     ].join("\n"));
 
-    await expect(loadConfig(dir)).rejects.toThrow(/array_path/i);
+    await expect(loadConfig(dir)).rejects.toThrow(/entity/i);
     rmSync(dir, { recursive: true, force: true });
   });
 

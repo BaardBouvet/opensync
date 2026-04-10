@@ -2,8 +2,8 @@
  * packages/engine/src/core/mapping.test.ts
  *
  * Tests for applyMapping() with expression / reverseExpression support.
- * Spec: specs/field-mapping.md §1.3
- * Plan: plans/engine/PLAN_FIELD_EXPRESSIONS.md
+ * Spec: specs/field-mapping.md §1.3, §1.7
+ * Plan: plans/engine/PLAN_FIELD_EXPRESSIONS.md, plans/engine/PLAN_SOURCE_PATH.md
  *
  * FE1  Plain rename still works (no regression)
  * FE2  forward expression overrides source-key lookup
@@ -19,9 +19,19 @@
  * AT3  element_fields: nested (self-referential) element_fields (Spec: §3.5)
  * AT4  element_fields: non-array value passes through unchanged (Spec: §3.5)
  * AT5  applyMapping integrates element_fields automatically (Spec: §3.5)
+ * SP1  source_path: single-level dotted path inbound
+ * SP2  source_path: multi-level dotted path inbound
+ * SP3  source_path: array index inbound (reverse_only — no write-back)
+ * SP4  source_path: missing intermediate resolves to undefined → default fires
+ * SP5  source_path: expression takes precedence over source_path
+ * SP6  source_path + expression coexist in same mapping list
+ * SP7  source_path inside element_fields
+ * SP8  source_path reverse: reconstruct nested path
+ * SP9  source_path reverse: multiple entries with shared prefix merge
+ * SP10 source_path reverse_only: produces no outbound key
  */
 import { describe, it, expect } from "bun:test";
-import { applyMapping, applyElementFields, parseTs, computeFieldTimestamps } from "./mapping.js";
+import { applyMapping, applyElementFields, resolveSourcePath, parseTs, computeFieldTimestamps } from "./mapping.js";
 import type { FieldMappingList } from "../config/loader.js";
 import type { FieldData } from "../db/schema.js";
 import type { ReadRecord } from "@opensync/sdk";
@@ -619,3 +629,161 @@ describe("AT5: applyMapping applies element_fields via mapping list (Spec: §3.5
   });
 });
 
+
+// ─── SP1: source_path single-level dotted path inbound ───────────────────────
+
+describe("SP1: source_path single-level dotted path", () => {
+  it("extracts first-level nested key", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "address.street", target: "street" }];
+    expect(applyMapping({ address: { street: "1 Main St", city: "Oslo" } }, mappings, "inbound"))
+      .toEqual({ street: "1 Main St" });
+  });
+});
+
+// ─── SP2: multi-level dotted path ────────────────────────────────────────────
+
+describe("SP2: source_path multi-level dotted path", () => {
+  it("extracts deeply nested key", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "a.b.c", target: "leaf" }];
+    expect(applyMapping({ a: { b: { c: 42 } } }, mappings, "inbound")).toEqual({ leaf: 42 });
+  });
+
+  it("returns undefined when intermediate is missing", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "a.b.c", target: "leaf" }];
+    // no output key when result is undefined
+    expect(applyMapping({ a: {} }, mappings, "inbound")).toEqual({});
+  });
+});
+
+// ─── SP3: array index forward pass ───────────────────────────────────────────
+// array-index source_path is only allowed on reverse_only (inbound read, no write-back)
+
+describe("SP3: source_path array index inbound (reverse_only)", () => {
+  it("extracts value at index 0", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "metadata.tags[0]", target: "primaryTag", direction: "reverse_only" }];
+    expect(applyMapping({ metadata: { tags: ["vip", "lead"] } }, mappings, "inbound"))
+      .toEqual({ primaryTag: "vip" });
+  });
+
+  it("out of bounds index resolves to undefined → no output key", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "lines[5].sku", target: "sku", direction: "reverse_only" }];
+    expect(applyMapping({ lines: [{ sku: "A" }] }, mappings, "inbound")).toEqual({});
+  });
+});
+
+// ─── SP4: missing intermediate → default fires ───────────────────────────────
+
+describe("SP4: source_path missing intermediate triggers default", () => {
+  it("applies default when path result is undefined", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "meta.status", target: "status", default: "active" }];
+    expect(applyMapping({ meta: {} }, mappings, "inbound")).toEqual({ status: "active" });
+  });
+});
+
+// ─── SP5/SP6: expression takes precedence over source_path ───────────────────
+
+describe("SP5-SP6: expression precedence and coexistence", () => {
+  it("SP5: expression evaluated; source_path ignored when both present", () => {
+    const mappings: FieldMappingList = [{
+      sourcePath: "a.b",
+      target: "out",
+      expression: (r) => "from-expr",
+    }];
+    expect(applyMapping({ a: { b: "from-path" } }, mappings, "inbound")).toEqual({ out: "from-expr" });
+  });
+
+  it("SP6: source_path and plain source entries coexist in the same list", () => {
+    const mappings: FieldMappingList = [
+      { sourcePath: "address.city", target: "city" },
+      { source: "name", target: "name" },
+    ];
+    expect(applyMapping({ address: { city: "Oslo" }, name: "Alice" }, mappings, "inbound"))
+      .toEqual({ city: "Oslo", name: "Alice" });
+  });
+});
+
+// ─── SP7: source_path inside element_fields ──────────────────────────────────
+
+describe("SP7: source_path inside element_fields", () => {
+  it("resolves path relative to each element object", () => {
+    const mappings: FieldMappingList = [{
+      source: "certifications",
+      target: "certifications",
+      elementFields: [
+        { sourcePath: "body.code", target: "certCode" },
+      ],
+    }];
+    const record = {
+      certifications: [
+        { body: { code: "ISO-9001" } },
+        { body: { code: "SOC2" } },
+      ],
+    };
+    expect(applyMapping(record, mappings, "inbound")).toEqual({
+      certifications: [{ certCode: "ISO-9001" }, { certCode: "SOC2" }],
+    });
+  });
+});
+
+// ─── SP8: source_path reverse pass reconstructs nested path ──────────────────
+
+describe("SP8: source_path reverse pass", () => {
+  it("writes value into nested path of result", () => {
+    const mappings: FieldMappingList = [{ sourcePath: "address.street", target: "street" }];
+    expect(applyMapping({ street: "1 Main St" }, mappings, "outbound"))
+      .toEqual({ address: { street: "1 Main St" } });
+  });
+});
+
+// ─── SP9: multiple source_path with shared prefix merge on reverse ────────────
+
+describe("SP9: multiple source_path with shared prefix merge into same object", () => {
+  it("merges address.street and address.city into { address: { street, city } }", () => {
+    const mappings: FieldMappingList = [
+      { sourcePath: "address.street", target: "street" },
+      { sourcePath: "address.city",   target: "city" },
+    ];
+    expect(applyMapping({ street: "1 Main St", city: "Oslo" }, mappings, "outbound"))
+      .toEqual({ address: { street: "1 Main St", city: "Oslo" } });
+  });
+});
+
+// ─── SP10: reverse_only field produces no outbound key ─────────────────────
+// Spec: §1.2 — reverse_only skips the outbound (canonical→source) pass
+
+describe("SP10: reverse_only source_path field skipped on outbound pass", () => {
+  it("produces no key in outbound result", () => {
+    const mappings: FieldMappingList = [
+      { sourcePath: "meta.score", target: "score", direction: "reverse_only" },
+      { source: "name", target: "name" },
+    ];
+    expect(applyMapping({ score: 99, name: "Alice" }, mappings, "outbound"))
+      .toEqual({ name: "Alice" }); // score not present — reverse_only skipped on outbound
+  });
+});
+
+// ─── resolveSourcePath unit tests ────────────────────────────────────────────
+
+describe("resolveSourcePath", () => {
+  it("simple key", () => {
+    expect(resolveSourcePath({ a: 1 }, "a")).toBe(1);
+  });
+  it("nested key", () => {
+    expect(resolveSourcePath({ a: { b: 2 } }, "a.b")).toBe(2);
+  });
+  it("array index", () => {
+    expect(resolveSourcePath({ tags: ["x", "y"] }, "tags[1]")).toBe("y");
+  });
+  it("nested then array index", () => {
+    expect(resolveSourcePath({ meta: { tags: ["a", "b"] } }, "meta.tags[0]")).toBe("a");
+  });
+  it("missing intermediate returns undefined", () => {
+    expect(resolveSourcePath({}, "a.b.c")).toBeUndefined();
+  });
+  it("null intermediate returns undefined", () => {
+    expect(resolveSourcePath({ a: null }, "a.b")).toBeUndefined();
+  });
+  it("out of bounds index returns undefined", () => {
+    expect(resolveSourcePath({ a: [1] }, "a[5]")).toBeUndefined();
+  });
+});

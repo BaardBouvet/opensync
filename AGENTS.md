@@ -31,7 +31,15 @@ After **any** code change:
 ```sh
 cd /workspaces/opensync
 bun run tsc --noEmit        # type-check all packages
-bun test                    # run all tests
+bun test --timeout 10000    # run all tests (10 s per-test guard against hangs)
+```
+
+If `bun test` stalls or reports "Unhandled error between tests" with no file name, run the
+bundler as a fast parse check before re-running tests — it catches escape-sequence and syntax
+errors that `tsc` can miss:
+
+```sh
+bun build packages/engine/src/index.ts packages/sdk/src/index.ts --target bun > /dev/null
 ```
 
 When writing or modifying a connector:

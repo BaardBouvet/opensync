@@ -1,6 +1,6 @@
 # PLAN: Embedded Objects (Flat Parent Mapping)
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-10  
 **Effort:** M  
 **Domain:** Engine — structural transforms, config, identity  
@@ -233,15 +233,15 @@ fan-out targets receive the child canonical entity.
 
 ## § 5 Implementation Checklist
 
-- [ ] Config validation: detect `parent` + no `array_path` → mark `channelMember.embeddedChild = true`; validate `parent` references a known `name:` entry; raise error if `element_key` or `scalar` also set; raise error if `connector:` is present on child but differs from the parent's inherited connector
-- [ ] `_processRecords`: after processing parent entity records, iterate embedded-child members and process them using the same raw records; derive child external IDs as `<parentId>#<childEntity>`; run normal identity + shadow-diff pipeline
-- [ ] Reverse pass: when a child entity delta must be written, merge child outbound fields into the parent connector's `UpdateRecord.data`; combine with any pending parent changes in the same cycle
-- [ ] Parent-deletion cascade: tombstone all embedded-child shadow rows when parent is deleted or soft-deleted
-- [ ] Add tests: single embedded child — child fields land in separate entity; multi-child — two child entities from same row; reverse merge — child change merged into parent `UpdateRecord`; parent delete cascades child tombstone; different source field sets — child only maps its own fields from the row; unchanged child row → noop
-- [ ] Update `specs/field-mapping.md §3.1` status
-- [ ] Update `specs/config.md` MappingEntry key table
-- [ ] Update `plans/engine/GAP_OSI_PRIMITIVES.md` — embedded objects entry from 🔶 to ✅
-- [ ] Update `specs/field-mapping.md` coverage table — embedded objects row from 🔶 to ✅
-- [ ] Run `bun run tsc --noEmit`
-- [ ] Run `bun test`
-- [ ] Update `CHANGELOG.md` under `[Unreleased]`
+- [x] Config validation: detect `parent` + no `array_path` → mark `channelMember.embeddedChild = true`; validate `parent` references a known `name:` entry; raise error if `element_key` or `scalar` also set; raise error if `connector:` is present on child but differs from the parent's inherited connector
+- [x] `_processRecords`: after processing parent entity records, iterate embedded-child members and process them using the same raw records; derive child external IDs as `<parentId>#<childEntity>`; run normal identity + shadow-diff pipeline
+- [x] Reverse pass: when a child entity delta must be written, merge child outbound fields into the parent connector's `UpdateRecord.data`; combine with any pending parent changes in the same cycle
+- [x] Parent-deletion cascade: tombstone all embedded-child shadow rows when parent is deleted or soft-deleted
+- [x] Add tests: single embedded child — child fields land in separate entity; multi-child — two child entities from same row; reverse merge — child change merged into parent `UpdateRecord`; parent delete cascades child tombstone; different source field sets — child only maps its own fields from the row; unchanged child row → noop
+- [x] Update `specs/field-mapping.md §3.1` status
+- [x] Update `specs/config.md` MappingEntry key table
+- [x] Update `plans/engine/GAP_OSI_PRIMITIVES.md` — embedded objects entry from 🔶 to ✅
+- [x] Update `specs/field-mapping.md` coverage table — embedded objects row from 🔶 to ✅
+- [x] Run `bun run tsc --noEmit`
+- [x] Run `bun test`
+- [x] Update `CHANGELOG.md` under `[Unreleased]`

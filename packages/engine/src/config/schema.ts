@@ -83,6 +83,10 @@ export const FieldDirectionSchema = z.enum(["bidirectional", "forward_only", "re
 
 const FieldMappingEntrySchemaBase = z.object({
   source: z.string().optional(),
+  /** Spec: specs/field-mapping.md §1.7 — dotted JSON path within the source record.
+   *  Mutually exclusive with `source`. Array-index tokens ([N]) are not allowed on
+   *  non-forward_only fields (reverse write-back to a positional index is not supported). */
+  source_path: z.string().optional(),
   target: z.string(),
   direction: FieldDirectionSchema.optional(),
   /** Spec: specs/field-mapping.md §1.6 */
@@ -112,7 +116,21 @@ const FieldMappingEntrySchemaBase = z.object({
   /** Spec: specs/field-mapping.md §3.5 — when true, sort array elements before diff comparison.
    *  Suppresses false updates when source API returns same elements in different order. */
   sort_elements: z.boolean().optional(),
-});
+}).refine(
+  (f) => !(f.source && f.source_path),
+  { message: "source and source_path are mutually exclusive on a field mapping entry" },
+).refine(
+  (f) => {
+    if (!f.source_path) return true;
+    // Array-index write-back is not supported on the outbound (canonical→source) pass.
+    // forward_only runs only outbound; bidirectional runs both.
+    // Only reverse_only (inbound only, no write-back) is safe with array-index tokens.
+    // Spec: specs/field-mapping.md §1.7
+    if (f.direction === "reverse_only") return true;
+    return !/\[\d+\]/.test(f.source_path);
+  },
+  { message: "source_path with an array index ([N]) is only allowed on reverse_only fields (array-index write-back is not supported)" },
+);
 
 // element_fields is self-referential, so define the full schema using z.lazy.
 // TypeScript type annotation is required to break the inference cycle.

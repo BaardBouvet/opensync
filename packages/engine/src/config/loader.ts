@@ -22,6 +22,9 @@ import type {
 
 export interface FieldMapping {
   source?: string;
+  /** Spec: specs/field-mapping.md §1.7 — dotted JSON path within the source record.
+   *  Mutually exclusive with `source`. */
+  sourcePath?: string;
   target: string;
   direction?: "bidirectional" | "forward_only" | "reverse_only";
   /** Forward pass (source → canonical).
@@ -159,6 +162,14 @@ export interface ChannelMember {
   /** Spec: specs/field-mapping.md §8.3 — full-snapshot absence detection (flat members only).
    * When true, every read is a complete dataset; entities absent from the batch are deleted. */
   fullSnapshot?: boolean;
+  /** Spec: specs/field-mapping.md §3.1 — true when this is an embedded-object child
+   * (parent: set, no array_path). The child entity's data comes from the same source row
+   * as the named parent; its external ID is derived as `<parentId>#<childEntity>`. */
+  embeddedChild?: boolean;
+  /** For embedded children: the source entity name of the parent mapping entry.
+   * Used at dispatch time to look up the parent connector entity definition and
+   * derive the parent external ID for write-back. */
+  embeddedParentEntity?: string;
 }
 
 export interface ChannelConfig {
@@ -381,26 +392,58 @@ export function buildChannelsFromEntries(
     let resolvedSourceEntity: string | undefined;
     let resolvedEntity = entry.entity ?? "";
     let expansionChain: ExpansionChainLevel[] | undefined;
+    let embeddedChild: boolean | undefined;
+    let embeddedParentEntity: string | undefined;
 
     if (entry.parent) {
-      if (!entry.array_path) {
-        throw new Error(`Mapping entry in channel "${entry.channel}" with parent "${entry.parent}" must declare array_path`);
+      if (entry.array_path) {
+        // Array expansion path (unchanged)
+        if (entry.scalar && entry.element_key) {
+          throw new Error(`Mapping in channel "${entry.channel}" with scalar: true must not declare element_key`);
+        }
+        const orderCount = [entry.order_by, entry.order, entry.order_linked_list].filter(Boolean).length;
+        if (orderCount > 1) {
+          throw new Error(`Mapping in channel "${entry.channel}" specifies more than one ordering method (order_by, order, order_linked_list); only one is allowed`);
+        }
+        const chainResult = resolveExpansionChain(entry, namedMappings);
+        resolvedConnectorId = entry.connector ?? chainResult.connectorId;
+        if (!resolvedConnectorId) {
+          throw new Error(`Cannot resolve connectorId for child mapping in channel "${entry.channel}" with parent "${entry.parent}"`);
+        }
+        resolvedSourceEntity = chainResult.sourceEntity;
+        resolvedEntity = entry.entity ?? `${chainResult.sourceEntity}/${entry.array_path}`;
+        expansionChain = chainResult.chain;
+      } else {
+        // Spec: specs/field-mapping.md §3.1 — embedded-object child (parent without array_path)
+        if (entry.element_key || entry.scalar) {
+          throw new Error(`Embedded-object mapping in channel "${entry.channel}" with parent "${entry.parent}" must not declare element_key or scalar`);
+        }
+        if (!entry.entity) {
+          throw new Error(`Embedded-object mapping in channel "${entry.channel}" with parent "${entry.parent}" must declare an entity`);
+        }
+        const parentEntry = namedMappings.get(entry.parent);
+        if (!parentEntry) {
+          throw new Error(`Mapping entry references unknown parent "${entry.parent}"`);
+        }
+        // Walk to root to find the root connector and entity
+        let rootCursor: MappingEntry = parentEntry;
+        while (rootCursor.parent && namedMappings.has(rootCursor.parent)) {
+          rootCursor = namedMappings.get(rootCursor.parent)!;
+        }
+        resolvedConnectorId = entry.connector ?? rootCursor.connector;
+        if (!resolvedConnectorId) {
+          throw new Error(`Cannot resolve connectorId for embedded-object mapping in channel "${entry.channel}" with parent "${entry.parent}"`);
+        }
+        if (entry.connector && rootCursor.connector && entry.connector !== rootCursor.connector) {
+          throw new Error(
+            `Embedded-object mapping in channel "${entry.channel}" with parent "${entry.parent}" declares connector "${entry.connector}" but parent has connector "${rootCursor.connector}". Cross-connector inheritance is not supported.`,
+          );
+        }
+        resolvedSourceEntity = rootCursor.entity ?? "";
+        resolvedEntity = entry.entity;
+        embeddedChild = true;
+        embeddedParentEntity = rootCursor.entity ?? "";
       }
-      if (entry.scalar && entry.element_key) {
-        throw new Error(`Mapping in channel "${entry.channel}" with scalar: true must not declare element_key`);
-      }
-      const orderCount = [entry.order_by, entry.order, entry.order_linked_list].filter(Boolean).length;
-      if (orderCount > 1) {
-        throw new Error(`Mapping in channel "${entry.channel}" specifies more than one ordering method (order_by, order, order_linked_list); only one is allowed`);
-      }
-      const chainResult = resolveExpansionChain(entry, namedMappings);
-      resolvedConnectorId = entry.connector ?? chainResult.connectorId;
-      if (!resolvedConnectorId) {
-        throw new Error(`Cannot resolve connectorId for child mapping in channel "${entry.channel}" with parent "${entry.parent}"`);
-      }
-      resolvedSourceEntity = chainResult.sourceEntity;
-      resolvedEntity = entry.entity ?? `${chainResult.sourceEntity}/${entry.array_path}`;
-      expansionChain = chainResult.chain;
     } else {
       if (!resolvedConnectorId) {
         throw new Error(`Mapping entry in channel "${entry.channel}" must declare a connector`);
@@ -413,7 +456,10 @@ export function buildChannelsFromEntries(
     const inbound = entry.fields ? buildInbound(entry.fields) : undefined;
     const outbound = entry.fields ? buildOutbound(entry.fields) : undefined;
 
-    const isArrayMember = !!(entry.array_path || entry.parent);
+    // Only true array expansion members (parent + array_path) use element-level filters
+    const isArrayMember = !!(entry.array_path || (entry.parent && entry.array_path));
+    // Flat non-embedded members get record-level filters
+    const isFlatMember = !embeddedChild && !entry.array_path;
 
     const elementFilter = isArrayMember && entry.filter
       ? compileElementFilter(entry.filter, entry.channel)
@@ -422,13 +468,13 @@ export function buildChannelsFromEntries(
       ? compileElementFilter(entry.reverse_filter, entry.channel)
       : undefined;
 
-    const recordFilter = !isArrayMember && entry.filter
+    const recordFilter = isFlatMember && entry.filter
       ? compileRecordFilter(entry.filter, entry.channel)
       : undefined;
-    const recordReverseFilter = !isArrayMember && entry.reverse_filter
+    const recordReverseFilter = isFlatMember && entry.reverse_filter
       ? compileRecordFilter(entry.reverse_filter, entry.channel)
       : undefined;
-    const softDeletePredicate = !isArrayMember && entry.soft_delete
+    const softDeletePredicate = isFlatMember && entry.soft_delete
       ? compileSoftDeletePredicate(entry.soft_delete, entry.channel)
       : undefined;
 
@@ -455,7 +501,9 @@ export function buildChannelsFromEntries(
       recordFilter,
       recordReverseFilter,
       softDeletePredicate,
-      fullSnapshot: !isArrayMember && entry.full_snapshot ? true : undefined,
+      fullSnapshot: isFlatMember && entry.full_snapshot ? true : undefined,
+      embeddedChild: embeddedChild ?? undefined,
+      embeddedParentEntity: embeddedParentEntity ?? undefined,
     });
   }
 
@@ -516,6 +564,7 @@ function resolveExpansionChain(
 function buildInbound(fields: FieldMappingEntry[]): FieldMappingList {
   return fields.map((f) => ({
     source: f.source,
+    sourcePath: f.source_path,
     target: f.target,
     direction: f.direction,
     reverseRequired: f.reverseRequired,
@@ -535,6 +584,7 @@ function buildOutbound(fields: FieldMappingEntry[]): FieldMappingList {
   // Outbound is the mirror of inbound
   return fields.map((f) => ({
     source: f.source,
+    sourcePath: f.source_path,
     target: f.target,
     direction: f.direction,
     reverseRequired: f.reverseRequired,

@@ -1,6 +1,6 @@
 # PLAN: JSON Sub-Field Extraction (`source_path`)
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-10  
 **Effort:** S  
 **Domain:** Engine — field mapping, config  
@@ -36,22 +36,33 @@ path. The two keys are mutually exclusive: a validation error is raised if both 
 
 ```yaml
 fields:
-  - source_path: address.street     # dot-notation — reads record.address?.street
+  - source_path: address.street          # dot-notation — reads record.address?.street
     target: street
 
-  - source_path: metadata.tags[0]   # bracket index — reads record.metadata?.tags?.[0]
+  - source_path: metadata.tags[0]        # integer index — reads record.metadata?.tags?.[0]
     target: primaryTag
 
   - source_path: lines[0].product_id
     target: firstProductId
 
-  - source: name                    # plain source still works alongside source_path entries
+  - source_path: "['address.type'].code" # string-key bracket — key contains a literal dot
+    target: addressTypeCode
+
+  - source_path: "['opts[0]']"           # string-key bracket — key contains a literal bracket
+    target: opts0
+
+  - source: name                         # plain source still works alongside source_path entries
     target: customerName
 ```
 
 Path syntax:
-- `.` separates object keys.
+- `.` separates object keys (when not inside a bracket token).
 - `[N]` (non-negative integer) indexes into an array.
+- `['key']` or `["key"]` (quoted string) looks up an object property by exact literal name.
+  This is the escape form: it allows dots, brackets, and other special characters to appear
+  inside a key name without being interpreted as path separators.
+- Tokens are parsed left-to-right before any traversal begins; the string is **not** naively
+  split on `.` — bracket tokens are extracted first so their contents are never split.
 - Missing intermediate values resolve to `undefined` (not an error); `undefined` is treated
   the same as an absent field (falls through to `default` if configured).
 
@@ -62,10 +73,18 @@ carries `source_path` extracts the value by walking the path before the rest of 
 runs. The extracted value is then subjected to the same pipeline as a plain `source` field:
 `expression`, `normalize`, `default`, `direction`, etc.
 
-Path resolution is a short recursive walk (not a full JSONPath library): split on `.` first,
-then handle `[N]` tokens within each segment. This is intentionally simpler than JSONPath —
-it covers the real-world cases without bringing in a dependency or supporting filters,
-wildcards, or recursive descent.
+Path resolution is a short tokeniser + recursive walk (not a full JSONPath library). The
+tokeniser scans left-to-right: bracket expressions `[…]` are extracted as atomic tokens first,
+then the remaining dot-separated segments are emitted as key tokens. Each token is one of:
+
+| Token type | Example | Traversal |
+|---|---|---|
+| key | `address` | `obj[key]` |
+| integer index | `[0]` | `arr[0]` |
+| string key | `['foo.bar']` | `obj['foo.bar']` |
+
+This is intentionally simpler than JSONPath — it covers the real-world cases without bringing
+in a dependency or supporting filters, wildcards, or recursive descent.
 
 ### § 2.3 Reverse pass
 
@@ -92,12 +111,15 @@ Outbound: `{ address: { street: "1 Main St", city: "Oslo" } }`.
 If the connector's `update()` payload already contains a partial object at that key (e.g. from
 another field in the mapping), the nested assignments are merged, not replaced.
 
+**String-key bracket tokens (`['key']`, `["key"]`) are fully reversible** — on the reverse
+pass the engine writes the value at the exact literal key, the same as a plain key token.
+
 Array-index write-back (`[N]`) on reverse is **not supported** — writing to a positional index
 within an existing array would require reading the full array first, mutating one slot, and
 writing back the whole array. This is out of scope; operators who need write-back to an array
 element should use `array_path` expansion or a `reverse_expression`. An attempt to use a
-`source_path` with an array index in a non-`forward_only` field raises a config validation
-error at load time.
+`source_path` with an integer-index token on a non-`forward_only` field raises a config
+validation error at load time.
 
 ### § 2.4 Interaction with `element_fields`
 
@@ -114,14 +136,21 @@ each element object (not the parent record):
 
 ### § 2.5 `source_path` as the inferred `source` name
 
-When `source` is absent and `source_path` is present, the leaf key of the path is used as the
-logical "source name" for lineage hints:
+When `source` is absent and `source_path` is present, the **value of the last parsed token**
+is used as the logical "source name" for lineage hints. Using the last token (not a naive
+string split on `.`) ensures correctness when the leaf key contains special characters:
 
 ```
-source_path: address.street  →  effective source name: "street"
+source_path: address.street          →  effective source name: "street"
+source_path: ['address.type'].code   →  effective source name: "code"
+source_path: ['address.type']        →  effective source name: "address.type"
+source_path: ['opts[0]']             →  effective source name: "opts[0]"
 ```
 
-This name appears in the `sources` lineage array for display purposes only.
+This name appears in the `sources` lineage array for display purposes only. Lineage points to
+the correct source-schema field even when the field name contains dots or brackets — an
+arbitrary string split would map `['address.type']` to `"type"`, silently referencing a
+different (or non-existent) field in the source schema.
 
 ---
 
@@ -136,16 +165,17 @@ This name appears in the `sources` lineage array for display purposes only.
 
 ## § 4 Implementation Checklist
 
-- [ ] Add `source_path?: string` to `FieldMappingEntrySchema` (Zod) in `packages/engine/src/config/schema.ts`; validate mutual exclusion with `source` at load time; validate that `source_path` with an array-index token is not used on a non-`forward_only` field
-- [ ] Add `sourcePath?: string` to the `FieldMapping` TypeScript type in `packages/engine/src/config/loader.ts`; wire through from `f.source_path`
-- [ ] Implement `resolveSourcePath(record, path: string): unknown` helper in `packages/engine/src/core/mapping.ts` — split on `.`, handle `[N]` tokens, return `undefined` for missing intermediates
-- [ ] In `applyMapping` forward pass: when `m.sourcePath` is set, call `resolveSourcePath` to obtain the value instead of `record[sourceKey]`
-- [ ] In `applyMapping` reverse pass: when `m.sourcePath` is set, use nested-path assignment instead of flat key assignment; merge sibling paths into the same nested object; skip reverse-path assignment for forward-only fields (already skipped by direction guard)
-- [ ] Add tests for `source_path`: single-level dotted path; multi-level dotted path; array index forward; array index reverse raises error (caught at config load time); missing intermediate resolves to `undefined`; `default` fires on `undefined` path result; `source_path` + `expression`; `source_path` inside `element_fields`; multiple `source_path` entries with shared prefix merge on reverse
-- [ ] Update `specs/field-mapping.md §1.7` status
-- [ ] Update `specs/config.md` `FieldMappingEntry` key table
-- [ ] Update `plans/engine/GAP_OSI_PRIMITIVES.md` — `source_path` entry from 🔶 to ✅
-- [ ] Update `specs/field-mapping.md` coverage table — `source_path extraction` row from 🔶 to ✅
-- [ ] Run `bun run tsc --noEmit`
-- [ ] Run `bun test`
-- [ ] Update `CHANGELOG.md` under `[Unreleased]`
+- [x] Add `source_path?: string` to `FieldMappingEntrySchema` (Zod) in `packages/engine/src/config/schema.ts`; validate mutual exclusion with `source` at load time; validate that `source_path` with an array-index token is not used on a non-`forward_only` field
+- [x] Add `sourcePath?: string` to the `FieldMapping` TypeScript type in `packages/engine/src/config/loader.ts`; wire through from `f.source_path`
+- [x] Implement `tokenisePath(path: string): PathToken[]` in `packages/engine/src/core/mapping.ts` — scan left-to-right, emit atomic tokens: bare key segments (dot-split after bracket extraction), integer-index `[N]` tokens, and string-key `['…']`/`["…"]` tokens
+- [x] Implement `resolveSourcePath(record, path: string): unknown` helper — walk the token list, return `undefined` for missing intermediates
+- [x] In `applyMapping` forward pass: when `m.sourcePath` is set, call `resolveSourcePath` to obtain the value instead of `record[sourceKey]`
+- [x] In `applyMapping` reverse pass: when `m.sourcePath` is set, use nested-path assignment instead of flat key assignment; merge sibling paths into the same nested object; skip reverse-path assignment for forward-only fields (already skipped by direction guard)
+- [x] Add tests for `source_path`: single-level dotted path; multi-level dotted path; array index forward; array index on non-`forward_only` field raises config error at load time; missing intermediate resolves to `undefined`; `default` fires on `undefined` path result; `source_path` + `expression`; `source_path` inside `element_fields`; multiple `source_path` entries with shared prefix merge on reverse; string-key bracket forward (`['foo.bar']`); string-key bracket reverse (fully reversible); leaf-name derivation from string-key bracket gives literal key content; mixed path with string-key bracket and plain segments
+- [x] Update `specs/field-mapping.md §1.7` status
+- [x] Update `specs/config.md` `FieldMappingEntry` key table
+- [x] Update `plans/engine/GAP_OSI_PRIMITIVES.md` — `source_path` entry from 🔶 to ✅
+- [x] Update `specs/field-mapping.md` coverage table — `source_path extraction` row from 🔶 to ✅
+- [x] Run `bun run tsc --noEmit`
+- [x] Run `bun test`
+- [x] Update `CHANGELOG.md` under `[Unreleased]`
