@@ -239,8 +239,8 @@ fields:
 ### Associations
 
 Associations (foreign-key style links between entities) are remapped across connectors using
-the identity map. To enable forwarding, each connector's mapping entry must declare an optional
-`associations` list mapping its local predicate names to a canonical name:
+the identity map. The recommended approach is to declare `entity` on the relevant
+`FieldMappingEntry` — no separate `associations` key is needed:
 
 ```yaml
 # mappings/contacts.yaml (excerpt)
@@ -250,20 +250,42 @@ the identity map. To enable forwarding, each connector's mapping entry must decl
   fields:
     - source: name
       target: name
-  associations:
-    - source: companyId   # CRM-local predicate
-      target: companyRef  # canonical routing key — never stored in shadow state
+    - source: companyId      # CRM-local predicate
+      target: companyId      # canonical name — also the routing key
+      entity: company        # CRM's own entity name for the company
 
 - connector: erp
   channel: contacts
   entity: employees
-  associations:
-    - source: orgId       # ERP-local predicate
-      target: companyRef  # same canonical → same edge
+  fields:
+    - source: name
+      target: name
+    - source: orgId          # ERP-local predicate
+      target: companyId      # same canonical name → same edge
+      entity: accounts       # ERP's own entity name for the company
 ```
 
-Absent `associations` on a mapping entry → no associations are forwarded from or to that
-connector. See `specs/associations.md § 7.5` for full rules.
+The field's `target` doubles as the canonical routing key. Two connectors that both map
+their FK field to the same `target` name are automatically linked — no canonical alias needed.
+
+When the field carries an external ID from a **different** connector's namespace:
+
+```yaml
+    - source: hr_employee_id
+      target: hrEmployeeId
+      entity: employees
+      entity_connector: hr   # look up identity in 'hr' connector's namespace, not crm's
+```
+
+`entity_connector` without `entity` is a config error.
+
+**Deprecated:** The top-level `associations` key (a list of `{ source, target }` pairs)
+is deprecated. Use field-level `entity` instead. When present, the engine emits a
+deprecation warning at config load and uses the list only as a fallback.
+
+Absent `entity` on all field entries → no associations are forwarded from that connector.
+See `specs/associations.md §9` for the full Pass 3 algorithm and `specs/associations.md §7.5`
+for forwarding rules.
 
 ---
 

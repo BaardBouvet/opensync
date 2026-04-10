@@ -57,7 +57,7 @@ import {
   dbGetArrayChildrenByParent,
   dbGetSourceCreatedAts,
 } from "./db/queries.js";
-import { applyMapping, isDispatchBlocked, computeFieldTimestamps } from "./core/mapping.js";
+import { applyMapping, isDispatchBlocked, computeFieldTimestamps, resolveSourcePath } from "./core/mapping.js";
 import { resolveConflicts } from "./core/conflict.js";
 import { buildNormalizers } from "./core/diff.js";
 import { CircuitBreaker } from "./safety/circuit-breaker.js";
@@ -71,6 +71,7 @@ import {
   patchNestedElement,
   deriveChildCanonicalId,
   applySortToLeafArray,
+  getArrayElementSchema,
 } from "./core/array-expander.js";
 
 // ─── Public result types ──────────────────────────────────────────────────────
@@ -433,8 +434,17 @@ export class SyncEngine {
                   const childCanonId = walkCanonId;
 
                   // Store child shadow under sourceMember.entity (the logical entity for this channel)
+                  // Spec: specs/associations.md §9 — include assoc sentinel in collectOnly child shadows.
+                  const collectSrcDef = this.wired.get(connectorId)?.entities.find((e) => e.name === (sourceMember.sourceEntity ?? sourceMember.entity));
+                  const collectElemSchema = getArrayElementSchema(collectSrcDef, chain);
+                  const collectElemDefLike = collectElemSchema ? { schema: collectElemSchema } as import("@opensync/sdk").EntityDefinition : undefined;
+                  const collectChildAssoc = this._extractRefsFromData(childRaw, collectElemDefLike, sourceMember.fieldAnnotations);
+                  const collectChildFiltered = this._filterInboundAssociations(collectChildAssoc, sourceMember);
+                  const collectChildSentinel = collectChildFiltered.length
+                    ? JSON.stringify([...collectChildFiltered].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+                    : undefined;
                   const existingChildShadow = dbGetShadow(this.db, connectorId, sourceMember.entity, childRecord.id);
-                  const childFd = buildFieldData(existingChildShadow, childCanonical, connectorId, ts, undefined);
+                  const childFd = buildFieldData(existingChildShadow, childCanonical, connectorId, ts, collectChildSentinel);
                   dbSetShadow(this.db, connectorId, sourceMember.entity, childRecord.id, childCanonId, childFd);
                 }
               } else {
@@ -449,7 +459,7 @@ export class SyncEngine {
                 const canonical = applyMapping(stripped, sourceMember.inbound, "inbound");
                 // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
                 const entityDefCollect = this.wired.get(connectorId)?.entities.find((e) => e.name === sourceMember.entity);
-                const inboundAssocCollect = this._extractRefsFromData(record.data as Record<string, unknown>, entityDefCollect);
+                const inboundAssocCollect = this._extractRefsFromData(record.data as Record<string, unknown>, entityDefCollect, sourceMember.fieldAnnotations);
                 const filteredCollect = this._filterInboundAssociations(inboundAssocCollect, sourceMember);
                 const assocSentinel = filteredCollect.length
                   ? JSON.stringify([...filteredCollect].sort((a, b) => a.predicate.localeCompare(b.predicate)))
@@ -807,7 +817,7 @@ export class SyncEngine {
           const recs = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
           const foundRec = recs.find((r) => r.id === side.externalId);
           // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
-          matchSideAssoc.set(key, foundRec ? this._extractRefsFromData(foundRec.data as Record<string, unknown>, sideEntityDef) : undefined);
+          matchSideAssoc.set(key, foundRec ? this._extractRefsFromData(foundRec.data as Record<string, unknown>, sideEntityDef, sideMember?.fieldAnnotations) : undefined);
         }
       }
     }
@@ -882,7 +892,7 @@ export class SyncEngine {
           const looked = await sideEntityDef.lookup([side.externalId], sideWired!.ctx);
           const rec = looked.find((r) => r.id === side.externalId);
           // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
-          srcAssoc = rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sideEntityDef) : undefined;
+          srcAssoc = rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sideEntityDef, sideMember?.fieldAnnotations) : undefined;
           srcConnForAssoc = side.connectorId;
           matchAssocCache.set(cacheKey, srcAssoc);
           break;
@@ -987,7 +997,7 @@ export class SyncEngine {
           const records = await sourceEntityDef.lookup([unique.externalId], sourceWired!.ctx);
           const rec = records.find((r) => r.id === unique.externalId);
           // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
-          sourceAssocCache.set(unique.externalId, rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sourceEntityDef) : undefined);
+          sourceAssocCache.set(unique.externalId, rec ? this._extractRefsFromData(rec.data as Record<string, unknown>, sourceEntityDef, sourceMemberForAssoc.fieldAnnotations) : undefined);
         } else {
           // Fallback: recover associations from the source shadow's __assoc__ sentinel.
           const shadow = dbGetShadow(this.db, unique.connectorId, sourceMemberForAssoc.entity, unique.externalId);
@@ -1539,16 +1549,19 @@ export class SyncEngine {
 
   /**
    * Spec: specs/connector-sdk.md § Ref — association inference rule §7.
+   * Spec: specs/associations.md §9 — Pass 3: config-declared field annotations.
    * Scan data for Ref-shaped values and derive an Association for each.
    *
    * Rule (applied in order):
    *   1. `@entity` set on the Ref → use it directly.
    *   2. Field declared with `entity: E` in entityDef.schema → entity = E.
    *   3. Neither — Ref treated as opaque object, no Association derived.
+   *   Pass 3 (config-declared): plain string fields annotated with `entity` in YAML config.
    */
   private _extractRefsFromData(
     data: Record<string, unknown>,
     entityDef: import("@opensync/sdk").EntityDefinition | undefined,
+    fieldAnnotations?: import("./config/loader.js").CompiledFieldAnnotation[],
   ): Association[] {
     const result: Association[] = [];
     // Pass 1: fields that are already Ref objects (rules 1–3–4)
@@ -1572,6 +1585,26 @@ export class SyncEngine {
       const value = data[field];
       if (!value || typeof value !== 'string') continue; // only non-empty plain strings
       result.push({ predicate: field, targetEntity: descriptor.entity, targetId: value });
+      handledFields.add(field);
+    }
+    // Pass 3: config-declared field annotations — plain string values where the YAML field
+    // mapping declares `entity`. Runs after Pass 1+2 so those take precedence.
+    // Spec: specs/associations.md §9
+    if (fieldAnnotations?.length) {
+      for (const ann of fieldAnnotations) {
+        if (handledFields.has(ann.sourceField)) continue;
+        const rawId = ann.sourcePath
+          ? resolveSourcePath(data, ann.sourcePath)
+          : data[ann.sourceField];
+        if (!rawId || typeof rawId !== 'string') continue;
+        result.push({
+          predicate: ann.sourceField,
+          targetEntity: ann.entity,
+          targetId: rawId,
+          ...(ann.entityConnector ? { entityConnector: ann.entityConnector } : {}),
+        });
+        handledFields.add(ann.sourceField);
+      }
     }
     return result;
   }
@@ -1665,7 +1698,9 @@ export class SyncEngine {
       }
       if (!assoc.targetId) { out.push({ ...assoc, predicate: targetPredicate }); continue; }
       if (!this._entityKnownInShadow(assoc.targetEntity)) return { error: `Unknown targetEntity "${assoc.targetEntity}"` };
-      const canonId = dbGetCanonicalId(this.db, fromId, assoc.targetId);
+      // Spec: specs/associations.md §9 — entityConnector scopes lookup to a specific connector namespace.
+      const lookupConnector = assoc.entityConnector ?? fromId;
+      const canonId = dbGetCanonicalId(this.db, lookupConnector, assoc.targetId);
       if (!canonId) continue; // not yet in identity map — drop for now, deferred row handles the update
       const mapped = dbGetExternalId(this.db, canonId, toId);
       if (mapped === undefined) continue; // not yet in target — drop
@@ -1726,7 +1761,9 @@ export class SyncEngine {
       }
       if (!assoc.targetId) { out.push({ ...assoc, predicate: targetPredicate }); continue; }
       if (!this._entityKnownInShadow(assoc.targetEntity)) return { error: `Unknown targetEntity "${assoc.targetEntity}"` };
-      const canonId = dbGetCanonicalId(this.db, fromId, assoc.targetId);
+      // Spec: specs/associations.md §9 — entityConnector scopes lookup to a specific connector namespace.
+      const lookupConnector = assoc.entityConnector ?? fromId;
+      const canonId = dbGetCanonicalId(this.db, lookupConnector, assoc.targetId);
       if (!canonId) return null;
       const mapped = dbGetExternalId(this.db, canonId, toId);
       if (mapped === undefined) return null;
@@ -2072,6 +2109,18 @@ export class SyncEngine {
           }
           const childCanonId = walkCanonId;
 
+          // Spec: specs/associations.md §9 — extract associations from child element data.
+          // Pass 1+2 via _extractRefsFromData (Refs + schema auto-synthesis via nested entity schema).
+          // Computed once per child, shared across all targets.
+          const srcEntityDefForChild = this.wired.get(sourceMember.connectorId)?.entities.find((e) => e.name === (sourceMember.sourceEntity ?? sourceMember.entity));
+          const childElementSchema = getArrayElementSchema(srcEntityDefForChild, chain);
+          const childEntityDefLike = childElementSchema ? { schema: childElementSchema } as import("@opensync/sdk").EntityDefinition : undefined;
+          const childInboundAssoc = this._extractRefsFromData(childRaw, childEntityDefLike, sourceMember.fieldAnnotations);
+          const filteredChildAssoc = this._filterInboundAssociations(childInboundAssoc, sourceMember);
+          const childAssocSentinel = filteredChildAssoc.length
+            ? JSON.stringify([...filteredChildAssoc].sort((a, b) => a.predicate.localeCompare(b.predicate)))
+            : undefined;
+
           const childOutcomes: Outcome[] = [];
 
           for (const targetMember of childTargets) {
@@ -2089,9 +2138,8 @@ export class SyncEngine {
               continue;
             }
 
-            // No association remapping for array child records in MVP
             const dispatchResult = await this._dispatchToTarget(
-              targetMember, tw, resolved, undefined,
+              targetMember, tw, resolved, filteredChildAssoc,
               existingTargetId, targetShadow, childCanonId, ingestTs, batchId, sourceMember, childRecord.id,
             );
 
@@ -2124,7 +2172,7 @@ export class SyncEngine {
             // returns a non-null slot for array-source members.  INSERT OR IGNORE is
             // idempotent on subsequent poll passes.
             dbLinkIdentity(this.db, childCanonId, sourceMember.connectorId, childRecord.id);
-            const childSourceFd = buildFieldData(undefined, childCanonical, sourceMember.connectorId, ingestTs, undefined);
+            const childSourceFd = buildFieldData(undefined, childCanonical, sourceMember.connectorId, ingestTs, childAssocSentinel);
             dbSetShadow(this.db, sourceMember.connectorId, sourceMember.entity, childRecord.id, childCanonId, childSourceFd);
           })();
 
@@ -2257,7 +2305,7 @@ export class SyncEngine {
       // Spec: specs/connector-sdk.md § Ref — extract associations from Ref values in data.
       // Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.3 — shadow stores only declared local predicates
       const srcEntityDef = this.wired.get(sourceMember.connectorId)?.entities.find((e) => e.name === sourceMember.entity);
-      const inboundAssoc = this._extractRefsFromData(record.data as Record<string, unknown>, srcEntityDef);
+      const inboundAssoc = this._extractRefsFromData(record.data as Record<string, unknown>, srcEntityDef, sourceMember.fieldAnnotations);
       const filteredForSentinel = this._filterInboundAssociations(inboundAssoc, sourceMember);
       const assocSentinel = filteredForSentinel.length
         ? JSON.stringify([...filteredForSentinel].sort((a, b) => a.predicate.localeCompare(b.predicate)))

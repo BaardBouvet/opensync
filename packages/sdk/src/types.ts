@@ -97,6 +97,45 @@ export function isRef(value: unknown): value is Ref {
  * Connectors extract these from data fields so the engine can track relationships
  * without parsing field values itself.
  */
+// ─── ElementRecord ────────────────────────────────────────────────────────────
+
+/**
+ * Branding symbol for ElementRecord. Non-enumerable; invisible to JSON.stringify.
+ * Spec: specs/connector-sdk.md § ElementRecord
+ */
+export const ELEMENT_RECORD: unique symbol = Symbol('opensync.element');
+
+/**
+ * A connector-supplied wrapper for a single array element that provides a
+ * stable runtime identity key, bypassing the `element_key` config lookup.
+ *
+ * Connectors wrap elements with `element()` when the key is computed at
+ * runtime (e.g. derived from multiple fields) rather than a single config key.
+ * FK references are expressed via `Ref` values in `data` as normal.
+ *
+ * Spec: specs/connector-sdk.md § ElementRecord
+ */
+export interface ElementRecord {
+  readonly [ELEMENT_RECORD]: true;
+  /** Raw element field values. May contain Ref objects for FK references. */
+  data: Record<string, unknown>;
+  /** Optional stable element identity — used as the element key in place of
+   *  the `element_key` config field lookup. */
+  id?: string;
+}
+
+/**
+ * Factory — wraps an element object as an ElementRecord so the engine can
+ * discriminate it from plain data objects without magic string keys.
+ *
+ * Spec: specs/connector-sdk.md § ElementRecord
+ */
+export function element(rec: { data: Record<string, unknown>; id?: string }): ElementRecord {
+  return { [ELEMENT_RECORD]: true, data: rec.data, id: rec.id };
+}
+
+// ─── Associations ─────────────────────────────────────────────────────────────
+
 export interface Association {
   /** The field key in data whose value is this reference (e.g. 'companyId').
    *  For JSON-LD connectors, may be a full URI (e.g. 'https://schema.org/worksFor'). */
@@ -108,6 +147,12 @@ export interface Association {
 
   /** The referenced record's ID — usually the value of data[predicate]. */
   targetId: string;
+
+  /** When set, scope the identity-map lookup to this connector's namespace rather than
+   *  the source connector. Used when the field carries an external ID from a different
+   *  connector (cross-connector reference).
+   *  Spec: specs/associations.md §9 */
+  entityConnector?: string;
 }
 
 /**

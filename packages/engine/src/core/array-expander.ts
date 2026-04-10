@@ -1,5 +1,6 @@
 // Spec: specs/field-mapping.md §3.2/§3.4 — nested array expansion forward pass
-import type { ReadRecord } from "@opensync/sdk";
+import type { EntityDefinition, FieldDescriptor, FieldType, ReadRecord } from "@opensync/sdk";
+import { ELEMENT_RECORD } from "@opensync/sdk";
 import type { ChannelMember, ExpansionChainLevel } from "../config/loader.js";
 export type { ExpansionChainLevel };
 
@@ -108,6 +109,36 @@ export function deriveChildCanonicalId(
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
+// ─── Array element schema navigation ─────────────────────────────────────────
+
+/**
+ * Spec: specs/associations.md §9 — navigate the nested FieldType of a parent entity
+ * to extract the leaf-level FieldDescriptor map for expanded array elements.
+ *
+ * Example: chain [{arrayPath:'lines'},{arrayPath:'components'}]
+ *   schema['lines'].type.items.properties['components'].type.items.properties
+ *
+ * Returns undefined when the schema does not declare the array or when the item
+ * type is not an object. _extractRefsFromData handles undefined gracefully.
+ */
+export function getArrayElementSchema(
+  entityDef: EntityDefinition | undefined,
+  chain: { arrayPath: string }[],
+): Record<string, FieldDescriptor> | undefined {
+  if (!entityDef?.schema) return undefined;
+  let props: Record<string, FieldDescriptor> | undefined = entityDef.schema;
+  for (const level of chain) {
+    const fd: FieldDescriptor | undefined = props?.[level.arrayPath];
+    if (!fd) return undefined;
+    const ft: FieldType | undefined = fd.type;
+    if (!ft || typeof ft !== 'object' || ft.type !== 'array') return undefined;
+    const { items }: { items?: FieldType } = ft;
+    if (!items || typeof items !== 'object' || items.type !== 'object') return undefined;
+    props = items.properties;
+  }
+  return props;
+}
+
 // ─── Array expander ────────────────────────────────────────────────────────────
 
 /**
@@ -210,6 +241,23 @@ export function expandArrayRecord(
       elementObj = { _value: element };
       // Element identity is the string form of the scalar value (set semantics — duplicates deduplicated)
       elementKeyValue = String(element);
+    } else if (
+      typeof element === 'object' &&
+      element !== null &&
+      ELEMENT_RECORD in (element as object) &&
+      (element as Record<symbol, unknown>)[ELEMENT_RECORD] === true
+    ) {
+      // Spec: specs/connector-sdk.md § ElementRecord — connector-supplied element wrapper.
+      // Provides a runtime-computed identity key and carries Ref values in data.
+      const er = element as import("@opensync/sdk").ElementRecord;
+      elementObj = er.data;
+      if (er.id != null) {
+        elementKeyValue = er.id;
+      } else if (member.elementKey && member.elementKey in er.data) {
+        elementKeyValue = String(er.data[member.elementKey]);
+      } else {
+        elementKeyValue = String(i);
+      }
     } else {
       elementObj = element as Record<string, unknown>;
       elementKeyValue =

@@ -14,6 +14,9 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ### Added
 - **Sync Engine — per-channel `fields:` config** — canonical field declarations now live under a `fields:` key on each channel entry (e.g. `phone: { strategy: last_modified }`). This replaces the former `conflict:` channel key and makes `fields:` the natural home for future field-level metadata (`description:`, `type:`, …). The global top-level `conflict:` block is unchanged.
+- **Connector SDK — `ElementRecord` + `element()` factory** — connectors returning arrays can now wrap individual elements with `element({ data, id })` to supply a stable, connector-assigned key at runtime. The engine uses `er.id` as the element's external-ID suffix instead of the array index. Tests: AEA2.
+- **Sync Engine — element association extraction (`PLAN_ARRAY_ELEMENT_ASSOCIATIONS`)** — `_extractRefsFromData` now runs on each expanded array child record. `getArrayElementSchema` navigates the source entity's nested `FieldDescriptor` schema to feed Pass 2 for element-level FK fields. Child shadows store the `__assoc__` sentinel so deferred-association retries and discovery work correctly. Tests: AEA1, AEA4, AEA7.
+- **Sync Engine — field-level `entity` / `entity_connector` keys** — `FieldMappingEntry` now supports `entity` (triggers Pass 3 of `_extractRefsFromData`) and `entity_connector` (scopes identity lookup to a named connector's namespace). `assocMappings` and `fieldAnnotations` are derived automatically from field entries with `entity` set; top-level `associations` is deprecated with a runtime warning. Tests: FAA1–FAA12.
 
 ### Changed
 - **Sync Engine — `conflict:` YAML block removed** — the top-level `conflict:` block in `mappings/*.yaml` is no longer accepted. Field strategies belong in `channels[].fields:`, connector priorities on mapping entries (`priority:`), and field masters on field entries (`master: true`). Channels are now fully connector-agnostic in YAML.

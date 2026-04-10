@@ -324,6 +324,135 @@ Format:
 *Removed.* The `required` field has been dropped from `AssociationDescriptor`.
 Use `FieldDescriptor.required` on the schema entry for the predicate field instead.
 
+## § 9 Field-Level Association Annotations
+
+Sometimes a connector does not implement `getEntities()`, or does implement it but does not
+annotate FK fields with `entity` in `FieldDescriptor`. In both cases `_extractRefsFromData`
+Passes 1 and 2 find nothing to synthesise, and the cross-system FK remapping pipeline never
+fires — even though the connector's `data` payload clearly contains a FK string.
+
+The `entity` key on a `FieldMappingEntry` (in YAML config) is the escape hatch. It declares
+a plain-string field as a FK reference, enabling Pass 3 of `_extractRefsFromData` without
+any change to the connector.
+
+### § 9.1 Config syntax
+
+```yaml
+fields:
+  - source: company_id        # connector-local field name
+    target: companyId         # canonical name — also the routing key (§9.3)
+    entity: company           # connector-local entity name for identity lookup
+```
+
+Two keys:
+
+| Key | Required | Meaning |
+|-----|----------|---------|
+| `entity` | — | The connector's own entity name that this field references. Triggers Pass 3. |
+| `entity_connector` | optional | Scope the identity lookup to a specific connector's namespace. Used when the field carries an external ID from a different connector (cross-connector reference). When absent, lookup uses the source connector's own namespace. `entity_connector` without `entity` is a config error. |
+
+### § 9.2 Pass 3 algorithm
+
+Pass 3 runs in `_extractRefsFromData` after Pass 1 (explicit Refs) and Pass 2 (schema
+auto-synthesis), guarded by `handledFields`:
+
+```
+for each CompiledFieldAnnotation ann:
+    if ann.sourceField is already in handledFields: skip (Pass 1 or 2 took precedence)
+    rawId = data[ann.sourceField]   (or resolveSourcePath if ann.sourcePath set)
+    if rawId is not a non-empty string: skip (null/absent FK → no association)
+    push Association {
+        predicate:     ann.sourceField,
+        targetEntity:  ann.entity,
+        targetId:      rawId,
+        entityConnector: ann.entityConnector (if set)
+    }
+    mark ann.sourceField as handled
+```
+
+Null, `undefined`, non-string, and empty-string values are silently skipped — consistent
+with Pass 2. The `handledFields` guard ensures no duplicates if the same field is annotated
+both in the connector schema (Pass 2) and in YAML config (Pass 3); Pass 2 wins.
+
+### § 9.3 `target` is the canonical routing key
+
+No separate `association` routing key is needed. The field's `target` IS the canonical name
+for this FK — the same way scalar field routing works. Two connectors that both map their
+FK to canonical `companyId` (each with their own `source` name and `entity` value) are
+automatically linked through the shared `target`.
+
+At config load time, `ChannelMember.assocMappings` is derived automatically from field
+entries that have `entity` set:
+
+```typescript
+assocMappings = fields
+  .filter(f => f.entity)
+  .map(f => ({ source: f.source ?? f.target, target: f.target }));
+```
+
+### § 9.4 Cross-connector reference via `entity_connector`
+
+When a field carries an external ID from a different connector's namespace, declare
+`entity_connector` to scope the identity-map lookup:
+
+```yaml
+- source: hr_employee_id       # CRM field storing the HR system's employee ID
+  target: hrEmployeeId
+  entity: employees            # entity name in the hr connector
+  entity_connector: hr         # look up identity in hr's namespace, not crm's
+```
+
+Without `entity_connector` the engine uses the source connector's namespace and will defer
+(the account was registered under the `hr` connector, not `crm`). With it, the lookup is
+correctly scoped and resolves immediately.
+
+`entity_connector` must name a connector registered in `opensync.json`. A config-load-time
+warning is emitted if it names a connector not found in any channel.
+
+### § 9.5 Top-level `associations` deprecation
+
+The old top-level `associations: [{ source, target }]` key on a mapping entry is deprecated.
+Its function (predicate routing) is now expressed implicitly via field entries with `entity`.
+
+When `associations` is present, the engine emits a `[WARN]` at config load time and uses the
+list as a fallback only when no field-level `entity` annotations are found. Remove the key
+and migrate to field-level `entity`:
+
+```yaml
+# Before (deprecated):
+fields:
+  - source: company_id
+    target: companyId
+associations:
+  - source: company_id
+    target: companyId
+
+# After:
+fields:
+  - source: company_id
+    target: companyId
+    entity: company
+```
+
+### § 9.6 `element()` factory — runtime element key override
+
+Connectors that return arrays can wrap individual elements with the `element()` factory from
+`@opensync/sdk` to supply a stable, connector-assigned key at runtime:
+
+```typescript
+import { element } from '@opensync/sdk';
+
+data: {
+  lines: records.map(r =>
+    element({ data: { sku: r.sku, productId: r.fkId }, id: r.stableKey }),
+  ),
+}
+```
+
+When the engine encounters an `ElementRecord` (detected via the `ELEMENT_RECORD` brand
+symbol), it uses `er.id` as the element's external-ID suffix instead of the array index.
+Normal field mapping and association extraction (Passes 1–3) still fire on `er.data`.
+
 ## Design Rationale
 
 ### Why Inline in `data`?

@@ -178,6 +178,13 @@ const FieldMappingEntrySchemaBase = z.object({
    *  this field are dropped before resolution. Built into ch.conflict.fieldMasters at
    *  load time; promoted per-channel (does not affect other channels). */
   master: z.boolean().optional(),
+  /** Spec: specs/associations.md §9 — treat this field as a FK reference to the named
+   *  connector-local entity. When set, the engine synthesises an Association during ingest
+   *  (Pass 3 of _extractRefsFromData) so no Ref object is required in connector data. */
+  entity: z.string().optional(),
+  /** Spec: specs/associations.md §9 — scope identity-map lookup to this specific connector's
+   *  namespace. Requires entity. When absent, lookup uses the source connector's namespace. */
+  entity_connector: z.string().optional(),
 }).refine(
   (f) => !(f.source && f.source_path),
   { message: "source and source_path are mutually exclusive on a field mapping entry" },
@@ -192,6 +199,9 @@ const FieldMappingEntrySchemaBase = z.object({
     return !/\[\d+\]/.test(f.source_path);
   },
   { message: "source_path with an array index ([N]) is only allowed on forward_only fields (array-index write-back is not supported)" },
+).refine(
+  (f) => !(f.entity_connector && !f.entity),
+  { message: "entity_connector requires entity to be set on the same field mapping entry" },
 );
 
 // element_fields is self-referential, so define the full schema using z.lazy.

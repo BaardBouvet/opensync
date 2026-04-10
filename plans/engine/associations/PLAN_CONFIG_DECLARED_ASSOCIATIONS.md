@@ -1,6 +1,6 @@
 # PLAN: Field-Level Association Annotations
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-10  
 **Effort:** S  
 **Domain:** packages/engine  

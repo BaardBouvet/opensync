@@ -113,6 +113,19 @@ export interface AssocPredicateMapping {
   target: string;   // canonical predicate name (routing key; never stored)
 }
 
+/** Spec: specs/associations.md §9 — compiled form of a field-level entity annotation.
+ * Derived at config load time from FieldMappingEntry entries that have `entity` set. */
+export interface CompiledFieldAnnotation {
+  /** Connector-local field name (f.source ?? f.target). */
+  sourceField: string;
+  /** Dotted source path (f.source_path), if set. */
+  sourcePath?: string;
+  /** Target entity name. */
+  entity: string;
+  /** When set, scope identity lookup to this connector's namespace. */
+  entityConnector?: string;
+}
+
 // Spec: specs/field-mapping.md §3.4 — one level in a multi-level expansion chain.
 export interface ExpansionChainLevel {
   arrayPath: string;
@@ -124,6 +137,9 @@ export interface ExpansionChainLevel {
   orderBy?: Array<{ field: string; direction: "asc" | "desc" }>;
   crdtOrder?: boolean;
   crdtLinkedList?: boolean;
+  /** Spec: specs/associations.md §9 — field-level entity annotations for elements at this
+   *  chain level. Derived from element_fields entries that have `entity` set. */
+  fieldAnnotations?: CompiledFieldAnnotation[];
 }
 
 export interface ChannelMember {
@@ -138,7 +154,11 @@ export interface ChannelMember {
   outbound?: FieldMappingList;
   /** Spec: plans/engine/PLAN_PREDICATE_MAPPING.md §2.2 — declared association predicates.
    * Absent → no associations forwarded from/to this connector. */
-  assocMappings?: AssocPredicateMapping[];  /** When set, inject `record.id` into the stripped data map under this field name
+  assocMappings?: AssocPredicateMapping[];
+  /** Spec: specs/associations.md §9 — field-level entity annotations compiled from field
+   *  mapping entries with `entity` set. Present on flat members only. */
+  fieldAnnotations?: CompiledFieldAnnotation[];
+  /** When set, inject `record.id` into the stripped data map under this field name
    *  before `applyMapping` runs. Use only when the connector does not include its own
    *  PK in `record.data`. Spec: specs/field-mapping.md §4.1 */
   idField?: string;  // Spec: specs/field-mapping.md §3.2/§3.4 — nested array expansion fields
@@ -556,7 +576,34 @@ export function buildChannelsFromEntries(
       sourceEntity: resolvedSourceEntity,
       inbound,
       outbound,
-      assocMappings: entry.associations,
+      // Spec: specs/associations.md §9 — derive assocMappings from field entries that have
+      // `entity` set. When entry.associations is present, emit a deprecation warning and use
+      // it as fallback (top-level associations key is deprecated in favour of field-level entity).
+      assocMappings: (() => {
+        const fromFields = entry.fields
+          ?.filter((f) => f.entity)
+          .map((f) => ({ source: f.source ?? f.target, target: f.target }));
+        if (fromFields?.length) return fromFields;
+        if (entry.associations?.length) {
+          console.warn(
+            `[opensync] config: top-level "associations" on mapping "${entry.name ?? entry.channel}/${entry.connector}" is deprecated. ` +
+            `Migrate to field-level "entity" (and "entity_connector" if needed).`,
+          );
+          return entry.associations;
+        }
+        return undefined;
+      })(),
+      // Spec: specs/associations.md §9 — compiled field annotations for Pass 3 of
+      // _extractRefsFromData. Present on flat members only (not on array expansion members,
+      // which derive annotations per-level from element_fields).
+      fieldAnnotations: isFlatMember
+        ? entry.fields?.filter((f) => f.entity).map((f) => ({
+            sourceField: f.source ?? f.target,
+            sourcePath: f.source_path,
+            entity: f.entity!,
+            entityConnector: f.entity_connector,
+          }))
+        : undefined,
       idField: entry.id_field,
       arrayPath: entry.array_path,
       parentMappingName: entry.parent,
@@ -618,6 +665,12 @@ function resolveExpansionChain(
       orderBy: cursor.order_by as Array<{ field: string; direction: "asc" | "desc" }> | undefined,
       crdtOrder: cursor.order ?? undefined,
       crdtLinkedList: cursor.order_linked_list ?? undefined,
+      fieldAnnotations: cursor.fields?.filter((f) => f.entity).map((f) => ({
+        sourceField: f.source ?? f.target,
+        sourcePath: f.source_path,
+        entity: f.entity!,
+        entityConnector: f.entity_connector,
+      })),
     });
     cursor = parentEntry;
   }

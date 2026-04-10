@@ -1,6 +1,6 @@
 # PLAN: Associations on Nested Array Elements
 
-**Status:** backlog  
+**Status:** complete  
 **Date:** 2026-04-10  
 **Effort:** S  
 **Domain:** packages/sdk, packages/engine  

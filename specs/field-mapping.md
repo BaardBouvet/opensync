@@ -1028,6 +1028,50 @@ Declare a mapping as vocabulary-only:
 
 ---
 
+### 4.4 Field-level FK annotation (`entity`, `entity_connector`)
+
+When a connector does not implement `getEntities()` or does not declare `entity` on its
+`FieldDescriptor` schema entries, the YAML `entity` key on a `FieldMappingEntry` is the
+equivalent declaration in config:
+
+```yaml
+fields:
+  - source: company_id     # connector-local field name
+    target: companyId      # canonical name — also the association routing key
+    entity: company        # connector's own entity name for identity lookup
+```
+
+The `target` doubles as the canonical association routing key — the same canonical name unifies
+the FK across connectors automatically. No separate `associations` declaration is needed.
+
+When the field carries an external ID from a **different** connector's namespace, add
+`entity_connector`:
+
+```yaml
+  - source: hr_employee_id
+    target: hrEmployeeId
+    entity: employees
+    entity_connector: hr   # look up identity in 'hr' connector's namespace
+```
+
+**Rules:**
+- `entity_connector` requires `entity`. A config-load error is raised otherwise.
+- If neither the connector schema (`FieldDescriptor.entity`) nor the YAML `entity` key is
+  present, no association is synthesised for this field.
+- Both keys are ignored at write time — they govern **inbound** FK extraction only.
+
+**Precedence (Pass ordering):**
+1. Explicit `Ref` objects in `data` (Pass 1) — highest precedence.
+2. `FieldDescriptor.entity` in the connector's `getEntities()` schema (Pass 2).
+3. YAML `entity` key on the `FieldMappingEntry` (Pass 3) — lowest.
+
+When the same field is declared in both the connector schema and the YAML config, Pass 2 wins.
+
+**Status: implemented. Tests: `field-association-annotations.test.ts` FAA1–FAA12. Also
+see `specs/associations.md §9` for the detailed algorithm.**
+
+---
+
 ## 5. Filters and Routing
 
 `filter` and `reverse_filter` are unified config keys. The **bindings** differ by context:
