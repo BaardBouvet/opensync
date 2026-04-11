@@ -447,12 +447,13 @@ HAVING (?changeCount > 5)
 |-------|---------|-----------|
 | **RDF4J** (with SQLite backend) | Mature SPARQL, Java (JVM) | Heavyweight; not native TS/Node |
 | **Oxigraph** (Rust, embedded) | Fast, embeddable, SPARQL 1.1 support | Smaller ecosystem; less proven in prod |
+| **Postgres + RDF extension + IVM** ⭐ | ACID guarantees, native Postgres, incremental materialization for recomposition queries | SPARQL via extension (maturity varies); requires Postgres 14+ |
 | **LDF (Linked Data Fragments)** | Fits hub-and-spoke model | Experimental for this use case |
 | **Custom on SQLite + SPARQL engine** | Full TS control, simple deploy | Reinvent SPARQL parser and query planner |
 | **Duckdb + RDF extension** | Very fast; good analytics | Early-stage RDF support |
 | **Semantic databases (AllegroGraph, Virtuoso)** | Enterprise-grade | Expensive, requires hosted service |
 
-**Initial recommendation**: **Oxigraph** (or a fork/wrapper of it that exposes a Node-friendly API). It's actively maintained, supports SPARQL 1.1, and can be embedded.
+**Recommended approach (updated)**: **Postgres + RDF extension + IVM** for production deployments where Postgres is already in use. **Oxigraph** for embedded/edge deployments or early prototypes. Both implement the same `TripleStore` interface (§ 6.2).
 
 ### § 6.2 API Layer
 
@@ -480,6 +481,258 @@ interface TripleStore {
 ```
 
 Similar to the current `Db` adapter pattern, we define a `TripleStore` interface and swap implementations for different backends.
+
+### § 6.3 Postgres + RDF Extension + IVM: A Production-Grade Approach
+
+For organizations already running Postgres, a **Postgres-native RDF backend with Incremental View Maintenance (IVM)** offers significant advantages, especially for recomposition queries.
+
+#### § 6.3.1 Architecture
+
+```
+OpenSync Engine (Node.js / TypeScript)
+  ↓ (SPARQL via SQL wire protocol)
+Postgres TripleStore Extension
+  ├─ Triple storage (subject, predicate, object, graph)
+  ├─ Named graphs (hubspot, salesforce, canonical)
+  └─ Materialized views (IVM-maintained)
+      ├─ hubspot_flat_contact_view (pre-computed recomposition)
+      ├─ salesforce_nested_contact_view
+      └─ shopify_array_contact_view
+```
+
+#### § 6.3.2 Storage Layout
+
+The RDF extension stores triples as relational tables:
+
+```sql
+CREATE TABLE triples (
+  subject IRI,
+  predicate IRI,
+  object TEXT,  -- or typed_value for Postgres types
+  graph IRI,
+  added_batch UUID,
+  added_timestamp TIMESTAMPTZ,
+  PRIMARY KEY (subject, predicate, object, graph)
+);
+
+CREATE INDEX idx_triples_subject ON triples(subject);
+CREATE INDEX idx_triples_predicate ON triples(predicate);
+CREATE INDEX idx_triples_object ON triples(object);
+CREATE INDEX idx_triples_graph ON triples(graph);
+```
+
+#### § 6.3.3 IVM Materialization for Recomposition
+
+The key advantage: **use IVM to pre-materialize expensive recomposition queries**. Instead of running the CONSTRUCT query on-demand (which traverses blank nodes, JOINs across graphs, etc.), the query runs once and subsequent changes are **incrementally** applied.
+
+**Example: HubSpot recomposition view**
+
+```sql
+-- Instead of running the CONSTRUCT query every time,
+-- create a materialized view that stays up-to-date automatically
+
+CREATE MATERIALIZED VIEW hubspot_contact_export AS
+CONSTRUCT {
+  ?contact_out hubspot:firstname ?first ;
+               hubspot:lastname ?last ;
+               hubspot:billing_street ?b_street ;
+               hubspot:billing_city ?b_city ;
+               hubspot:billing_zip ?b_zip ;
+               hubspot:shipping_street ?s_street ;
+               hubspot:shipping_city ?s_city ;
+               hubspot:shipping_zip ?s_zip .
+}
+WHERE {
+  GRAPH canonical {
+    ?contact_in rdf:type canonical:Contact ;
+                canonical:firstName ?first ;
+                canonical:lastName ?last .
+    
+    OPTIONAL {
+      ?contact_in canonical:billingAddress ?billing_addr .
+      OPTIONAL { ?billing_addr canonical:street ?b_street . }
+      OPTIONAL { ?billing_addr canonical:city ?b_city . }
+      OPTIONAL { ?billing_addr canonical:zipCode ?b_zip . }
+    }
+    
+    OPTIONAL {
+      ?contact_in canonical:shippingAddress ?shipping_addr .
+      OPTIONAL { ?shipping_addr canonical:street ?s_street . }
+      OPTIONAL { ?shipping_addr canonical:city ?s_city . }
+      OPTIONAL { ?shipping_addr canonical:zipCode ?s_zip . }
+    }
+  }
+};
+
+-- Enable IVM on this view
+ALTER MATERIALIZED VIEW hubspot_contact_export SET INCREMENTAL;
+```
+
+**What IVM does:**
+1. When the `canonical` graph changes, the extension **calculates only the delta** (affected rows).
+2. The materialized view is updated **incrementally**, not recomputed from scratch.
+3. When the engine needs to write back to HubSpot, it queries the pre-materialized flat view — **instant access** to the correct structure.
+
+**Performance impact:**
+- First materialization: slow (but one-time)
+- Recomposition on-write: O(1) lookup + incremental maintenance cost
+- vs. on-demand CONSTRUCT: O(N) JOIN + blank node traversal every sync cycle
+
+#### § 6.3.4 Materialized Views for Each Target System
+
+Create one materialized view per target system's expected shape:
+
+```sql
+-- Salesforce (nested JSON)
+CREATE MATERIALIZED VIEW salesforce_contact_export AS
+CONSTRUCT {
+  ?contact_out salesforce:Name ?name ;
+               salesforce:MailingAddress [
+                 salesforce:Street ?b_street ;
+                 salesforce:City ?b_city ;
+                 salesforce:PostalCode ?b_zip
+               ] .
+} WHERE { /* nested structure query */ };
+ALTER MATERIALIZED VIEW salesforce_contact_export SET INCREMENTAL;
+
+-- Shopify (array)
+CREATE MATERIALIZED VIEW shopify_customer_export AS
+CONSTRUCT {
+  ?customer_out shopify:email ?email ;
+                shopify:addresses [
+                  rdf:type rdf:Seq ;
+                  rdf:_1 [ shopify:street1 ?s1 ; shopify:city ?c1 ] ;
+                  rdf:_2 [ shopify:street1 ?s2 ; shopify:city ?c2 ]
+                ] .
+} WHERE { /* array structure query */ };
+ALTER MATERIALIZED VIEW shopify_customer_export SET INCREMENTAL;
+```
+
+#### § 6.3.5 TripleStore Interface Implementation for Postgres
+
+```typescript
+class PostgresTripleStore implements TripleStore {
+  private pg: Pool;
+  
+  async query(sparql: string): Promise<QueryResult> {
+    // Convert SPARQL to SQL (or use extension's SPARQL-to-SQL translator)
+    const sql = this.sparqlToSql(sparql);
+    const result = await this.pg.query(sql);
+    return this.formatResult(result);
+  }
+  
+  async mutate(sparql: string): Promise<void> {
+    const sql = this.sparqlToSql(sparql);
+    await this.pg.query(sql);
+  }
+  
+  // For recomposition: fetch from materialized view
+  async getMaterializdView(viewName: string): Promise<any[]> {
+    const result = await this.pg.query(
+      `SELECT * FROM ${viewName}`
+    );
+    return result.rows;
+  }
+  
+  async begin(): Promise<Transaction> {
+    const client = await this.pg.connect();
+    await client.query("BEGIN");
+    return new PostgresTransaction(client);
+  }
+}
+```
+
+#### § 6.3.6 Hybrid Approach: On-Demand + Materialized
+
+For maximum flexibility:
+
+- **Materialized views**: For predictable, high-frequency recomposition queries (the 80% case)
+- **On-demand SPARQL**: For ad-hoc, custom, or rarely-used queries (the 20% case)
+
+Configuration:
+
+```yaml
+channels:
+  - id: contacts_sync
+    members:
+      - connectorId: hubspot
+        entity: contact
+        recomposition:
+          strategy: materialized_view
+          view_name: hubspot_contact_export
+          refresh_policy: incremental
+      
+      - connectorId: salesforce
+        entity: contact__c
+        recomposition:
+          strategy: materialized_view
+          view_name: salesforce_contact_export
+          refresh_policy: incremental
+      
+      - connectorId: custom_analytics
+        entity: contact_stats
+        recomposition:
+          strategy: on_demand_sparql
+          query: |
+            CONSTRUCT { ... } WHERE { ... }
+```
+
+#### § 6.3.7 Circuit Breakers & Safety with IVM
+
+Circuit breaker thresholds can query the materialized views for real-time dashboards:
+
+```sql
+-- Real-time sync health view
+CREATE MATERIALIZED VIEW sync_health AS
+SELECT
+  connector_id,
+  COUNT(*) as total_contacts,
+  COUNT(*) FILTER (WHERE added_timestamp > NOW() - INTERVAL '1 hour') as recent,
+  (COUNT(*) FILTER (WHERE added_timestamp > NOW() - INTERVAL '1 hour')::float /
+   NULLIF(COUNT(*), 0)) as hourly_change_rate
+FROM triples
+WHERE graph = 'canonical' AND predicate = 'rdf:type'
+GROUP BY connector_id;
+
+ALTER MATERIALIZED VIEW sync_health SET INCREMENTAL;
+```
+
+Then the engine queries this view to decide whether to DEGRADE or TRIP the circuit breaker.
+
+#### § 6.3.8 Tradeoffs: Postgres+IVM vs. Oxigraph
+
+| Aspect | Postgres+IVM | Oxigraph |
+|--------|-------------|---------|
+| **Deployment** | Requires Postgres 14+ | Embed in Node process |
+| **SPARQL maturity** | Via extension (varies) | Native, SPARQL 1.1 certified |
+| **Recomposition perf** | Fast (materialized) | Medium (on-demand queries) |
+| **Incremental updates** | Fast (IVM delta) | Medium (full recompute) |
+| **Debuggability** | SQL tools, psql | SPARQL debuggers |
+| **Scaling** | Scales with Postgres infra | Scales with Node memory |
+| **Ecosystem** | Mature Postgres tools | Growing Rust ecosystem |
+| **Cost** | OSS or managed Postgres | OSS |
+| **ACID guarantees** | ✓ (Postgres) | ✓ (if backend supports it) |
+
+#### § 6.3.9 Recommended: Dual Support
+
+Implement both backends behind the same `TripleStore` interface:
+
+1. **Postgres+IVM** for production deployments (org already runs Postgres, needs performance)
+2. **Oxigraph** for embedded/edge deployments, prototypes, or organizations without Postgres
+
+Both pass the same test suite. Configuration selects which backend at startup:
+
+```yaml
+settings:
+  tripleStoreBackend: postgres+ivm  # or "oxigraph"
+  postgres:
+    host: localhost
+    port: 5432
+    database: opensync_triples
+    extensions:
+      - rdf_extension_name
+      - ivm_extension_name
+```
 
 ---
 
@@ -760,6 +1013,20 @@ Do we need a secondary index like `identity_map`, or is `owl:sameAs` sufficient?
 
 - Are there mature SPARQL engines in Node / Bun? (Check Oxigraph, RDF4J JS, others.)
 - What about migration path from current SQLite model to RDF? (Research tools like RML, R2RML.)
+
+### § 11.5 Backend Selection: Postgres+IVM vs. Oxigraph
+
+**Which backend to recommend as the primary?**
+
+- **Postgres+IVM**: Best for production (incremental materialization speeds up recomposition, ACID at DB level, existing Postgres deployments). Requires RDF extension availability + Postgres 14+.
+- **Oxigraph**: Best for embedded/edge (single Node process, no external deps, SPARQL 1.1 certified). Smaller ecosystem; performance under 1M triples unproven.
+
+**Recommendation**: Support both behind the same `TripleStore` interface. Default to Postgres+IVM for new deployments; Oxigraph for embedded/prototype use.
+
+**Open questions**:
+- Which Postgres RDF extension to standardize on? (Consider Liquibase-RDF, Semantic Web extensions, etc.)
+- IVM refresh cadence: immediate, batched, or on-demand?
+- Fallback strategy if Postgres extension not available?
 
 ---
 
