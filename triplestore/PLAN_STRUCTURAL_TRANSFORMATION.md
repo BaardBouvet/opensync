@@ -706,6 +706,313 @@ WHERE {
 
 ---
 
+## Section 7.4 Recomposition Query Patterns: Reconstructing Full Subjects
+
+**Problem:** When recomposing a contact back to HubSpot, we need to fetch **all triples related to that contact** — both direct triples AND all triples on nested blank nodes. The plan mentions this but doesn't specify the SPARQL patterns.
+
+### § 7.4.1 Pattern 1: Fetch Subject + Direct Predicates
+
+```sparql
+# Fetch all direct triples for a contact
+SELECT ?predicate ?object WHERE {
+  GRAPH canonical {
+    <canonical:contact/id_123> ?predicate ?object .
+  }
+}
+```
+
+Result:
+```
+canonical:firstName → "Alice"
+canonical:lastName → "Smith"
+canonical:billingAddress → _:addr_1
+canonical:shippingAddress → _:addr_2
+```
+
+### § 7.4.2 Pattern 2: Recursive Blank Node Traversal
+
+But we also need all triples on `_:addr_1` and `_:addr_2`. This requires **recursive traversal**:
+
+```sparql
+# Fetch all triples reachable from a subject, including nested blank nodes
+# Step 1: Collect all blank nodes transitively reachable from root subject
+SELECT ?s ?predicate ?object WHERE {
+  GRAPH canonical {
+    # Start from root subject
+    <canonical:contact/id_123> ?p1 ?s .
+    
+    # Recursively follow to blank nodes
+    FILTER (ISBLANK(?s))
+    
+    # Now get all triples with this blank node as subject
+    ?s ?predicate ?object .
+  }
+}
+```
+
+**Problem with this query:** It doesn't handle **multiple levels of nesting** or **arrays with multiple items**. 
+
+**Better approach:** Use SPARQL 1.1 property paths or OPTIONAL:
+
+```sparql
+# Fetch all triples for a contact and all its nested blank nodes
+# This works for arbitrary nesting depth
+CONSTRUCT {
+  <canonical:contact/id_123> ?p1 ?o1 .
+  ?bn ?p2 ?o2 .
+}
+WHERE {
+  GRAPH canonical {
+    # Get direct triples
+    <canonical:contact/id_123> ?p1 ?o1 .
+    
+    # For each object that is a blank node, get its triples
+    {
+      <canonical:contact/id_123> ?p1_x ?bn .
+      FILTER (ISBLANK(?bn))
+      ?bn ?p2 ?o2 .
+    }
+    UNION
+    # Deeper nesting: blank nodes that are objects of blank nodes
+    {
+      <canonical:contact/id_123> ?p1_x ?bn1 .
+      FILTER (ISBLANK(?bn1))
+      ?bn1 ?p2_x ?bn2 .
+      FILTER (ISBLANK(?bn2))
+      ?bn2 ?p2 ?o2 .
+    }
+  }
+}
+```
+
+**This still doesn't scale for arbitrary depth.** Better solution:
+
+### § 7.4.3 Pattern 3: SPARQL 1.1 Property Paths (Recursive Closure)
+
+Use `*` (zero or more) to follow chains transitively:
+
+```sparql
+# Fetch all facts reachable from a root subject via any path
+CONSTRUCT {
+  ?s ?p ?o .
+}
+WHERE {
+  GRAPH canonical {
+    # Root subject or any subject reachable via blank nodes
+    {
+      BIND(<canonical:contact/id_123> AS ?s)
+    }
+    UNION
+    {
+      <canonical:contact/id_123> (^[^a]*/[^a]*)* ?s .
+      FILTER (ISBLANK(?s))
+    }
+    
+    # Get all triples from that subject
+    ?s ?p ?o .
+  }
+}
+```
+
+**This still has issues with XSD regex.** Cleaner approach:
+
+### § 7.4.4 Pattern 4: Engine-Side Graph Traversal (Recommended)
+
+Rather than complex SPARQL, the **recomposition engine does graph traversal in code**:
+
+```typescript
+async function fetchSubjectGraph(tripleStore: TripleStore, subjectIri: string): Promise<Triple[]> {
+  const triples: Triple[] = [];
+  const visited = new Set<string>();
+  const queue = [subjectIri];
+  
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    
+    // Fetch all triples with this subject
+    const directTriples = await tripleStore.query(`
+      SELECT ?p ?o WHERE {
+        <${current}> ?p ?o .
+      }
+    `);
+    
+    triples.push(...directTriples);
+    
+    // For each object that is a blank node, add to queue
+    for (const t of directTriples) {
+      if (isBlankNode(t.object)) {
+        queue.push(t.object);
+      }
+    }
+  }
+  
+  return triples;
+}
+```
+
+**Advantages:**
+- Clear logic, easy to debug
+- Handles arbitrary nesting depth
+- Can apply filtering/sorting in code
+- Works with any triplestore that supports SPARQL SELECT
+
+### § 7.4.5 Pattern 5: Grouped Reconstruction from Fetched Triples
+
+Once we have all triples, we must **group them by context** for reconstruction:
+
+```typescript
+// Step 1: Fetch complete graph
+const allTriples = await fetchSubjectGraph(tripleStore, contactIri);
+
+// Step 2: Group by nested context
+const result = {
+  id: extractValue(allTriples, contactIri, "schema:id"),
+  firstname: extractValue(allTriples, contactIri, "canonical:firstName"),
+  lastname: extractValue(allTriples, contactIri, "canonical:lastName"),
+  
+  // Group triples for billing address
+  billing_street: extractValue(
+    allTriples, 
+    getBillingAddressBlankNode(allTriples, contactIri), 
+    "canonical:street"
+  ),
+  billing_city: extractValue(
+    allTriples,
+    getBillingAddressBlankNode(allTriples, contactIri),
+    "canonical:city"
+  ),
+  // ... etc
+};
+
+function extractValue(
+  triples: Triple[], 
+  subject: string, 
+  predicate: string
+): string | undefined {
+  const triple = triples.find(
+    t => t.subject === subject && t.predicate === predicate
+  );
+  return triple?.object as string;
+}
+
+function getBillingAddressBlankNode(triples: Triple[], contactIri: string): string {
+  // Find the blank node linked via canonical:billingAddress
+  const triple = triples.find(
+    t => t.subject === contactIri && 
+         t.predicate === "canonical:billingAddress" &&
+         isBlankNode(t.object)
+  );
+  return triple?.object as string;
+}
+```
+
+### § 7.4.6 Pattern 6: Context-Free Reconstruction via SPARQL
+
+Alternatively, use a **CONSTRUCT query tailored per recomposition rule**:
+
+```sparql
+# For HubSpot: flatten all nested addresses into prefix-style fields
+CONSTRUCT {
+  ?contact_out hubspot:firstname ?first ;
+               hubspot:lastname ?last ;
+               hubspot:billing_street ?b_street ;
+               hubspot:billing_city ?b_city ;
+               hubspot:billing_zip ?b_zip ;
+               hubspot:shipping_street ?s_street ;
+               hubspot:shipping_city ?s_city ;
+               hubspot:shipping_zip ?s_zip .
+}
+WHERE {
+  GRAPH canonical {
+    # Root
+    ?contact_in rdf:type canonical:Contact ;
+                canonical:firstName ?first ;
+                canonical:lastName ?last .
+    
+    # Billing address (optional nested object)
+    OPTIONAL {
+      ?contact_in canonical:billingAddress ?billing_addr .
+      OPTIONAL { ?billing_addr canonical:street ?b_street . }
+      OPTIONAL { ?billing_addr canonical:city ?b_city . }
+      OPTIONAL { ?billing_addr canonical:zipCode ?b_zip . }
+    }
+    
+    # Shipping address (optional nested object)
+    OPTIONAL {
+      ?contact_in canonical:shippingAddress ?shipping_addr .
+      OPTIONAL { ?shipping_addr canonical:street ?s_street . }
+      OPTIONAL { ?shipping_addr canonical:city ?s_city . }
+      OPTIONAL { ?shipping_addr canonical:zipCode ?s_zip . }
+    }
+  }
+  
+  # Generate output subject for HubSpot
+  BIND(URI(CONCAT("hubspot:contact/", MD5(?contact_in))) AS ?contact_out)
+}
+```
+
+**Result:** A single HubSpot contact record (flat) with all fields populated from canonical nested structure.
+
+### § 7.4.7 Pattern 7: Arrays → Repeated Subjects
+
+For Shopify arrays, we need to reconstruct multiple items:
+
+```sparql
+# Reconstruct array of addresses
+CONSTRUCT {
+  ?contact_out shopify:addresses_item ?item_out .
+  ?item_out shopify:street1 ?street ;
+            shopify:city ?city ;
+            shopify:zip ?zip ;
+            shopify:address_type ?type .
+}
+WHERE {
+  GRAPH canonical {
+    ?contact_in rdf:type canonical:Contact ;
+                canonical:addresses ?addr .
+    
+    # Optional: infer type from context (billing vs shipping)
+    OPTIONAL {
+      ?contact_in canonical:billingAddress ?addr .
+      BIND("billing" AS ?type)
+    }
+    OPTIONAL {
+      ?contact_in canonical:shippingAddress ?addr .
+      BIND("shipping" AS ?type)
+    }
+    
+    ?addr canonical:street ?street ;
+          canonical:city ?city ;
+          canonical:zipCode ?zip .
+  }
+  
+  # Generate stable IRI for each array item
+  BIND(URI(CONCAT("shopify:address/", MD5(CONCAT(?street, ?city, ?zip)))) AS ?item_out)
+}
+```
+
+**Result:** Multiple `shopify:addresses_item` objects, each flattened.
+
+### § 7.4.8 Decision: Which Pattern to Use?
+
+| Pattern | Use When | Pros | Cons |
+|---------|----------|------|------|
+| **1: Direct SELECT** | Simple flat mapping | Fast, simple | Doesn't handle nesting |
+| **2–3: SPARQL recursion** | Academic / showing off | Pure SPARQL | Complex, hard to debug |
+| **4: Engine traversal** | Production code | Clear, debuggable | Requires application logic |
+| **6: Context-specific CONSTRUCT** | Mapping known structures | Fast, type-safe | Must write per-system query |
+| **7: Array generation** | Multi-item reconstruction | Handles batching | Requires stable item identity |
+
+**Recommendation for MVP:** 
+- Keep recomposition rules **declarative in YAML** (which rules apply)
+- Store **per-system CONSTRUCT queries** (the actual SPARQL template)
+- Let the engine **template-substitute the root subject** and execute
+- Fall back to **Pattern 4 (engine traversal)** only for custom SPARQL
+
+---
+
 ## Section 8: Examples
 
 ### § 8.1 HubSpot (Flat) ↔ Salesforce (Nested) ↔ Shopify (Array)
@@ -959,7 +1266,7 @@ WHERE {
 
 These new specs would supersede/extend the main triplestore plan:
 
-- **New**: `specs/triplestore-structural-mapping.md` — Decomposition/recomposition semantics, blank node identity, array handling.
+- **New**: `specs/triplestore-structural-mapping.md` — Decomposition/recomposition semantics, blank node identity, array handling, **SPARQL query patterns for reconstructing full subjects** (§7.4).
 - **Updated**: `specs/triplestore-config.md` — Extend with `decomposition`, `recomposition`, `structuralMappings` config sections.
 - **New**: `specs/triplestore-sdk-structural-hints.md` — Connector metadata for declaring structure (address prefixes, JSON paths, arrays).
 - **Update**: `specs/triplestore-pipeline.md` — Add structural transformation stages to ingest/dispatch pipeline.
