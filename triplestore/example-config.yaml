@@ -1,0 +1,253 @@
+# Example: HubSpot ↔ Salesforce Contact Sync (Triplestore Model)
+# This file illustrates the proposed YAML configuration format.
+
+namespaces:
+  canonical: http://opensync.example.com/canonical/
+  hubspot: http://hubspot.example.com/
+  salesforce: http://salesforce.example.com/
+  rdf: http://www.w3.org/1999/02/22-rdf-syntax-ns#
+  prov: http://www.w3.org/ns/prov#
+  owl: http://www.w3.org/2002/07/owl#
+
+connectors:
+  - id: hubspot
+    type: hubspot
+    config:
+      apiKey: ${HUBSPOT_API_KEY}
+      baseUrl: https://api.hubapi.com
+    graphName: hubspot
+    classUri: canonical:Contact
+
+  - id: salesforce
+    type: salesforce
+    config:
+      instanceUrl: https://acme.salesforce.com
+      clientId: ${SF_CLIENT_ID}
+      clientSecret: ${SF_CLIENT_SECRET}
+    graphName: salesforce
+    classUri: canonical:Contact
+
+channels:
+  - id: contacts_bidirectional
+    description: "Sync contacts between HubSpot and Salesforce"
+    
+    # Which connectors participate?
+    members:
+      - connectorId: hubspot
+        entity: contact
+      - connectorId: salesforce
+        entity: contact__c
+    
+    # --- Identity Resolution ---
+    # How do we know when two systems are talking about the same person?
+    identityMatching:
+      type: sparql
+      rule: |
+        # Match by email (case-insensitive)
+        # Both systems must have the same email to be considered the same contact
+        ?hs_contact rdf:type canonical:Contact .
+        ?sf_contact rdf:type canonical:Contact .
+        ?hs_contact email ?email .
+        ?sf_contact email ?email .
+        FILTER (STRLEN(?email) > 0)
+        FILTER (?hs_contact != ?sf_contact)
+      
+      # Template for canonical subject URI generation
+      # Can use functions like HASH(), STRLANG() for determinism
+      canonicalSubjectTemplate: "canonical:contact/{emailHash}/{domain}"
+    
+    # Alternative: Simple field-based matching (80% case)
+    # identityMatching:
+    #   type: field_based
+    #   fields:
+    #     - email
+    #   caseInsensitive: true
+    #   ignoreEmpty: true
+    
+    # --- Field Mapping ---
+    # HubSpot fields → canonical predicates
+    # Salesforce fields → canonical predicates
+    fieldMappings:
+      - connectorId: hubspot
+        graphName: hubspot
+        # source field → canonical predicate mapping
+        mappings:
+          - source_field: firstname
+            canonical_predicate: canonical:givenName
+          - source_field: lastname
+            canonical_predicate: canonical:familyName
+          - source_field: email
+            canonical_predicate: canonical:email
+          - source_field: phone
+            canonical_predicate: canonical:phone
+          - source_field: hs_lead_status
+            canonical_predicate: canonical:leadStatus
+          - source_field: lifecyclestage
+            canonical_predicate: canonical:lifecycleStage
+            # Optional: transformation function
+            transform: UCASE()  # convert to uppercase in canonical
+      
+      - connectorId: salesforce
+        graphName: salesforce
+        mappings:
+          - source_field: FirstName
+            canonical_predicate: canonical:givenName
+          - source_field: LastName
+            canonical_predicate: canonical:familyName
+          - source_field: Email
+            canonical_predicate: canonical:email
+          - source_field: Phone
+            canonical_predicate: canonical:phone
+          - source_field: LeadSource
+            canonical_predicate: canonical:leadSource
+            enum_mapping:
+              "Web": canonical:leadSource/web
+              "Referral": canonical:leadSource/referral
+              "Email": canonical:leadSource/email
+          - source_field: Industry
+            canonical_predicate: canonical:industry
+    
+    # --- Conflict Resolution ---
+    # When systems disagree on a field value, who wins?
+    conflictResolution:
+      strategy: field_masters
+      
+      # Per-field truth owners
+      masters:
+        canonical:email: hubspot        # HubSpot is the authority on emails
+        canonical:phone: hubspot         # HubSpot owns phone numbers
+        canonical:leadSource: salesforce # Salesforce owns lead source
+        canonical:industry: salesforce   # Salesforce owns industry
+        "**": last_write_wins            # Everything else: whoever wrote it most recently
+      
+      # Optional: timestamp source for LWW
+      timestampFromProvenance: true
+      
+      # Optional: custom SPARQL reasoner for complex rules
+      # customReasoner: |
+      #   SELECT ?predicate ?winnerConnector {
+      #     ?predicate rdf:type rdf:Property .
+      #     ?predicate rdf:label ?label .
+      #     FILTER (CONTAINS(?label, "Address"))
+      #     # If email is @acme.com (internal), prefer internal system
+      #     {
+      #       FILTER (STRENDSWITH(?email, "@acme.com"))
+      #       BIND("hubspot" AS ?winnerConnector)
+      #     }
+      #     UNION
+      #     {
+      #       FILTER (!STRENDSWITH(?email, "@acme.com"))
+      #       BIND("salesforce" AS ?winnerConnector)
+      #     }
+      #   }
+    
+    # --- Derived Fields ---
+    # After initial sync, compute derived facts via SPARQL
+    derivations:
+      - name: compute_fullname
+        description: "Merge given + family name into full name"
+        query: |
+          INSERT {
+            GRAPH canonical {
+              ?contact canonical:fullName ?fullName .
+            }
+          }
+          WHERE {
+            GRAPH canonical {
+              ?contact rdf:type canonical:Contact .
+              ?contact canonical:givenName ?given .
+              ?contact canonical:familyName ?family .
+              BIND(CONCAT(?given, " ", ?family) AS ?fullName)
+            }
+          }
+      
+      - name: flag_internal_emails
+        description: "Mark @acme.com emails as internal"
+        query: |
+          INSERT {
+            GRAPH canonical {
+              ?contact canonical:isInternal true .
+            }
+          }
+          WHERE {
+            GRAPH canonical {
+              ?contact canonical:email ?email .
+              FILTER (STRENDSWITH(?email, "@acme.com"))
+            }
+          }
+    
+    # --- Schedule ---
+    schedule:
+      # Poll HubSpot every 5 minutes
+      - connector: hubspot
+        interval: PT5M
+      
+      # Poll Salesforce every 10 minutes
+      - connector: salesforce
+        interval: PT10M
+    
+    # --- Safety ---
+    safety:
+      circuitBreaker:
+        enabledThreshold: 100    # flag if >100 inserts/updates in one batch
+        oscillationThreshold: 5  # flag if a field changes >5 times in 1 hour
+        errorRateThreshold: 0.1  # flag if >10% of writes fail
+        
+        action: DEGRADE           # DEGRADE or TRIP (stop syncing)
+    
+    # --- Observability ---
+    observability:
+      # Log all triples written
+      logAllTriples: false
+      
+      # Log conflicts and resolutions
+      logConflicts: true
+      
+      # Export lineage graph on each sync
+      exportLineageOn: demand    # "never", "always", "demand", "error"
+
+# --- Global Settings ---
+settings:
+  # Database
+  tripleStoreBackend: oxigraph
+  tripleStoreDbPath: "./sync-state.rdf"
+  
+  # Performance
+  readTimeoutMs: 30000
+  writeTimeoutMs: 60000
+  batchSize: 100
+  
+  # Safety
+  enableCircuitBreakers: true
+  maxConcurrentConnectorReads: 2
+  
+  # Observability
+  logLevel: info
+  auditLogPath: "./audit.log"
+  
+  # Lineage
+  enableLineageTracking: true
+  lineageStorePath: "./lineage/"
+
+# --- Health Checks ---
+healthCheck:
+  enabled: true
+  interval: PT1M
+  
+  checks:
+    - connector: hubspot
+      entity: contact
+      expectedRecords: ">0"
+    
+    - connector: salesforce
+      entity: contact__c
+      expectedRecords: ">0"
+    
+    - query: |
+        # Total canonical contacts
+        SELECT (COUNT(?contact) as ?count) WHERE {
+          GRAPH canonical {
+            ?contact rdf:type canonical:Contact .
+          }
+        }
+      expectedResult: ">1000"
