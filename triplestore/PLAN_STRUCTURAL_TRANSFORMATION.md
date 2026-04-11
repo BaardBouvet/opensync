@@ -1011,6 +1011,35 @@ WHERE {
 - Let the engine **template-substitute the root subject** and execute
 - Fall back to **Pattern 4 (engine traversal)** only for custom SPARQL
 
+### § 7.4.9 Advanced: IVM Materialization (Postgres Backend)
+
+If using **Postgres + RDF extension + Incremental View Maintenance** (see PLAN_TRIPLESTORE_ARCHITECTURE § 6.3), recomposition queries can be **pre-materialized** as views, avoiding the traversal overhead altogether.
+
+**How it works:**
+
+1. **Define recomposition as a materialized view:**
+   ```sql
+   CREATE MATERIALIZED VIEW hubspot_contact_export AS
+   CONSTRUCT { ... } WHERE { ... };
+   ALTER MATERIALIZED VIEW hubspot_contact_export SET INCREMENTAL;
+   ```
+
+2. **IVM maintains the view automatically:**
+   - When canonical graph changes, IVM calculates only the **delta** (affected rows)
+   - View is updated **incrementally**, not recomputed from scratch
+
+3. **Recomposition is O(1) lookup:**
+   ```typescript
+   const flatContacts = await store.getMaterializdView('hubspot_contact_export');
+   // Instant access to pre-flattened contacts; no traversal
+   ```
+
+**Performance comparison:**
+- **Without IVM** (Patterns 4–7): O(N) per contact (traverse blank nodes, JOINs)
+- **With IVM** (materialized view): O(1) per contact + incremental maintenance cost
+
+For production deployments with Postgres, IVM materialization is **strongly recommended** over on-demand queries for frequently-recomposed systems.
+
 ---
 
 ## Section 8: Examples
@@ -1266,8 +1295,8 @@ WHERE {
 
 These new specs would supersede/extend the main triplestore plan:
 
-- **New**: `specs/triplestore-structural-mapping.md` — Decomposition/recomposition semantics, blank node identity, array handling, **SPARQL query patterns for reconstructing full subjects** (§7.4).
-- **Updated**: `specs/triplestore-config.md` — Extend with `decomposition`, `recomposition`, `structuralMappings` config sections.
+- **New**: `specs/triplestore-structural-mapping.md` — Decomposition/recomposition semantics, blank node identity, array handling, **SPARQL query patterns for reconstructing full subjects** (§7.4), **IVM materialization for production Postgres deployments** (§7.4.9).
+- **Updated**: `specs/triplestore-config.md` — Extend with `decomposition`, `recomposition`, `structuralMappings` config sections, materialize view strategy selection.
 - **New**: `specs/triplestore-sdk-structural-hints.md` — Connector metadata for declaring structure (address prefixes, JSON paths, arrays).
 - **Update**: `specs/triplestore-pipeline.md` — Add structural transformation stages to ingest/dispatch pipeline.
 
