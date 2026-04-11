@@ -12,23 +12,35 @@ The core architectural redesign. Covers:
 - **§1–2**: RDF data model, triples, named graphs, connector contract
 - **§3**: Configuration format (YAML + SPARQL hybrid)
 - **§4–5**: Conflict resolution and safety/rollback
-- **§6–7**: Backend options (Oxigraph) and configuration tooling
+- **§6–7**: Backend options and configuration tooling
+  - **§ 6.1**: Candidates table (Oxigraph, Postgres+IVM ⭐, RDF4J, etc.)
+  - **§ 6.3 NEW**: Postgres + RDF extension + IVM (Incremental View Maintenance)
+    - Production-grade approach for orgs running Postgres
+    - Pre-materialized recomposition views for O(1) access
+    - Incremental updates eliminate expensive query traversal
+    - ACID guarantees at database level
 - **§8–9**: Comparison with current OpenSync, development roadmap
 - **§10–14**: Key decisions to iterate, open questions, success criteria
+  - **§ 11.5 NEW**: Backend selection decision point
 - **Appendices**: Worked example (HubSpot → Salesforce), ontology sketch
 
-**Key insight**: Triples as the universal currency. All data flows become graph operations.
+**Key insight**: Triples as the universal currency. All data flows become graph operations. **Postgres+IVM enables production performance through materialized views.**
 
 ### 3. **PLAN_STRUCTURAL_TRANSFORMATION.md** (1061 lines, 14 sections)
 Companion plan addressing a major challenge: **systems use different structural shapes**.
 
 - **§1–2**: RDF representation of nesting (blank nodes, arrays via predicates)
-- **§3–4**: Decomposition (flat→nested) and recomposition (nested→flat) rules
-- **§5–6**: Configuration format, SPARQL for complex transforms
+- **§3–6**: Decomposition (flat→nested) and recomposition (nested→flat) rules
+  - Configuration-driven transformations (YAML) + SPARQL fallback
+  - 7 recomposition query patterns (§ 7.4.1–7.4.8)
+  - **§ 7.4.9 NEW**: IVM Materialization as production optimization
+    - Pre-materialize recomposition queries as views
+    - Incremental updates eliminate O(N) traversal
+    - O(1) access to recomposed structures
 - **§7–8**: SDK connector hints, full worked example (HubSpot ↔ SF ↔ Shopify)
 - **§9–14**: Performance, edge cases, testing strategy
 
-**Key insight**: Blank node identity + deterministic naming + SPARQL recomposition solves the structural mismatch problem.
+**Key insight**: Blank node identity + deterministic naming + SPARQL recomposition solves the structural mismatch. **IVM materialization (Postgres backend) provides production performance.**
 
 ### 4. **example-config.yaml** (253 lines)
 Concrete YAML configuration for a HubSpot ↔ Salesforce sync, showing:
@@ -37,6 +49,28 @@ Concrete YAML configuration for a HubSpot ↔ Salesforce sync, showing:
 - Field mappings with conflict resolution
 - Derived fields (SPARQL)
 - Safety settings and observability
+
+## Backend Options & Performance
+
+**This architecture supports two backends:**
+
+### Postgres + RDF Extension + Incremental View Maintenance (IVM)
+- **Best for**: Production deployments in Postgres environments
+- **Key advantage**: Pre-materialized recomposition views
+  - Canonical → flat/nested/array transforms stored as views
+  - IVM maintains views incrementally on canonical changes
+  - Recomposition: O(1) lookup vs. O(N) traversal
+  - ACID guarantees at database level
+- **See**: PLAN_TRIPLESTORE_ARCHITECTURE § 6.3, PLAN_STRUCTURAL_TRANSFORMATION § 7.4.9
+
+### Oxigraph (Rust, Embedded)
+- **Best for**: Prototypes, embedded deployments, edge systems
+- **Key advantage**: No external dependencies, SPARQL 1.1 certified
+- **See**: PLAN_TRIPLESTORE_ARCHITECTURE § 6.1, § 6.3.8
+
+**Recommendation**: Support both behind the same `TripleStore` interface. Choose based on deployment constraints.
+
+---
 
 ## How They Relate
 
@@ -98,13 +132,13 @@ PLAN_STRUCTURAL_TRANSFORMATION.md
 
 ## Quick Reference: File Sizes & Sections
 
-| File | Lines | Sections | Purpose |
-|------|-------|----------|---------|
+| File | Lines | Sections | Key Additions |
+|------|-------|----------|----------------|
 | README.md | 41 | — | Overview + next steps |
-| PLAN_TRIPLESTORE_ARCHITECTURE.md | 1006 | 14 | Core architecture |
-| PLAN_STRUCTURAL_TRANSFORMATION.md | 1061 | 14 | Flat ↔ nested handling |
+| PLAN_TRIPLESTORE_ARCHITECTURE.md | ~1350 | 15 | § 6.3 (Postgres+IVM backend), § 11.5 (backend decision) |
+| PLAN_STRUCTURAL_TRANSFORMATION.md | ~1430 | 15 | § 7.4 (SPARQL recomposition patterns), § 7.4.9 (IVM materialization) |
 | example-config.yaml | 253 | — | Concrete example |
-| **Total** | **2361** | — | — |
+| **Total** | **~3074** | — | **Comprehensive triplestore design** |
 
 ## Architecture Philosophy
 
