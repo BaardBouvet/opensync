@@ -896,3 +896,392 @@ Example data file:
   { "_id": "2", "name": "Kari Hansen", "email": "kari@test.no", "_updatedAt": "2026-04-01T11:00:00Z" }
 ]
 ```
+
+---
+
+## § Webhooks
+
+Connectors participate in the webhook pipeline through two optional lifecycle methods and one
+parsing method.
+
+### Why queue-first
+
+Webhooks are **never processed inline**. The HTTP handler writes the raw payload to
+`webhook_queue` and responds 200 immediately. The engine drains the queue asynchronously.
+
+Why: source systems time out if you take too long to respond (typically 5–30 s). If
+processing crashes midway, the queued payload survives for retry. Webhook storms (e.g.
+100 k contacts imported → 100 k webhooks in one minute) are absorbed by the queue rather
+than blocking the engine.
+
+### Registration
+
+`onEnable` / `onDisable` at the **entity** level (not connector level) are where webhooks for
+that entity are registered and deregistered. The engine provides `ctx.webhookUrl` — register
+this with the source system. All inbound requests to that URL are routed to `handleWebhook`.
+
+```typescript
+// Register with the source API in onEnable
+async onEnable(ctx: ConnectorContext) {
+  const res = await ctx.http('https://api.example.com/webhooks', {
+    method: 'POST',
+    body: JSON.stringify({ targetUrl: ctx.webhookUrl, events: ['contact.created', 'contact.updated'] })
+  });
+  const { subscriptionId } = await res.json();
+  await ctx.state.set('webhookSubscriptionId', subscriptionId);
+}
+
+async onDisable(ctx: ConnectorContext) {
+  const subscriptionId = await ctx.state.get('webhookSubscriptionId');
+  await ctx.http(`https://api.example.com/webhooks/${subscriptionId}`, { method: 'DELETE' });
+  await ctx.state.delete('webhookSubscriptionId');
+}
+```
+
+The subscription ID stored in `ctx.state` survives across process restarts. If the engine calls
+`onDisable` + `onEnable` in sequence (re-registration), the old state is cleaned up by
+`onDisable` before `onEnable` writes new state — no orphaned subscriptions.
+
+### Thin vs thick payloads
+
+**Thick**: the source system sends the full object in the payload. `handleWebhook` normalizes
+and returns it directly.
+
+**Thin**: the source sends only an ID and event type. `handleWebhook` calls `ctx.http` to
+fetch the full object before returning. Both patterns look identical to the engine after
+`handleWebhook` returns — the engine has no concept of webhook thickness.
+
+### Signature validation
+
+`handleWebhook` receives the raw `Request` object. The connector validates the source
+signature before processing:
+
+```typescript
+async handleWebhook(req: Request, ctx: ConnectorContext) {
+  const signature = req.headers.get('X-Hub-Signature');
+  const body = await req.text();
+  if (!verifyHmac(body, ctx.config.webhookSecret, signature)) {
+    throw new AuthError('Invalid webhook signature');
+  }
+  const events = JSON.parse(body);
+  // ... parse and return WebhookBatch[]
+}
+```
+
+Throwing `AuthError` returns a 400 to the upstream. Throwing `ConnectorError` returns 500,
+which the source system should retry. Return an empty array to silently acknowledge a
+ping/validation request without queuing records.
+
+---
+
+## § Isolation Constraints
+
+Connectors run inside the engine process but are treated as stateless invocable units.
+These constraints ensure that works correctly today and is compatible with future worker isolation.
+
+### No module-level mutable state
+
+Module scope is not guaranteed to persist between connector method calls. Any data that must
+survive across calls belongs in one of two places:
+
+| Data type | Where it goes |
+|-----------|--------------|
+| Lightweight, JSON-serializable (subscription IDs, tokens, cursors) | `ctx.state` |
+| Expensive live objects (connection pools, open sockets) | Created fresh per call, torn down in `finally` |
+
+**Why**: in a future isolated-worker model, the module is re-evaluated in each worker — any
+module-level cache is gone. In a shared long-lived process, module-level Maps keyed by
+connection string can be accessed by multiple unrelated connector instances, leaking
+credentials or corrupting state across tenants.
+
+### Use `ctx.http`, not global `fetch`
+
+All outbound HTTP calls go through `ctx.http`. Calling global `fetch()` directly bypasses:
+- Auth header injection
+- Request journal logging
+- Automatic 429/5xx retry with backoff
+- `allowedHosts` enforcement (when active)
+
+### `allowedHosts`
+
+Every connector that makes outbound HTTP calls must declare the hostnames it contacts in
+`ConnectorMetadata.allowedHosts`:
+
+```typescript
+metadata: {
+  allowedHosts: ['api.hubspot.com', '*.hubapi.com'],
+}
+```
+
+Rules:
+- Exact hostnames or `'*.'` wildcard prefixes only.
+- Omit the field for connectors that connect via a non-HTTP driver (e.g. PostgreSQL DSN).
+- `allowedHosts` is declarative today. Network enforcement is the goal of the future worker
+  model. Declaring it now means the data is already there when enforcement lands — no
+  connector changes needed.
+- Connectors that contact environment-specific hostnames must list all of them.
+
+### No Node.js built-ins
+
+Connectors must not import `node:fs`, `node:child_process`, `node:net`, or similar directly.
+Use Web-standard APIs instead, or a driver library via npm dependency for database connectors.
+
+**Why**: this permits connectors to run in Deno or a `vm.Context` without modification.
+A connector that imports `node:fs` is locked to Node.js permanently.
+
+**Exception**: connectors explicitly labeled `LOCAL-ONLY` (e.g. `jsonfiles`) may use
+`node:*` because they are development fixtures, not remote connectors.
+
+### Bundling
+
+Each connector ships a `bundle` script:
+
+```bash
+bun run bundle   # produces dist/bundle.js via esbuild
+```
+
+HTTP-only connectors target `--platform=browser`. Connectors using Node.js libraries (DB
+drivers, Kafka) target `--platform=node`. Native addons (`.node` binaries) are disallowed —
+they cannot be bundled and make cross-platform distribution impossible.
+
+The bundle script validates today that all deps are inlineable. When the worker model lands,
+this artifact is what the engine executes — the connector's source never runs directly in
+the tenant context.
+
+---
+
+## § Packaging & Publishing
+
+A connector is a standard npm package with a single default export that implements `Connector`.
+
+### Development lifecycle
+
+A connector moves through three stages. Only the `plugin` field in `opensync.json` changes
+between them:
+
+| Stage | `plugin` value | Build needed? |
+|-------|---------------|---------------|
+| Active dev, no deps | `./connectors/my-connector/src/index.ts` | No — Bun runs TS directly |
+| Active dev, has own deps (workspace + `"bun"` condition) | `@acme/my-connector` | No |
+| Cross-repo (`file:`, no `"bun"` condition) | `@acme/my-connector` | Yes |
+| Published to npm | `@acme/my-connector` | Yes (pre-publish) |
+
+**Why no runtime install**: the engine never runs `npm install` at sync time. Connectors must
+be installed before the engine starts. This makes deployments reproducible and prevents
+supply-chain substitution at runtime.
+
+### Package format
+
+```json
+{
+  "name": "@opensync/connector-hubspot",
+  "version": "1.2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "bun":    "./src/index.ts",
+      "import": "./dist/index.js",
+      "types":  "./dist/index.d.ts"
+    }
+  },
+  "peerDependencies": {
+    "@opensync/sdk": ">=0.1.0"
+  }
+}
+```
+
+`@opensync/sdk` is declared as a **peer dependency**, not a regular dependency. This prevents
+two copies of the SDK landing in the same process — which would cause type mismatches even if
+both versions are identical. The engine owns the SDK version; connectors defer to it.
+
+The `"bun"` export condition lets Bun skip the build step and run TypeScript directly. Node
+resolves `dist/index.js` instead. This is why no build is needed during development when
+both the engine and the connector run under Bun.
+
+### Naming convention
+
+| Scope | Pattern | Example |
+|-------|---------|---------|
+| Official (maintained by OpenSync) | `@opensync/connector-<name>` | `@opensync/connector-hubspot` |
+| Community / third-party | `opensync-connector-<name>` | `opensync-connector-acme-erp` |
+| Private / internal | any valid package name | `@acme/opensync-crm` |
+
+The engine does not care about the package name. The convention makes connectors discoverable
+on npm (`keywords: ["opensync-connector"]`).
+
+### Engine resolution
+
+```typescript
+// Simplified — engine loads plugin via dynamic import
+async function loadPlugin(pluginSpec: string): Promise<Connector> {
+  const specifier = pluginSpec.startsWith('.')
+    ? resolve(process.cwd(), pluginSpec)   // relative path → absolute
+    : pluginSpec;                          // package name → node_modules
+  const mod = await import(specifier);
+  const connector = (mod.default ?? mod) as Connector;
+  if (!connector.metadata) throw new Error(`Plugin "${pluginSpec}" exports no Connector`);
+  return connector;
+}
+```
+
+### Building and publishing
+
+```json
+{
+  "scripts": {
+    "build": "tsc --build",
+    "bundle": "esbuild src/index.ts --bundle --platform=browser --format=esm --outfile=dist/bundle.js",
+    "pub":   "bun run build && npm publish --access public"
+  }
+}
+```
+
+### Security
+
+- Pin connector versions in `bun.lockb` / `package-lock.json`. Never use `latest` in production.
+- For official connectors, verify npm provenance (`npm audit signatures`).
+- Connectors never access `process.env`. Secrets reach them only via `ctx.config`, which the engine injects from `opensync.json` after credential resolution.
+
+---
+
+## § SDK Helpers
+
+Optional utilities in `@opensync/sdk` that reduce boilerplate for common REST connector
+patterns. These are ergonomics only — they do not change the connector contract or engine
+behaviour.
+
+### Why helpers exist
+
+REST connector code converges on the same four patterns: cursor pagination, watermark
+comparison, record construction, and chunked batch writes. Without helpers, every connector
+reimplements these with subtle differences. The helper layer provides tested, consistent
+implementations so connector authors focus on the API-specific logic.
+
+### Usage
+
+```typescript
+import { helpers } from '@opensync/sdk';
+// helpers.pagination.*  helpers.state.*  helpers.watermark.*  helpers.mapping.*  helpers.batching.*
+```
+
+All helpers are optional. A connector can use none, some, or all.
+
+### Pagination helpers
+
+Pagination is the largest repeated pattern in REST connectors. The helpers cover four
+popular strategies:
+
+```typescript
+type FetchPage<TPage> = (args: {
+  cursor?: string;
+  offset?: number;
+  page?: number;
+  since?: Date;
+}) => Promise<TPage>;
+
+interface PaginationRunOptions<TPage, TItem, TBatch = TItem[]> {
+  fetchPage: FetchPage<TPage>;
+  items: (page: TPage) => TItem[];
+  toBatch?: (items: TItem[]) => TBatch;
+  state?: StateStore;
+  stateKey?: string;  // e.g. "cursor:contact" — persists cursor across page fetches
+  since?: Date;
+}
+
+// Strategies
+helpers.pagination.cursor<TPage, TItem>(options & { nextCursor, initialCursor? }): AsyncIterable<TBatch>
+helpers.pagination.offset<TPage, TItem>(options & { nextOffset, pageSize }): AsyncIterable<TBatch>
+helpers.pagination.page<TPage, TItem>(options & { hasNext, initialPage? }): AsyncIterable<TBatch>
+helpers.pagination.nextUrl<TPage, TItem>(options & { fetchPage(url?), nextUrl }): AsyncIterable<TBatch>
+```
+
+**Behavior rules:**
+- Yields one batch per fetched page (unless `toBatch` reshapes).
+- Persists cursor/page token to `state` when `stateKey` is provided. This enables resumable
+  pagination: if the engine is interrupted mid-fetch, the next run continues from the last
+  checkpoint rather than starting over. The saved cursor is cleared on successful completion.
+- Does not swallow HTTP or mapping errors.
+
+**Why cursor persistence in state?** Pagination cursors are ephemeral — only valid for one
+in-progress read run. They must not be stored as watermarks (`ReadBatch.since`), because a
+cursor pointing to page 4 of yesterday's full sync is not a valid anchor for today's
+incremental fetch. The `stateKey` option stores the cursor separately in `ctx.state` for
+resumable mid-run recovery only.
+
+Example:
+```typescript
+async function* read(ctx, since) {
+  yield* helpers.pagination.cursor({
+    since: since ? new Date(since) : undefined,
+    state: ctx.state,
+    stateKey: 'cursor:contact',
+    fetchPage: async ({ cursor, since }) => {
+      const url = new URL('/contacts', ctx.config.baseUrl);
+      if (cursor) url.searchParams.set('after', cursor);
+      if (since)  url.searchParams.set('updatedAfter', helpers.watermark.toIso(since));
+      const res = await ctx.http(url);
+      if (!res.ok) throw new ConnectorError(`API error: ${res.status}`, 'API_ERROR', res.status >= 500);
+      return res.json();
+    },
+    items: (page) => page.results ?? [],
+    nextCursor: (page) => page.paging?.next?.after,
+    toBatch: (items) => ({
+      records: items.map(item => helpers.mapping.record(item.id, item.properties)),
+    }),
+  });
+}
+```
+
+### State helpers
+
+```typescript
+helpers.state.key(parts: string[]): string
+// => joins parts with ':' for consistent namespaced state keys
+// e.g. helpers.state.key(['pagination', 'contact', 'cursor']) => "pagination:contact:cursor"
+
+helpers.state.checkpoint<T>(state: StateStore, key: string): {
+  get(): Promise<T | undefined>;
+  set(value: T): Promise<void>;
+  clear(): Promise<void>;
+}
+```
+
+### Watermark helpers
+
+```typescript
+helpers.watermark.toIso(date: Date): string        // Date → ISO 8601 string
+helpers.watermark.parse(value: string | number | Date): Date
+helpers.watermark.max(a?: Date, b?: Date): Date | undefined
+```
+
+Consistent time handling across connectors — prevents format mismatches when comparing
+watermarks.
+
+### Mapping helpers
+
+```typescript
+helpers.mapping.record(
+  id: string,
+  data: Record<string, unknown>,
+): ReadRecord
+
+helpers.mapping.association(
+  entity: string,
+  externalId: string,
+  role: string,
+): { entity: string; externalId: string; role: string }
+```
+
+### Batching helpers
+
+```typescript
+helpers.batching.chunk<T>(items: T[], size: number): T[][]
+helpers.batching.fromAsync<T>(source: AsyncIterable<T>, size: number): AsyncIterable<T[]>
+```
+
+`chunk` splits a flat array into fixed-size sub-arrays for batch API calls. `fromAsync`
+does the same for async iterables — accumulates items from the stream and yields chunks,
+letting the connector call a batch write endpoint for every N records without buffering
+the whole stream.

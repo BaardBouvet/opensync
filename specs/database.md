@@ -73,6 +73,7 @@ CREATE TABLE shadow_state (
   canonical_data  TEXT NOT NULL,   -- JSON: FieldData
   deleted_at      TEXT,
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  created_at      TEXT,
   PRIMARY KEY (connector_id, entity_name, external_id)
 );
 ```
@@ -191,27 +192,6 @@ Response bodies are capped at 65 536 bytes.
 
 ---
 
-### `webhook_queue`
-
-Inbound webhook payloads queued for async processing. The HTTP server writes here and responds
-200 immediately. `processWebhookQueue()` drains the queue.
-
-```sql
-CREATE TABLE webhook_queue (
-  id            TEXT PRIMARY KEY,
-  connector_id  TEXT NOT NULL,
-  raw_payload   TEXT NOT NULL,
-  batch_id      TEXT,
-  status        TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'processing' | 'completed' | 'failed'
-  attempts      INTEGER NOT NULL DEFAULT 0,
-  error         TEXT,
-  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  processed_at  TEXT
-);
-```
-
----
-
 ### `oauth_tokens`
 
 Centralised token cache. One row per connector. Includes a `locked_at` column used as a
@@ -229,27 +209,6 @@ CREATE TABLE oauth_tokens (
 
 The lock protocol: `UPDATE ... SET locked_at = now WHERE locked_at IS NULL OR locked_at < now - 30s`.
 `changes === 1` → lock acquired. SQLite's serialised write model makes this race-free.
-
----
-
-### `onboarding_log`
-
-Append-only diagnostics for `discover()`, `onboard()`, and `addConnector()` operations.
-
-```sql
-CREATE TABLE onboarding_log (
-  id              TEXT PRIMARY KEY,
-  channel_id      TEXT NOT NULL,
-  entity          TEXT NOT NULL,
-  action          TEXT NOT NULL,           -- 'discover' | 'onboard' | 'add-connector'
-  matched         INTEGER,
-  unique_count    INTEGER,
-  linked          INTEGER,
-  shadows_seeded  INTEGER,
-  started_at      TEXT NOT NULL,
-  finished_at     TEXT NOT NULL
-);
-```
 
 ---
 
@@ -323,7 +282,7 @@ See `specs/safety.md` for the circuit-breaker policy.
 CREATE TABLE circuit_breaker_events (
   id           TEXT PRIMARY KEY,
   channel_id   TEXT NOT NULL,
-  event        TEXT NOT NULL,   -- 'tripped' | 'reset' | 'degraded'
+  event        TEXT NOT NULL,   -- 'trip' | 'reset' | 'half_open'
   reason       TEXT,
   occurred_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -380,6 +339,53 @@ CREATE TABLE IF NOT EXISTS written_state (
   data          TEXT NOT NULL,
   written_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   PRIMARY KEY (connector_id, entity_name, canonical_id)
+);
+```
+
+---
+
+## `deferred_associations`
+
+Records associations that could not be resolved during the current ingest pass because the
+target record had not yet been ingested. The engine retries deferred links on subsequent
+passes. Why deferred rather than dropped: the source connector may produce ordered payloads
+where the referenced record arrives in a later batch; deferring avoids losing the link entirely.
+
+```sql
+CREATE TABLE IF NOT EXISTS deferred_associations (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_connector     TEXT    NOT NULL,
+  entity_name          TEXT    NOT NULL,
+  source_external_id   TEXT    NOT NULL,
+  target_connector     TEXT    NOT NULL,
+  deferred_at          INTEGER NOT NULL,
+  UNIQUE (source_connector, entity_name, source_external_id, target_connector)
+);
+```
+
+---
+
+## `no_link`
+
+Explicit anti-affinity declarations: each row asserts that two external IDs must never be
+merged into the same canonical UUID. Written by `splitCanonical()` when a previously linked
+pair is intentionally broken. The A-side is the record that was broken out (the owner); B-side
+is its sibling. Checked before every `dbMergeCanonicals()` call.
+
+Why store directionality: the entity that splits *owns* the decision. Only the owner (A-side)
+can later rescind it — the other party cannot accidentally re-merge.
+
+```sql
+CREATE TABLE IF NOT EXISTS no_link (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  connector_id_a  TEXT NOT NULL,
+  entity_name_a   TEXT NOT NULL,
+  external_id_a   TEXT NOT NULL,
+  connector_id_b  TEXT NOT NULL,
+  entity_name_b   TEXT NOT NULL,
+  external_id_b   TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (connector_id_a, entity_name_a, external_id_a, connector_id_b, entity_name_b, external_id_b)
 );
 ```
 

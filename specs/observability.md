@@ -31,7 +31,7 @@ The journal stores response bodies which may contain personal data.
 
 **Retention policy**: Configurable per deployment (default: 30 days). Rows older than the retention window are deleted by a background pruning job.
 
-**Body storage policy**: Request and response bodies are stored by default, truncated to 64 KB each. Connectors can opt out per-request by returning a special header in the response (future). The raw body is the primary way to reproduce an API error offline, so truncation is preferable to omission.
+**Body storage policy**: Request and response bodies are stored by default, truncated to 64 KB each. The raw body is the primary way to reproduce an API error offline, so truncation is preferable to omission.
 
 **Credential masking**: The `Authorization` header and any field listed as `secret: true` in the connector's `configSchema` are replaced with `[REDACTED]` before the row is written. Fields are masked in both `request_body` and `response_body`.
 
@@ -133,7 +133,7 @@ This powers the CLI's `opensync inspect <entity-id>` command.
 ### Channel Health
 
 Per sync channel:
-- **Status**: OPERATIONAL / DEGRADED / TRIPPED
+- **Status**: CLOSED / OPEN / HALF_OPEN (see `specs/safety.md § Circuit Breakers`)
 - **Circuit breaker reason**: Why it tripped
 - **Queue depth**: How many jobs pending
 - **Last sync**: When, how many records, success/failure

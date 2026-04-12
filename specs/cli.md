@@ -2,6 +2,11 @@
 
 The primary interface for developers. No UI — everything is a command.
 
+> **Distribution status:** the `opensync` binary is not yet packaged or distributed. The
+> commands below document the intended interface. The engine API (`SyncEngine` class and
+> `loadConfig` from `@opensync/engine`) is the current programmatic entry point. See
+> [specs/overview.md](overview.md) for the data flow.
+
 ## One binary, two modes
 
 There is a single `opensync` binary. It does not require a running daemon for most operations.
@@ -96,8 +101,8 @@ the daemon does not need to be running.
 ```
 $ opensync status
 Channels:
-  contacts    OPERATIONAL    last sync: 2 min ago    queue: 0 pending
-  orders      TRIPPED        reason: volume threshold exceeded (532 > 100)
+  contacts    CLOSED    last sync: 2 min ago    queue: 0 pending
+  orders      OPEN      reason: error rate 62% > 50% threshold
 
 Connectors:
   hubspot     active    last sync: 2 min ago
@@ -180,49 +185,6 @@ Processing 1,240 operations…
   1,180 reverted
      60 skipped (target cannot delete)
 Cleaning up identity links and shadow state…
-Done.
-```
-
-### opensync dlq list
-
-List records in the dead letter queue — records that failed after all retry attempts.
-
-```
-$ opensync dlq list
-connector       entity     external_id    action    attempts  last_error                         last_failed_at
-fiken-prod      invoice    inv_9912       insert    3         ValidationError: missing vat_no    2026-04-03T10:12:00Z
-hubspot-prod    contact    hs_contact_7   update    3         ConnectorError: 500 Internal …     2026-04-03T09:45:00Z
-
-$ opensync dlq list --connector fiken-prod
-$ opensync dlq list --channel contacts
-```
-
-### opensync dlq retry
-
-Retry one or all dead-lettered records. Moves matching entries back into the job queue for the next sync cycle.
-
-```
-$ opensync dlq retry inv_9912
-Queued 1 record for retry.
-
-$ opensync dlq retry --all
-Queued 2 records for retry.
-
-$ opensync dlq retry --connector fiken-prod
-Queued 1 record for retry.
-```
-
-### opensync dlq discard
-
-Permanently discard dead-lettered records (removes from the queue without retrying).
-
-```
-$ opensync dlq discard inv_9912
-Discarded 1 record.
-
-$ opensync dlq discard --all --connector fiken-prod
-WARNING: 1 record will be permanently discarded.
-Continue? [y/N] y
 Done.
 ```
 

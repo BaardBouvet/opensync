@@ -1,176 +1,107 @@
-# Actions & Workflows
+# Actions
 
-Beyond data mirroring — trigger side effects when data changes. Send an email when a deal closes, create an invoice when a subscription activates, post to Slack when a contact is created.
+Connectors that trigger side effects (send an email, post to Slack, create an invoice) expose
+named **actions** via `getActions()`. An action connector is push-only — it receives data from
+the engine but has no `read()` method.
 
-## Event Bus
+## Why a separate connector type
 
-The engine emits events as data flows through the pipeline.
+Sync and side effects have fundamentally different requirements:
 
-```typescript
-type SyncEvent = {
-  type: 'record.created' | 'record.updated' | 'record.deleted' | 'sync.completed' | 'sync.failed';
-  entityType: string;
-  entityId: string;
-  channelId: string;
-  sourceInstanceId: string;
-  data: Record<string, unknown>;
-  changes?: FieldDiff[];        // for record.updated: which fields changed
-  timestamp: number;
-};
+- **Sync writes** must be idempotent, diffed, conflict-resolved, and rolled back. They manage
+  a shared canonical record.
+- **Action invocations** are fire-and-forget. They don't produce a record the engine tracks.
+  They may be irreversible (sent email, posted Slack message). They must be deduplicated
+  across retries but not rolled back.
 
-class EventBus {
-  on(eventType: string, handler: (event: SyncEvent) => Promise<void>): void;
-  off(eventType: string, handler: Function): void;
-  emit(event: SyncEvent): Promise<void>;
-}
-```
+Keeping them separate means the sync pipeline can apply its full safety machinery without
+special-casing side effects, and action connectors stay simple — they only implement
+`execute()`.
 
-Events are emitted after successful dispatch. If dispatch fails, no event fires (preventing actions on failed syncs).
-
-## Action Connectors
-
-A simplified connector type — push-only, no fetch. For systems that receive data but don't produce it.
+## SDK types
 
 ```typescript
-interface ActionConnector {
-  metadata: { name: string; version: string; type: 'action' };
-  getActions(ctx: SyncContext): ActionDefinition[];
-}
-
-/** A single action payload decorated with an engine-assigned idempotency key. */
 interface ActionPayload {
-  /** Deterministic key stable across retries: sha256(triggerRuleId + eventId + payloadIndex).
+  /** Engine-assigned deterministic key for this action invocation. Stable across retries.
    *  Forward to the target API as a per-message dedup key where supported. */
   idempotencyKey: string;
   data: Record<string, unknown>;
 }
 
 interface ActionDefinition {
-  name: string;                               // e.g. 'send-email', 'post-message'
+  name: string;                                        // e.g. 'send-email', 'post-message'
   description?: string;
-  schema?: Record<string, FieldDescriptor>;   // optional input schema for validation/UI prompts
-  scopes?: string[];                          // OAuth scopes required
+  schema?: Record<string, FieldDescriptor>;            // optional — required fields validated before execute() is called
+  scopes?: string[];                                   // OAuth scopes required to execute this action
 
-  /** Execute one or more action payloads.
-   *
-   *  Receives an AsyncIterable<ActionPayload> and yields one ActionResult per input in the
-   *  same positional order. Mirrors the insert/update/delete write-method contract exactly.
-   *
-   *  Serial connectors iterate and call their API once per item.
-   *  Bulk connectors use chunk() to accumulate and call a batch endpoint.
-   *  Throw to abort the entire run; yield ActionResult with error set for per-item failures. */
-  execute(
-    payloads: AsyncIterable<ActionPayload>,
-    ctx: ConnectorContext,
-  ): AsyncIterable<ActionResult>;
+  /** Streaming batch execute — mirrors insert/update/delete contract.
+   *  Yields one ActionResult per input payload in the same positional order.
+   *  Serial connectors iterate one-at-a-time; bulk connectors chunk and batch. */
+  execute(payloads: AsyncIterable<ActionPayload>, ctx: ConnectorContext): AsyncIterable<ActionResult>;
 }
 
 interface ActionResult {
-  /** Raw response from the external system, if any. */
-  data?: Record<string, unknown>;
-  /** Present means this action invocation failed. Absent means success.
-   *  Yield with error set for per-item failures; throw only to abort the entire run. */
-  error?: string;
+  data?: Record<string, unknown>;  // response from the external system, if any
+  error?: string;                  // present = this item failed; absent = success
 }
 ```
 
-There is no `id` field on `ActionResult` — actions do not produce a record that the engine needs to track in the identity map.
+`schema` uses the same `FieldDescriptor` type as entity fields. If provided, the engine
+validates that all `required: true` fields are present in each payload before calling
+`execute()`. This lets the engine reject malformed payloads at the boundary without the
+connector needing defensive validation inside `execute()`.
 
-This allows one connector to implement multiple actions (e.g. Slack: `post-message`, `open-dm`, `create-channel`) instead of creating a separate connector for each operation.
+`idempotencyKey` is computed by the engine as `sha256(triggerRuleId + eventId + payloadIndex)`.
+It is stable across retries — if the engine crashes between generating the payload and
+receiving the result, re-running produces the same key. Connectors that forward this to the
+target API (e.g. as a `customArgs` field in SendGrid or a `StatusCallback` tag in Twilio)
+get end-to-end deduplication with no connector-side state needed.
 
-Examples: email sender, SMS gateway, Slack poster, invoice generator.
+## execute() contract
 
-Action connectors get the same `ConnectorContext` as regular connectors — `ctx.http` for auto-logged HTTP calls, `ctx.state` for persistent state, `ctx.config` for credentials.
+`execute()` mirrors the `insert()` / `update()` / `delete()` contract exactly:
 
-## Trigger Rules
+- Receives an `AsyncIterable<ActionPayload>` — pull at whatever rate suits the API.
+- Yields one `ActionResult` per input, in the same positional order.
+- Yield `{ error: message }` for per-item failures; throw to abort the entire run.
+- Actions get the full `ConnectorContext` — `ctx.http`, `ctx.state`, `ctx.config`, `ctx.logger`.
 
-Declarative rules that connect sync events to actions.
+There is no `id` on `ActionResult` — actions do not produce a record the engine needs to
+track in the identity map.
+
+This allows one connector to implement multiple actions (e.g. Slack: `post-message`,
+`open-dm`, `create-channel`) instead of requiring a separate connector per operation.
+
+## Connector declaration
+
+A pure action connector omits `getEntities` and implements only `getActions`:
 
 ```typescript
-interface TriggerRule {
-  id: string;
-  name: string;
-  event: string;                              // e.g. 'record.updated'
-  entityType: string;                         // e.g. 'deal'
-  condition: TriggerCondition;
-  actionConnector: string;                    // action connector name (e.g. 'slack')
-  actionName: string;                         // named action exposed by that connector (e.g. 'post-message')
-  actionPayloadTemplate: Record<string, unknown>;  // template with {{field}} references
-}
-
-interface TriggerCondition {
-  field: string;
-  operator: 'eq' | 'neq' | 'gt' | 'lt' | 'contains' | 'changed_to';
-  value: unknown;
-}
+export default {
+  metadata: { name: 'slack', version: '1.0.0', auth: { type: 'api-key' } },
+  getActions(ctx) {
+    return [
+      {
+        name: 'post-message',
+        schema: {
+          channel:  { type: 'string', required: true, description: 'Channel name, e.g. #general' },
+          message:  { type: 'string', required: true, description: 'Message text' },
+        },
+        async *execute(payloads, ctx) {
+          for await (const payload of payloads) {
+            const res = await ctx.http('https://slack.com/api/chat.postMessage', {
+              method: 'POST',
+              body: JSON.stringify({ channel: payload.data.channel, text: payload.data.message }),
+            });
+            const json = await res.json();
+            yield json.ok ? {} : { error: json.error };
+          }
+        },
+      },
+    ];
+  },
+} satisfies Connector;
 ```
 
-### YAML Config
-
-```yaml
-triggers:
-  - name: "Deal Won Notification"
-    event: record.updated
-    entity: deal
-    condition:
-      field: status
-      operator: changed_to
-      value: won
-    actionConnector: email
-    actionName: send-email
-    payload:
-      to: "{{email}}"
-      subject: "Deal won: {{dealName}}"
-      body: "Congratulations! Deal {{dealName}} worth {{amount}} was just closed."
-
-  - name: "New Contact Alert"
-    event: record.created
-    entity: contact
-    condition:
-      field: source
-      operator: eq
-      value: website
-    actionConnector: slack
-    actionName: post-message
-    payload:
-      channel: "#new-leads"
-      message: "New lead from website: {{firstName}} {{lastName}} ({{email}})"
-```
-
-### Trigger Engine
-
-```typescript
-class TriggerEngine {
-  registerRule(rule: TriggerRule): void;
-  removeRule(ruleId: string): void;
-}
-```
-
-Listens on the event bus. When an event matches a rule's event type + entity type + condition, it:
-1. Resolves the payload template (replace `{{field}}` with actual values)
-2. Generates an idempotency key (prevents double-sends on retry): `sha256(triggerRuleId + entityId + eventTimestamp)`
-3. Resolves `actionName` to an `ActionDefinition` from `actionConnector.getActions(ctx)`
-4. Validates payload against the selected action's `schema` if provided
-5. Accumulates all pending payloads for the same `(actionConnector, actionName)` pair in this cycle into a single `AsyncIterable<ActionPayload>` and passes it to `execute()`
-6. Consumes results as they are yielded — no buffering of the full output
-7. On per-item failure (`error` present), retries that item (same `idempotencyKey`) on the next cycle
-8. On connector throw, aborts the entire action run for that `(connector, action)` pair; all pending items retry next cycle
-
-## Idempotency for Actions
-
-Actions use the same idempotency store as the sync pipeline. The dedup key is built into each `ActionPayload.idempotencyKey`:
-
-```
-sha256(triggerRuleId + eventId + payloadIndex)
-```
-
-This key is stable across retries — if the engine crashes between generating the payload and receiving the result, the same key will be generated on retry. Connectors should forward it to the target API as a per-message dedup token where supported (e.g. `customArgs` in a SendGrid personalization, `StatusCallback` tag in Twilio). For APIs with no native dedup mechanism, the connector can check `ctx.state` keyed by `idempotencyKey` before sending.
-
-If a webhook is delivered twice, or a sync job retries, the action only fires once.
-
-## Relationship to Sync
-
-Actions are side effects of sync — they don't modify the sync pipeline. The event bus is fire-and-forget from the pipeline's perspective:
-- Pipeline completes → events emitted → actions fire asynchronously
-- Action failure does NOT roll back the sync
-- Action failure IS logged and can be retried
+A connector that both reads and dispatches side effects implements both `getEntities` and
+`getActions` in the same file.

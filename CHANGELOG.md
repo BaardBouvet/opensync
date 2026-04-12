@@ -12,6 +12,9 @@ At release: distill into a short intro paragraph + bold-label bullets, remove th
 
 ## [Unreleased]
 
+### Changed
+- **Specs — full cleanup pass** — deleted 7 unimplemented/redundant spec files (`agent-assistance.md`, `data-access.md`, `webhooks.md`, `rollback.md`, `connector-helpers.md`, `connector-isolation.md`, `connector-distribution.md`); their implemented content merged into `connector-sdk.md` and `sync-engine.md`. Removed unimplemented sections (DLQ, IdempotencyStore, retry logic, webhook queue, TriggerEngine) from `safety.md`, `cli.md`, and `actions.md`. Fixed circuit-breaker state names to `CLOSED/OPEN/HALF_OPEN` everywhere. Added `deferred_associations` and `no_link` tables to `database.md`; removed stale `webhook_queue` and `onboarding_log`. Added "why" rationale throughout.
+
 ### Added
 - **Sync Engine — per-channel `fields:` config** — canonical field declarations now live under a `fields:` key on each channel entry (e.g. `phone: { strategy: last_modified }`). This replaces the former `conflict:` channel key and makes `fields:` the natural home for future field-level metadata (`description:`, `type:`, …). The global top-level `conflict:` block is unchanged.
 - **Connector SDK — `ElementRecord` + `element()` factory** — connectors returning arrays can now wrap individual elements with `element({ data, id })` to supply a stable, connector-assigned key at runtime. The engine uses `er.id` as the element's external-ID suffix instead of the array index. Tests: AEA2.

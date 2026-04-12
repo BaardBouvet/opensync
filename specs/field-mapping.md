@@ -983,50 +983,6 @@ canonical on the forward pass but excludes it from the outbound payload.
 
 ---
 
-### 4.2 Alternative representation (`references_field`)
-
-```yaml
-fields:
-  - source: country_code   # stores "NO" (ISO alpha-2)
-    target: countryId
-    references: countries
-    references_field: isoCode   # field in the canonical countries entity to match against
-```
-
-When the source stores a different representation of the FK (ISO code instead of the entity's PK),
-`references_field` names the canonical field to use as the match key during forward resolution. The
-engine finds the `countries` entity whose `isoCode` equals `"NO"` and substitutes its canonical UUID.
-
-On the reverse pass, instead of writing the UUID, the engine writes the `isoCode` value for the
-target connector's matching entity record.
-
-**Status: requires design work (OSI-mapping §4 "references_field").**
-
----
-
-### 4.3 Vocabulary targets
-
-A canonical entity used as a shared lookup table (e.g. `country`, `currency`, `industry`).
-Vocabulary entities use `references` + `references_field` for all FK resolution. They are not
-synced bidirectionally — they are seeded once and used only for translation.
-
-Declare a mapping as vocabulary-only:
-
-```yaml
-  - connector: static
-    channel: countries
-    entity: countries
-    vocabulary: true    # never dispatched as an update target; used only for FK translation
-    fields:
-      - source: name
-        target: name
-      - source: iso_code
-        target: isoCode
-```
-
-**Status: requires design work (OSI-mapping §4 "Vocabulary targets").**
-
----
 
 ### 4.4 Field-level FK annotation (`entity`, `entity_connector`)
 
@@ -1362,24 +1318,6 @@ accurate per-field modification times even for connectors that report no timesta
 
 ---
 
-### 7.3 Concurrent edit detection
-
-When two sources both changed the same field since the last sync, both differ from the baseline
-captured at the previous forward pass. This signals a conflict that may warrant review rather than
-silent last-write-wins.
-
-The engine has the necessary data in shadow state to detect this pattern — both source values differ
-from the stored shadow. An explicit concurrent-edit event, routing to a conflict review workflow,
-is not yet designed.
-
-See [plans/lookup-merge-etag.md](../plans/lookup-merge-etag.md) for the related ETag / version
-threading design that addresses the write-side of concurrent edits.
-
-**Status: data is available; detection signal and workflow not yet designed
-(OSI-mapping §7 "Concurrent detection").**
-
----
-
 ## 8. Deletion Primitives
 
 All deletion primitives are opt-in at the channel level. Enable fan-out deletion via the
@@ -1515,48 +1453,9 @@ Tests: `packages/engine/src/delete-propagation.test.ts` (T-DEL-06, T-DEL-08).
 
 ---
 
-## 9. Inline Test Cases (Aspirational)
+## 9. OSI-Mapping Primitive Coverage
 
-Mapping files can embed test cases that run the full pipeline in a sandboxed environment with no
-external I/O:
-
-```yaml
-tests:
-  - name: "contact merge: crm wins email, erp wins phone"
-    input:
-      crm:
-        - id: "c1"
-          email: "alice@example.com"
-          phone: "+1-555-0100"
-      erp:
-        - id: "e42"
-          email: "alice@example.com"
-          phone: "+15550100"
-          normalize: phone
-    expected_output:
-      canonical:
-        - email: "alice@example.com"
-          phone: "+1-555-0100"    # crm wins (priority: 1)
-      crm:
-        updates: []               # no write-back (no change from source)
-      erp:
-        updates:
-          - id: "e42"
-            phone: "+1-555-0100"  # erp phone updated to canonical value
-```
-
-Each test block specifies input records per source, expected canonical resolution, and expected
-writes per target. The harness runs without mocks; the pipeline itself is the implementation under
-test.
-
-**Status: aspirational, requires inline testing infrastructure
-(OSI-mapping §11 "Inline test cases").**
-
----
-
-## 10. OSI-Mapping Primitive Coverage
-
-Full catalog of all OSI-mapping primitives against current OpenSync status.
+Full catalog of all OSI-mapping primitives against current OpenSync implementation status.
 
 | Primitive | OSI-mapping section | Status |
 |-----------|---------------------|--------|
@@ -1581,8 +1480,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | `references` (FK field) | §4 | ✅ `id_field` + plain field mapping (§4.1); UUID-translation approach deferred |
 | FK reverse resolution | §4 | ✅ `direction: forward_only` excludes injected PK from outbound dispatch |
 | Reference preservation after merge | §4 | ✅ identity_map preserves all connector IDs; association predicate remapping implemented |
-| `references_field` | §4 | ❌ no alternate-representation FK |
-| Vocabulary targets | §4 | ❌ no vocabulary entity concept |
+
 | Field groups (`group`) | §5 | ✅ implemented — `group` key on field entries; atomic resolution |
 | `filter` source filter | §5 | ✅ implemented — JS expression string, record or element binding by context |
 | `reverse_filter` | §5 | ✅ implemented — JS expression string, record or element binding by context |
@@ -1599,7 +1497,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Source-level noop (`_base` / shadow diff) | §7 | ✅ implemented — see [safety.md](safety.md) |
 | Target-centric noop (`written_state`) | §7 | ✅ implemented — `written_state` table + `_dispatchToTarget` guard |
 | `derive_timestamps` | §7 | ✅ per-field timestamp derivation always-on (§7.2); no config key needed |
-| Concurrent edit detection | §7 | 🔶 data is in shadow state; detection signal not wired |
+| Concurrent edit detection | §7 | 🔶 data available in shadow state; detection signal not wired |
 | Custom sort (array ordering) | §8 | ✅ implemented — `order_by` on mapping entries |
 | CRDT ordinal ordering | §8 | ✅ implemented — `order: true` (`_ordinal` injection) |
 | CRDT linked-list ordering | §8 | ✅ implemented — `order_linked_list: true` (`_prev`/`_next`) |
@@ -1610,8 +1508,7 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | `sources:` / `primary_key` metadata | §10 | ✅ `sources:` in field entries (lineage hint); entity schema from `getEntities()` |
 | Mapping-level priority / `last_modified` | §10 | 🔶 field-level works; mapping-level default not in config |
 | `passthrough` config | §10 | N/A — rejected; handled in connector layer (§1.6) |
-| Inline test cases | §11 | ❌ no inline testing infrastructure |
-| `_cluster_id` seed format | §11 | ❌ depends on inline testing |
+
 
 ### Summary
 
@@ -1626,22 +1523,13 @@ Full catalog of all OSI-mapping primitives against current OpenSync status.
 | Change detection & noop | 4 | 3 | 1 | 0 |
 | Ordering | 3 | 3 | 0 | 0 |
 | Routing & partitioning | 3 | 3 | 0 | 0 |
-| Mapping config & metadata | 4 | 2 | 1 | 1 |
-| Testing | 2 | 0 | 0 | 2 |
-| **Total** | **51** | **37** | **5** | **9** |
+| Mapping config & metadata | 3 | 2 | 1 | 0 |
+| **Total** | **46** | **37** | **4** | **5** |
 
-### Open gaps (as of 2026-04-08)
+### Remaining gaps
 
-Most OSI-mapping primitives are now implemented. Remaining gaps:
-
-- **External link tables, cluster member writeback, cluster field on source** (§2) — no third-party
-  linkage feed mechanism; not yet designed.
-- **Embedded objects** (`parent:` flat syntax, §3.1) — child entity from columns on the same row;
-  distinct from array expansion. Designed, not yet implemented.
-
-- **`references_field`** (§4) — alternate-representation FK (e.g. ISO code instead of UUID).
-- **Vocabulary targets** (§4) — read-only seeded lookup tables for FK translation.
-- **`defaultExpression`** (§5) — dynamic fallback; TypeScript API only.
-- **Enriched cross-entity expressions** (§5) — expressions that reference fields from a related
-  entity during resolution.
-- **Inline test cases** (§11).
+- **External link tables, cluster member writeback, cluster field on source** (§2) — no third-party linkage feed mechanism; not yet designed.
+- **Embedded objects** (`parent:` flat syntax, §3.1) — child entity from columns on the same row; distinct from array expansion. Designed, not yet implemented.
+- **`defaultExpression`** (§5) — dynamic fallback; TypeScript API only (no YAML string-expression form in config schema yet).
+- **Enriched cross-entity expressions** (§5) — expressions that reference fields from a related entity during resolution.
+- **Concurrent edit detection** (§7) — data is available in shadow state; the detection signal and review workflow are not yet wired.
